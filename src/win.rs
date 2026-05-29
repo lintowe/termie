@@ -18,63 +18,13 @@ pub fn suppress_child_error_dialogs() {
 #[cfg(not(windows))]
 pub fn suppress_child_error_dialogs() {}
 
-/// procedurally drawn app/taskbar icon (RGBA, premultiplied not required by winit):
-/// a dark rounded square with the instrument ">_" prompt mark in white
+/// app / taskbar / alt-tab icon as RGBA: the ">_<" mark, decoded from the 1024
+/// master (assets/icon.png) into a 128x128 raw RGBA blob at build time so we
+/// stay free of any image-decoding dependency at runtime
 pub fn app_icon() -> (Vec<u8>, u32, u32) {
-    const N: i32 = 64;
-    let mut px = vec![0u8; (N * N * 4) as usize];
-    let mut set = |x: i32, y: i32, c: [u8; 4]| {
-        if x < 0 || y < 0 || x >= N || y >= N {
-            return;
-        }
-        let i = ((y * N + x) * 4) as usize;
-        px[i] = c[0];
-        px[i + 1] = c[1];
-        px[i + 2] = c[2];
-        px[i + 3] = c[3];
-    };
-
-    // charcoal rounded-square background via a signed-distance test (matches
-    // the installer .ico: inset 0.06, corner radius 0.225, flat #1a1a1a)
-    let inset = N as f32 * 0.06;
-    let radius = N as f32 * 0.225;
-    let center = N as f32 / 2.0;
-    let half = N as f32 / 2.0 - inset;
-    for y in 0..N {
-        for x in 0..N {
-            let pxf = x as f32 + 0.5 - center;
-            let pyf = y as f32 + 0.5 - center;
-            let qx = pxf.abs() - (half - radius);
-            let qy = pyf.abs() - (half - radius);
-            let d = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
-            if d <= 0.0 {
-                set(x, y, [0x1a, 0x1a, 0x1a, 0xff]);
-            }
-        }
-    }
-
-    // optically centered ">_" prompt mark in near-white, drawn as thick strokes;
-    // coordinates mirror the installer .ico (normalized, baked-in optical nudge)
-    let ink = [0xf4u8, 0xf4, 0xf4, 0xff];
-    let mut line = |x0: i32, y0: i32, x1: i32, y1: i32, t: i32| {
-        let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
-        for s in 0..=steps {
-            let fx = x0 + (x1 - x0) * s / steps;
-            let fy = y0 + (y1 - y0) * s / steps;
-            for dy in -t..=t {
-                for dx in -t..=t {
-                    if dx * dx + dy * dy <= t * t {
-                        set(fx + dx, fy + dy, ink);
-                    }
-                }
-            }
-        }
-    };
-    line(19, 20, 32, 30, 3); // chevron upper
-    line(32, 30, 19, 40, 3); // chevron lower
-    line(34, 40, 46, 40, 3); // underscore
-
-    (px, N as u32, N as u32)
+    const N: u32 = 128;
+    let rgba = include_bytes!("../assets/icon_128.rgba");
+    (rgba.to_vec(), N, N)
 }
 
 #[cfg(windows)]

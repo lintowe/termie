@@ -38,48 +38,30 @@ if (Test-Path $assets) {
     Copy-Item $assets $destAssets -Recurse -Force
 }
 
-# 3. generate a multi-resolution shortcut icon (.ico) - best effort; shortcuts
-#    still work without it. each size is rendered natively so the shell never
-#    has to downscale a single 256px frame (which looked muddy at 16-32px)
+# 3. generate a multi-resolution shortcut icon (.ico) from assets/icon.png -
+#    best effort; shortcuts still work without it. each size is its own native
+#    frame (downscaled from the 1024 master with high-quality resampling) so the
+#    shell picks a real frame instead of downscaling a single one badly
 $icoPath = Join-Path $InstallDir 'termie.ico'
 try {
     Add-Type -AssemblyName System.Drawing
     $sizes = 16, 24, 32, 48, 64, 128, 256
+    $master = New-Object System.Drawing.Bitmap((Join-Path $repo 'assets\icon.png'))
     $pngs = @()
     foreach ($sz in $sizes) {
         $bmp = New-Object System.Drawing.Bitmap($sz, $sz, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
         $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $g.Clear([System.Drawing.Color]::Transparent)
-        $s = [double]$sz
-        # charcoal rounded square (flat instrument greyscale, no frame)
-        $inset = $s * 0.06; $rad = $s * 0.225; $d = 2 * $rad
-        $x0 = $inset; $y0 = $inset; $x1 = $s - $inset; $y1 = $s - $inset
-        $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-        $path.AddArc($x0, $y0, $d, $d, 180, 90)
-        $path.AddArc($x1 - $d, $y0, $d, $d, 270, 90)
-        $path.AddArc($x1 - $d, $y1 - $d, $d, $d, 0, 90)
-        $path.AddArc($x0, $y1 - $d, $d, $d, 90, 90)
-        $path.CloseFigure()
-        $g.FillPath((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 26, 26, 26))), $path)
-        # optically centered ">_" prompt mark in near-white; coords are
-        # normalized (0..1) with a small optical nudge so it reads centered
-        $nx = -0.014; $ny = -0.034
-        $pt = { param($fx, $fy) New-Object System.Drawing.PointF([single](($fx + $nx) * $s), [single](($fy + $ny) * $s)) }
-        $w = [Math]::Max(2.0, 0.085 * $s)
-        $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(255, 244, 244, 244)), ([single]$w)
-        $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
-        $chev = [System.Drawing.PointF[]]@( (& $pt 0.31 0.34), (& $pt 0.52 0.50), (& $pt 0.31 0.66) )
-        $g.DrawLines($pen, $chev)
-        $g.DrawLine($pen, (& $pt 0.55 0.66), (& $pt 0.735 0.66))
-        $pen.Dispose(); $g.Dispose()
+        $g.DrawImage($master, [System.Drawing.Rectangle]::new([int]0, [int]0, [int]$sz, [int]$sz))
+        $g.Dispose()
         $ms = New-Object System.IO.MemoryStream
         $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
         $pngs += , ($ms.ToArray())
         $bmp.Dispose()
     }
+    $master.Dispose()
     # pack the native PNG frames into a multi-image ICO container
     $fs = [System.IO.File]::Create($icoPath)
     $bw = New-Object System.IO.BinaryWriter($fs)
