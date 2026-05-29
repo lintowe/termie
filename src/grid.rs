@@ -48,6 +48,9 @@ pub struct Cursor {
     pub attrs: Attrs,
     pub visible: bool,
     pub shape: CursorShape,
+    /// true once an app set the shape via DECSCUSR; until then the renderer
+    /// uses the user's configured default shape
+    pub shape_set: bool,
     /// deferred wrap: cursor sits past the last column until the next print
     pub wrap_pending: bool,
 }
@@ -62,6 +65,7 @@ impl Default for Cursor {
             attrs: Attrs::default(),
             visible: true,
             shape: CursorShape::Block,
+            shape_set: false,
             wrap_pending: false,
         }
     }

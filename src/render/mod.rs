@@ -40,6 +40,38 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
     5 => Uint32,
 ];
 
+/// build a full mip chain from a 32bpp RGBA base via 2x2 box downsample;
+/// returns (dim, data) per level from `dim` down to 1. used so the icon badge
+/// stays crisp when scaled far down in the title bar
+fn build_mips(base: &[u8], dim: u32) -> Vec<(u32, Vec<u8>)> {
+    let mut levels: Vec<(u32, Vec<u8>)> = vec![(dim, base.to_vec())];
+    let mut d = dim;
+    while d > 1 {
+        let nd = d / 2;
+        let pd = d;
+        let prev = &levels.last().unwrap().1;
+        let mut out = vec![0u8; (nd * nd * 4) as usize];
+        for y in 0..nd {
+            for x in 0..nd {
+                for ch in 0..4 {
+                    let mut sum = 0u32;
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            let sx = x * 2 + dx;
+                            let sy = y * 2 + dy;
+                            sum += prev[((sy * pd + sx) * 4 + ch) as usize] as u32;
+                        }
+                    }
+                    out[((y * nd + x) * 4 + ch) as usize] = (sum / 4) as u8;
+                }
+            }
+        }
+        levels.push((nd, out));
+        d = nd;
+    }
+    levels
+}
+
 /// every hoverable/clickable chrome target
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hot {
@@ -59,6 +91,8 @@ pub enum Hot {
     FontCycle,
     PadDec,
     PadInc,
+    OpacityDec,
+    OpacityInc,
     CursorCycle,
     CursorBlink,
     ThemeSet(ThemeId),
@@ -209,6 +243,7 @@ struct SettingsGeom {
     // row label baselines (absolute, scroll-adjusted)
     font_y: f32,
     pad_y: f32,
+    opacity_y: f32,
     cursor_y: f32,
     blink_y: f32,
     theme_label_y: f32,
@@ -225,6 +260,8 @@ struct SettingsGeom {
     font_inc: Rect,
     pad_dec: Rect,
     pad_inc: Rect,
+    op_dec: Rect,
+    op_inc: Rect,
     cursor_btn: Rect,
     blink_btn: Rect,
     theme_chips: [Rect; 3],
@@ -278,6 +315,10 @@ pub struct Renderer {
     pub title_bar_h: f32,
     pub status_bar_h: f32,
     bg_alpha: f32,
+    /// whether the surface supports translucency, and the user's chosen window
+    /// opacity (0..1) applied as bg_alpha when it does
+    transparent: bool,
+    opacity: f32,
     start: Instant,
     hovered: Option<Hot>,
     settings_open: bool,
@@ -442,39 +483,45 @@ impl Renderer {
         });
 
         // the app icon (">_<" master, pre-decoded to 128x128 RGBA) lives in a
-        // small color texture so it can be drawn as a badge in the title bar
+        // small color texture so it can be drawn as a badge in the title bar.
+        // it carries a full mip chain so downscaling to ~20px stays crisp
+        // (a single level sampled 6x down looks fuzzy/aliased)
         const ICON_DIM: u32 = 128;
         let icon_rgba: &[u8] = include_bytes!("../../assets/icon_128.rgba");
+        let icon_mips = build_mips(icon_rgba, ICON_DIM);
         let icon_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("app-icon"),
             size: wgpu::Extent3d { width: ICON_DIM, height: ICON_DIM, depth_or_array_layers: 1 },
-            mip_level_count: 1,
+            mip_level_count: icon_mips.len() as u32,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &icon_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            icon_rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(ICON_DIM * 4),
-                rows_per_image: Some(ICON_DIM),
-            },
-            wgpu::Extent3d { width: ICON_DIM, height: ICON_DIM, depth_or_array_layers: 1 },
-        );
+        for (level, (dim, data)) in icon_mips.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &icon_texture,
+                    mip_level: level as u32,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(dim * 4),
+                    rows_per_image: Some(*dim),
+                },
+                wgpu::Extent3d { width: *dim, height: *dim, depth_or_array_layers: 1 },
+            );
+        }
         let icon_view = icon_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("icon-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -629,6 +676,8 @@ impl Renderer {
             title_bar_h,
             status_bar_h,
             bg_alpha: if transparent { 0.85 } else { 1.0 },
+            transparent,
+            opacity: 0.85,
             start: Instant::now(),
             hovered: None,
             settings_open: false,
@@ -810,6 +859,25 @@ impl Renderer {
 
     pub fn set_pane_pad_px(&mut self, v: f32) {
         self.pane_pad_px = v.clamp(0.0, 20.0);
+    }
+
+    /// window opacity as a percentage (50..100) for the settings UI + persistence
+    pub fn opacity_pct(&self) -> i32 {
+        (self.opacity * 100.0).round() as i32
+    }
+
+    /// set window opacity from a percentage; only takes visible effect when the
+    /// surface supports translucency (otherwise the window stays opaque)
+    pub fn set_opacity_pct(&mut self, pct: i32) {
+        self.opacity = (pct as f32 / 100.0).clamp(0.5, 1.0);
+        self.bg_alpha = if self.transparent { self.opacity } else { 1.0 };
+    }
+
+    /// nudge opacity by a percentage delta; returns true if it changed
+    pub fn nudge_opacity(&mut self, d: i32) -> bool {
+        let before = self.opacity_pct();
+        self.set_opacity_pct(before + d);
+        self.opacity_pct() != before
     }
 
     pub fn cursor_blink(&self) -> bool {
@@ -1018,6 +1086,8 @@ impl Renderer {
         y += row;
         let blink_l = y;
         y += row;
+        let opacity_l = y;
+        y += row;
         let theme_label_l = y;
         y += lh;
         let theme_chip_l = y;
@@ -1059,6 +1129,7 @@ impl Renderer {
         };
         let (font_dec, font_inc) = stepper(val_x, font_l);
         let (pad_dec, pad_inc) = stepper(val_x, pad_l);
+        let (op_dec, op_inc) = stepper(val_x, opacity_l);
         let (sb_dec, sb_inc) = stepper(val_x, scrollback_l);
         let fontfam_btn = (val_x, ay(fontfam_l), cluster, bh);
         let cursor_btn = (val_x, ay(cursor_l), cluster, bh);
@@ -1084,6 +1155,8 @@ impl Renderer {
             (Hot::FontCycle, fontfam_btn),
             (Hot::PadDec, pad_dec),
             (Hot::PadInc, pad_inc),
+            (Hot::OpacityDec, op_dec),
+            (Hot::OpacityInc, op_inc),
             (Hot::CursorCycle, cursor_btn),
             (Hot::CursorBlink, blink_btn),
             (Hot::ThemeSet(ThemeId::Instrument), theme_chips[0]),
@@ -1121,6 +1194,7 @@ impl Renderer {
             sec_about_y: ay(sec_about),
             font_y: ay(font_l),
             pad_y: ay(pad_l),
+            opacity_y: ay(opacity_l),
             cursor_y: ay(cursor_l),
             blink_y: ay(blink_l),
             theme_label_y: ay(theme_label_l),
@@ -1136,6 +1210,8 @@ impl Renderer {
             font_inc,
             pad_dec,
             pad_inc,
+            op_dec,
+            op_inc,
             cursor_btn,
             blink_btn,
             theme_chips,
@@ -1451,8 +1527,10 @@ impl Renderer {
                     } else {
                         0.4
                     };
+                    // an app's DECSCUSR shape overrides the configured default
+                    let shape = if cur.shape_set { cur.shape } else { style };
                     if alpha > 0.0 {
-                        match style {
+                        match shape {
                             CursorShape::Bar => {
                                 Self::push_rect(out, x, y, beam_w, cell_h, palette.cursor, alpha);
                             }
@@ -1869,6 +1947,7 @@ impl Renderer {
         let font_name = self.font_name();
         let font_size = self.content_pt as i32;
         let pad_px = self.pane_pad_px as i32;
+        let opacity_pct = self.opacity_pct();
         let p = self.settings_p;
         let cw_c = self.atlas.metrics(FontId::Chrome).cell_w;
         let g = self.settings_geom();
@@ -1913,6 +1992,8 @@ impl Renderer {
         self.cycle_btn(out, g.fontfam_btn, font_name, Hot::FontCycle, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.pad_y), "PADDING", MUTE, 1.0, wide);
         self.stepper(out, g.pad_dec, g.pad_inc, &format!("{pad_px}"), Hot::PadDec, Hot::PadInc, g.val_w, track);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.opacity_y), "OPACITY", MUTE, 1.0, wide);
+        self.stepper(out, g.op_dec, g.op_inc, &format!("{opacity_pct}%"), Hot::OpacityDec, Hot::OpacityInc, g.val_w, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.cursor_y), "CURSOR", MUTE, 1.0, wide);
         self.cycle_btn(out, g.cursor_btn, cur_name, Hot::CursorCycle, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.blink_y), "CURSOR BLINK", MUTE, 1.0, wide);

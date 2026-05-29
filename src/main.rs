@@ -541,6 +541,7 @@ struct Persisted {
     cursor_blink: bool,
     theme: color::ThemeId,
     font: Option<String>,
+    opacity: i32,
 }
 
 impl Default for Persisted {
@@ -558,6 +559,7 @@ impl Default for Persisted {
             cursor_blink: true,
             theme: color::ThemeId::Instrument,
             font: None,
+            opacity: 85,
         }
     }
 }
@@ -579,6 +581,8 @@ fn is_settings_hot(h: Hot) -> bool {
             | Hot::FontCycle
             | Hot::PadDec
             | Hot::PadInc
+            | Hot::OpacityDec
+            | Hot::OpacityInc
             | Hot::CursorCycle
             | Hot::CursorBlink
             | Hot::ThemeSet(_)
@@ -630,6 +634,11 @@ fn load_persisted() -> Persisted {
             "padding" => {
                 if let Ok(n) = v.parse() {
                     p.padding = n;
+                }
+            }
+            "opacity" => {
+                if let Ok(n) = v.parse() {
+                    p.opacity = n;
                 }
             }
             "cursor" => p.cursor = cursor_from_name(v),
@@ -781,6 +790,7 @@ impl App {
                 r.set_cursor_style(p.cursor);
                 r.set_cursor_blink(p.cursor_blink);
                 r.set_pane_pad_px(p.padding);
+                r.set_opacity_pct(p.opacity);
                 if let Some(f) = p.font.as_deref() {
                     r.set_font_by_name(f);
                 }
@@ -1510,6 +1520,13 @@ impl App {
                 }
                 self.redraw();
             }
+            Hot::OpacityDec | Hot::OpacityInc => {
+                let d = if hot == Hot::OpacityInc { 5 } else { -5 };
+                if let Some(r) = self.renderer.as_mut() {
+                    r.nudge_opacity(d);
+                }
+                self.redraw();
+            }
             Hot::CursorCycle => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.cycle_cursor();
@@ -1580,6 +1597,7 @@ impl App {
         let _ = writeln!(s, "backend={}", self.config.backend.label());
         let _ = writeln!(s, "font_size={}", r.content_pt() as i32);
         let _ = writeln!(s, "padding={}", r.pane_pad_px() as i32);
+        let _ = writeln!(s, "opacity={}", r.opacity_pct());
         let _ = writeln!(s, "cursor={}", r.cursor_style_name());
         let _ = writeln!(s, "cursor_blink={}", r.cursor_blink());
         let _ = writeln!(s, "theme={}", r.theme().name());

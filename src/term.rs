@@ -362,13 +362,18 @@ impl Perform for Terminal {
                 }
             }
             'q' => {
-                // DECSCUSR cursor shape
+                // DECSCUSR cursor shape; 0 reverts to the user's configured shape
                 let n = param_at(params, 0, 1);
-                self.grid.cursor.shape = match n {
-                    3 | 4 => CursorShape::Underline,
-                    5 | 6 => CursorShape::Bar,
-                    _ => CursorShape::Block,
-                };
+                if n == 0 {
+                    self.grid.cursor.shape_set = false;
+                } else {
+                    self.grid.cursor.shape = match n {
+                        3 | 4 => CursorShape::Underline,
+                        5 | 6 => CursorShape::Bar,
+                        _ => CursorShape::Block,
+                    };
+                    self.grid.cursor.shape_set = true;
+                }
             }
             's' => self.grid.save_cursor(),
             'u' => self.grid.restore_cursor(),
