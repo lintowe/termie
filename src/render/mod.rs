@@ -46,7 +46,9 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
 fn build_mips(base: &[u8], dim: u32) -> Vec<(u32, Vec<u8>)> {
     let mut levels: Vec<(u32, Vec<u8>)> = vec![(dim, base.to_vec())];
     let mut d = dim;
-    while d > 1 {
+    // 3 levels (128→64→32) is enough mip coverage for the ~20px title-bar badge;
+    // smaller levels never get sampled, so building them is wasted startup work
+    while d > 32 {
         let nd = d / 2;
         let pd = d;
         let prev = &levels.last().unwrap().1;
@@ -112,8 +114,9 @@ pub struct PaneView<'a> {
     pub focused: bool,
     /// active selection range (row, col) within this pane's viewport
     pub sel: Option<((usize, usize), (usize, usize))>,
-    /// briefly true after the shell rang the bell — draw an accent border
-    pub flash: bool,
+    /// accent-border opacity after the shell rang the bell: 1 then eased to 0
+    /// (0 = no flash) so the bell border fades out instead of snapping off
+    pub flash: f32,
     /// hovered url to underline: (viewport row, col_start, col_end exclusive)
     pub link: Option<(usize, usize, usize)>,
 }
@@ -304,6 +307,9 @@ pub struct Renderer {
 
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
+    /// persistent CPU instance buffer reused across frames (cleared, not
+    /// reallocated, each build) to avoid per-frame heap churn on the hot path
+    scratch: Vec<Instance>,
 
     atlas: GlyphAtlas,
     palette: Palette,
@@ -663,6 +669,7 @@ impl Renderer {
             _icon_texture: icon_texture,
             instance_buffer,
             instance_capacity,
+            scratch: Vec::new(),
             atlas,
             palette: Palette::from_theme(ThemeId::Instrument),
             theme: ThemeId::Instrument,
@@ -722,6 +729,18 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.recompute_grid_size();
+        // grow the GPU instance buffer eagerly here (off the render hot path) so
+        // the first paint after a resize never reallocates mid-frame
+        let needed = (self.cols * self.rows) as u64 + 1024;
+        if needed > self.instance_capacity {
+            self.instance_capacity = needed.next_power_of_two();
+            self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("instances"),
+                size: self.instance_capacity * std::mem::size_of::<Instance>() as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
         (self.cols, self.rows)
     }
 
@@ -1292,26 +1311,37 @@ impl Renderer {
         if !self.atlas.dirty {
             return;
         }
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.atlas_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &self.atlas.data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(self.atlas.dim),
-                rows_per_image: Some(self.atlas.dim),
-            },
-            wgpu::Extent3d {
-                width: self.atlas.dim,
-                height: self.atlas.dim,
-                depth_or_array_layers: 1,
-            },
-        );
+        let dim = self.atlas.dim;
+        // upload only the row band that changed; a freshly repacked atlas has no
+        // band and uploads in full. width is the full atlas width (R8, so
+        // bytes_per_row == dim, already 256-aligned for dim=1024)
+        let (y0, y1) = self.atlas.dirty_y.unwrap_or((0, dim));
+        let (y0, y1) = (y0.min(dim), y1.min(dim));
+        if y1 > y0 {
+            let off = (y0 * dim) as usize;
+            let end = (y1 * dim) as usize;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.atlas_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &self.atlas.data[off..end],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(dim),
+                    rows_per_image: Some(y1 - y0),
+                },
+                wgpu::Extent3d {
+                    width: dim,
+                    height: y1 - y0,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         self.atlas.dirty = false;
+        self.atlas.dirty_y = None;
     }
 
     fn push_rect(out: &mut Vec<Instance>, x: f32, y: f32, w: f32, h: f32, rgb: Rgb, alpha: f32) {
@@ -1356,11 +1386,16 @@ impl Renderer {
 
     /// 1px outline around a rect
     fn stroke_rect(out: &mut Vec<Instance>, r: (f32, f32, f32, f32), t: f32, c: Rgb) {
+        Self::stroke_rect_a(out, r, t, c, 1.0);
+    }
+
+    /// outline around a rect at a given opacity
+    fn stroke_rect_a(out: &mut Vec<Instance>, r: (f32, f32, f32, f32), t: f32, c: Rgb, a: f32) {
         let (x, y, w, h) = r;
-        Self::push_rect(out, x, y, w, t, c, 1.0);
-        Self::push_rect(out, x, y + h - t, w, t, c, 1.0);
-        Self::push_rect(out, x, y, t, h, c, 1.0);
-        Self::push_rect(out, x + w - t, y, t, h, c, 1.0);
+        Self::push_rect(out, x, y, w, t, c, a);
+        Self::push_rect(out, x, y + h - t, w, t, c, a);
+        Self::push_rect(out, x, y, t, h, c, a);
+        Self::push_rect(out, x + w - t, y, t, h, c, a);
     }
 
     /// procedurally render a box-drawing / block char filling the exact cell so
@@ -1677,7 +1712,11 @@ impl Renderer {
         let blink_on = !self.cursor_blink || (self.start.elapsed().as_millis() % 1060) < 600;
         let beam_w = (2.0 * self.scale).round().max(1.0);
 
-        let mut out: Vec<Instance> = Vec::with_capacity(self.cols * self.rows + 256);
+        // reuse the persistent scratch buffer: keeps its capacity across frames
+        // so a steady-state paint does no heap allocation for the instance list
+        let mut out: Vec<Instance> = std::mem::take(&mut self.scratch);
+        out.clear();
+        out.reserve(self.cols * self.rows + 256);
 
         // subtle per-theme vertical wash behind everything (bg → bg2); cached and
         // rebuilt only when the size or theme changes (not every frame)
@@ -1732,10 +1771,11 @@ impl Renderer {
                 }
             }
         }
-        // bell flash: accent border on any pane that just rang (even single pane)
+        // bell flash: accent border on any pane that just rang (even single
+        // pane), its opacity eased out by the caller so it fades rather than snaps
         for (pv, info) in panes.iter().zip(&pane_info) {
-            if pv.flash {
-                Self::stroke_rect(&mut out, info.3, hair * 2.0, PAPER);
+            if pv.flash > 0.0 {
+                Self::stroke_rect_a(&mut out, info.3, hair * 2.0, PAPER, pv.flash);
             }
         }
 
@@ -2261,8 +2301,13 @@ impl Renderer {
         );
         for (i, c) in sw.into_iter().enumerate() {
             let sx = bx + inset + i as f32 * (cell_w + gap);
-            // each swatch is a small top→bottom gradient for a bit of depth
-            Self::push_vgradient(out, sx, sy, cell_w, sh, c, dim(c), 6);
+            // each swatch is a small vertical gradient for depth; on hover the
+            // (inactive) chip flips it bottom→top so the strip reads as lifted
+            if hov && !active {
+                Self::push_vgradient(out, sx, sy, cell_w, sh, dim(c), c, 6);
+            } else {
+                Self::push_vgradient(out, sx, sy, cell_w, sh, c, dim(c), 6);
+            }
         }
     }
 
@@ -2431,6 +2476,8 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        // hand the buffer back so its capacity is reused next frame
+        self.scratch = instances;
         Ok(())
     }
 }

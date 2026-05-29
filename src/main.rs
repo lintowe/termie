@@ -874,7 +874,8 @@ impl App {
         };
         let mut any = false;
         each_pane(root, &mut |p| {
-            if p.flash.map(|t| t.elapsed().as_millis() < 180).unwrap_or(false) {
+            // keep ticking through the fade-out tail (see PaneView.flash easing)
+            if p.flash.map(|t| t.elapsed().as_millis() < 220).unwrap_or(false) {
                 any = true;
             }
         });
@@ -1104,7 +1105,14 @@ impl App {
                                     rect: *rect,
                                     focused: *id == tab.focused,
                                     sel: selection.filter(|s| s.pane == *id).map(|s| (s.start, s.end)),
-                                    flash: p.flash.map(|t| t.elapsed().as_millis() < 180).unwrap_or(false),
+                                    flash: p
+                                        .flash
+                                        .map(|t| {
+                                            // hold full for 120ms, then ease to 0 by 220ms
+                                            let e = t.elapsed().as_millis() as f32;
+                                            (1.0 - (e - 120.0) / 100.0).clamp(0.0, 1.0)
+                                        })
+                                        .unwrap_or(0.0),
                                     link: if *id == tab.focused { *link } else { None },
                                 })
                             })

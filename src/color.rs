@@ -11,17 +11,32 @@ impl Rgb {
     }
 
     pub fn to_linear_f32(self) -> [f32; 4] {
-        // srgb -> linear for a linear render target
-        fn c(v: u8) -> f32 {
-            let s = v as f32 / 255.0;
-            if s <= 0.04045 {
+        // srgb -> linear via a precomputed 256-entry table: this runs per cell
+        // per color every paint, so the per-channel powf was the hot path's main
+        // transcendental cost. the table is bit-identical to the closed form
+        let t = srgb_linear_lut();
+        [t[self.r as usize], t[self.g as usize], t[self.b as usize], 1.0]
+    }
+}
+
+/// srgb -> linear for all 256 channel values, built once on first use
+fn srgb_linear_lut() -> &'static [f32; 256] {
+    use std::sync::OnceLock;
+    static LUT: OnceLock<[f32; 256]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0.0f32; 256];
+        let mut i = 0;
+        while i < 256 {
+            let s = i as f32 / 255.0;
+            t[i] = if s <= 0.04045 {
                 s / 12.92
             } else {
                 ((s + 0.055) / 1.055).powf(2.4)
-            }
+            };
+            i += 1;
         }
-        [c(self.r), c(self.g), c(self.b), 1.0]
-    }
+        t
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

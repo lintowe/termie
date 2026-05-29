@@ -54,6 +54,9 @@ pub struct GlyphAtlas {
     pub data: Vec<u8>,
     pub dim: u32,
     pub dirty: bool,
+    /// row band [y0, y1) needing GPU re-upload; None while dirty means upload
+    /// the whole texture (used after a full repack/reconfigure)
+    pub dirty_y: Option<(u32, u32)>,
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
@@ -115,6 +118,7 @@ impl GlyphAtlas {
             data: vec![0u8; 0],
             dim: 1024,
             dirty: true,
+            dirty_y: None,
             cursor_x: PAD,
             cursor_y: PAD,
             shelf_h: 0,
@@ -164,7 +168,22 @@ impl GlyphAtlas {
         self.cache.retain(|_, v| v.is_some());
         if self.cache.len() != before {
             self.dirty = true;
+            self.dirty_y = None;
         }
+    }
+
+    /// extend the pending upload band to cover rows [y0, y1); a full upload
+    /// already queued (dirty with no band) is left as a full upload
+    fn mark_dirty_rows(&mut self, y0: u32, y1: u32) {
+        if self.dirty && self.dirty_y.is_none() {
+            // full upload already pending — keep it
+        } else {
+            self.dirty_y = Some(match self.dirty_y {
+                Some((a, b)) => (a.min(y0), b.max(y1)),
+                None => (y0, y1),
+            });
+        }
+        self.dirty = true;
     }
 
     /// re-measure for new sizes/family and reset the glyph cache, REUSING the
@@ -205,6 +224,7 @@ impl GlyphAtlas {
             *b = 0;
         }
         self.dirty = true;
+        self.dirty_y = None;
     }
 
     fn measure(&mut self, mut m: FontMetrics) -> FontMetrics {
@@ -282,7 +302,7 @@ impl GlyphAtlas {
             let src = (row * w) as usize;
             self.data[dst..dst + w as usize].copy_from_slice(&pixels[src..src + w as usize]);
         }
-        self.dirty = true;
+        self.mark_dirty_rows(y, y + h);
 
         let d = self.dim as f32;
         Some(AtlasGlyph {
