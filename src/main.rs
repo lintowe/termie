@@ -707,6 +707,9 @@ struct App {
     /// can't spin a busy respawn loop with a permanently empty window
     warm_fails: usize,
     warm_backoff_until: Option<Instant>,
+    /// set when a paint is deferred because a pane is mid synchronized-output
+    /// (DEC 2026) frame; the safety deadline forces a paint if the frame stalls
+    sync_redraw_pending: Option<Instant>,
 }
 
 impl App {
@@ -751,6 +754,7 @@ impl App {
             system_fonts_pending: true,
             warm_fails: 0,
             warm_backoff_until: None,
+            sync_redraw_pending: None,
             settings_open: false,
             settings_anim: None,
             pending_warm: 0,
@@ -1937,10 +1941,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Pty { id, bytes } => {
                 let mut responses: Option<Vec<u8>> = None;
                 let mut found = false;
+                let mut in_sync = false;
                 for tab in &mut self.tabs {
                     if let Some(root) = tab.root.as_mut() {
                         if let Some(p) = find_pane_mut(root, id) {
                             p.parser.advance(&mut p.term, &bytes);
+                            in_sync = p.term.sync_output;
                             if !p.term.responses.is_empty() {
                                 responses = Some(std::mem::take(&mut p.term.responses));
                             }
@@ -1991,7 +1997,16 @@ impl ApplicationHandler<UserEvent> for App {
                     self.sync_tabs();
                 }
                 if self.layout_cache.iter().any(|(pid, _)| *pid == id) {
-                    self.redraw();
+                    if in_sync {
+                        // mid synchronized-output frame: defer the paint so the
+                        // screen isn't shown torn (cursor stranded mid-redraw)
+                        if self.sync_redraw_pending.is_none() {
+                            self.sync_redraw_pending = Some(Instant::now());
+                        }
+                    } else {
+                        self.sync_redraw_pending = None;
+                        self.redraw();
+                    }
                 }
             }
             UserEvent::Exited { id } => {
@@ -2490,6 +2505,17 @@ impl ApplicationHandler<UserEvent> for App {
         if self.tabs.is_empty() && self.warm_fails > 0 && self.warm_fails < MAX_WARM_FAILS {
             if let Some(t) = self.warm_backoff_until {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(t));
+                return;
+            }
+        }
+        // a synchronized-output frame is open: hold the paint until it closes,
+        // but force one if it stalls (~100ms) so a crash mid-frame can't freeze us
+        if let Some(t) = self.sync_redraw_pending {
+            if t.elapsed() >= Duration::from_millis(100) {
+                self.sync_redraw_pending = None;
+                self.redraw();
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(t + Duration::from_millis(100)));
                 return;
             }
         }

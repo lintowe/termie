@@ -42,6 +42,9 @@ pub struct Terminal {
     /// bytes the terminal wants to send back to the pty (DSR/DA replies)
     pub responses: Vec<u8>,
     pub dirty: bool,
+    /// DEC 2026 synchronized output: while true an app is mid-frame, so the
+    /// renderer holds off painting until the frame ends (no torn/flickering UI)
+    pub sync_output: bool,
 }
 
 impl Terminal {
@@ -61,6 +64,7 @@ impl Terminal {
             bell: false,
             responses: Vec::new(),
             dirty: true,
+            sync_output: false,
         }
     }
 
@@ -122,6 +126,7 @@ impl Terminal {
             match mode {
                 1 => self.app_cursor_keys = enable,
                 25 => self.grid.cursor.visible = enable,
+                2026 => self.sync_output = enable,
                 1000 => self.mouse_proto = if enable { MouseProto::Normal } else { MouseProto::Off },
                 1002 => self.mouse_proto = if enable { MouseProto::Button } else { MouseProto::Off },
                 1003 => self.mouse_proto = if enable { MouseProto::Any } else { MouseProto::Off },

@@ -1456,6 +1456,29 @@ impl Renderer {
             }
             '\u{2594}' => Self::push_rect(out, x, y, w, h / 8.0, col, 1.0), // upper eighth
             '\u{2595}' => Self::push_rect(out, x + w * 7.0 / 8.0, y, w / 8.0, h, col, 1.0), // right eighth
+            // quadrant blocks (▖▗▘▙▚▛▜▝▞▟): 2x2 sub-cell fills, so low-res block
+            // art (e.g. mosaic logos) tiles solid instead of leaving gaps
+            '\u{2596}'..='\u{259F}' => {
+                let (hw, hh) = (w / 2.0, h / 2.0);
+                // bits: 1=upper-left 2=upper-right 4=lower-left 8=lower-right
+                let mask: u8 = match c {
+                    '\u{2598}' => 0b0001,
+                    '\u{259D}' => 0b0010,
+                    '\u{2596}' => 0b0100,
+                    '\u{2597}' => 0b1000,
+                    '\u{2599}' => 0b1101,
+                    '\u{259A}' => 0b1001,
+                    '\u{259B}' => 0b0111,
+                    '\u{259C}' => 0b1011,
+                    '\u{259E}' => 0b0110,
+                    '\u{259F}' => 0b1110,
+                    _ => 0,
+                };
+                if mask & 1 != 0 { Self::push_rect(out, x, y, hw, hh, col, 1.0); }
+                if mask & 2 != 0 { Self::push_rect(out, x + hw, y, hw, hh, col, 1.0); }
+                if mask & 4 != 0 { Self::push_rect(out, x, y + hh, hw, hh, col, 1.0); }
+                if mask & 8 != 0 { Self::push_rect(out, x + hw, y + hh, hw, hh, col, 1.0); }
+            }
             _ => return false,
         }
         true
