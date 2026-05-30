@@ -999,19 +999,12 @@ impl App {
             .map(|p| p.term.grid.selected_text(sel.start, sel.end))
             .unwrap_or_default();
         if !text.is_empty() {
-            if let Ok(mut cb) = arboard::Clipboard::new() {
-                let _ = cb.set_text(text);
-            }
+            win::clipboard_set(&text);
         }
     }
 
     fn paste(&mut self) {
-        let Ok(mut cb) = arboard::Clipboard::new() else {
-            return;
-        };
-        let Ok(text) = cb.get_text() else {
-            return;
-        };
+        let text = win::clipboard_get();
         if text.is_empty() {
             return;
         }
