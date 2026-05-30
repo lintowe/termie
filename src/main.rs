@@ -2499,6 +2499,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.relayout_all();
                     self.redraw();
                 }
+                // warm the printable-ASCII glyph cache once the final content
+                // font is settled, so shell output paints from a warm atlas
+                // instead of shaping ~95 glyphs on the first content frames
+                if let Some(r) = self.renderer.as_mut() {
+                    r.prewarm_glyphs();
+                }
             }
         }
         // first shell hasn't spawned yet after a failure: wake at the backoff

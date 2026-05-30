@@ -253,6 +253,21 @@ impl GlyphAtlas {
         g
     }
 
+    /// rasterize printable ASCII for the content font (regular weight) up front
+    /// so the first frames of shell output hit a warm cache instead of shaping
+    /// ~95 glyphs through cosmic-text on the paint path. meant to run deferred,
+    /// after the window is shown — cheap and idempotent (get() caches)
+    pub fn prewarm_ascii(&mut self) {
+        for c in ' '..='~' {
+            let _ = self.get(GlyphKey {
+                font: FontId::Content,
+                c,
+                bold: false,
+                italic: false,
+            });
+        }
+    }
+
     fn rasterize(&mut self, key: GlyphKey) -> Option<AtlasGlyph> {
         if key.c == ' ' || key.c.is_control() {
             return None;

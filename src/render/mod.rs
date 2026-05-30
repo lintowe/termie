@@ -937,6 +937,13 @@ impl Renderer {
         fonts
     }
 
+    /// rasterize printable ASCII into the atlas ahead of first content paint
+    /// (deferred off the critical startup path) so shell output renders from a
+    /// warm cache. the changed atlas rows upload on the next render
+    pub fn prewarm_glyphs(&mut self) {
+        self.atlas.prewarm_ascii();
+    }
+
     /// scan system fonts once (deferred off startup) so the font picker can
     /// offer them and so non-Latin glyphs have fallbacks. cheap no-op after the
     /// first call. returns true if it scanned now
