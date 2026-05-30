@@ -144,9 +144,7 @@ struct MarketRow {
     /// installed + currently enabled
     installed: bool,
     enabled: bool,
-    /// present in the remote catalog (installable / updatable)
-    available: bool,
-    /// the catalog download url, if available
+    /// the catalog download url, if present in the remote catalog
     url: Option<String>,
 }
 
@@ -1726,7 +1724,6 @@ impl App {
                     permissions: d.manifest.permissions.clone(),
                     installed: true,
                     enabled: d.enabled,
-                    available: cat.is_some(),
                     url: cat.map(|e| e.url.clone()),
                 }
             })
@@ -1741,7 +1738,6 @@ impl App {
                     permissions: e.permissions.clone(),
                     installed: false,
                     enabled: false,
-                    available: true,
                     url: Some(e.url.clone()),
                 });
             }
@@ -2344,6 +2340,10 @@ impl App {
     fn handle_shortcut(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         if event.state != ElementState::Pressed {
             return false;
+        }
+        // the plugins marketplace overlay captures keys while open
+        if self.market.is_some() && self.market_input(&event.logical_key) {
+            return true;
         }
         // command palette captures every key while open
         if self.palette.is_some() {
