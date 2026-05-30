@@ -128,6 +128,15 @@ pub struct PaletteView {
     pub selected: usize,
 }
 
+/// find-in-scrollback overlay display state. `matches` are on-screen rects
+/// (viewport row, col, len, is_current) for the focused pane
+pub struct FindView {
+    pub query: String,
+    pub count: usize,
+    pub current: usize,
+    pub matches: Vec<(usize, usize, usize, bool)>,
+}
+
 /// one row in the plugins marketplace overlay
 pub struct MarketRowView {
     /// left text: plugin name + version
@@ -377,6 +386,7 @@ pub struct Renderer {
     status_clock: String,
     status_sessions: usize,
     palette_view: Option<PaletteView>,
+    find_view: Option<FindView>,
     market_view: Option<MarketView>,
     /// plugin-declared Tier-1 widgets shown in the right-side dock; when
     /// non-empty the dock carves width off content_rect so panes reflow
@@ -735,6 +745,7 @@ impl Renderer {
             status_clock: String::new(),
             status_sessions: 1,
             palette_view: None,
+            find_view: None,
             market_view: None,
             dock: Vec::new(),
             cols: 0,
@@ -1058,6 +1069,10 @@ impl Renderer {
 
     pub fn set_market(&mut self, m: Option<MarketView>) {
         self.market_view = m;
+    }
+
+    pub fn set_find(&mut self, f: Option<FindView>) {
+        self.find_view = f;
     }
 
     fn chrome_track(&self) -> f32 {
@@ -1597,6 +1612,7 @@ impl Renderer {
         style: CursorShape,
         sel: Option<((usize, usize), (usize, usize))>,
         link: Option<(usize, usize, usize)>,
+        matches: &[(usize, usize, usize, bool)],
     ) {
         let sel_col = palette.sel;
         let m = atlas.metrics(FontId::Content);
@@ -1607,6 +1623,18 @@ impl Renderer {
         let show_cursor = cur.visible && !scrolled;
         let (crow, ccol) = (cur.row, cur.col.min(grid.cols.saturating_sub(1)));
         let sel_norm = sel.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+
+        // find-match highlights drawn beneath glyphs; current match is brighter
+        for &(mr, mc, mlen, cur) in matches {
+            let (col, alpha) = if cur { (palette.cursor, 0.75) } else { (palette.sel, 0.45) };
+            for k in 0..mlen {
+                let cc = mc + k;
+                if cc >= grid.cols {
+                    break;
+                }
+                Self::push_rect(out, ox + cc as f32 * cell_w, oy + mr as f32 * cell_h, cell_w, cell_h, col, alpha);
+            }
+        }
 
         for r in 0..grid.rows {
             let line = grid.line_at(r);
@@ -1823,7 +1851,13 @@ impl Renderer {
         {
             let palette = &self.palette;
             let atlas = &mut self.atlas;
+            let find_view = self.find_view.as_ref();
             for (pv, info) in panes.iter().zip(&pane_info) {
+                let fmatches: &[(usize, usize, usize, bool)] = if pv.focused {
+                    find_view.map(|f| f.matches.as_slice()).unwrap_or(&[])
+                } else {
+                    &[]
+                };
                 Self::draw_grid(
                     atlas,
                     palette,
@@ -1837,6 +1871,7 @@ impl Renderer {
                     cursor_style,
                     pv.sel,
                     pv.link,
+                    fmatches,
                 );
             }
         }
@@ -2045,6 +2080,9 @@ impl Renderer {
         }
         if self.market_view.is_some() {
             self.build_market(&mut out, track);
+        }
+        if self.find_view.is_some() {
+            self.build_find(&mut out, track);
         }
         // the settings panel draws last so its scrollable body is the final
         // instance range (clipped via scissor in render); build_settings sets
@@ -2349,6 +2387,53 @@ impl Renderer {
             let ty = (ry + (row_h - chrome_h) / 2.0).round();
             let col = if idx == selected { PAPER } else { TEXT_2 };
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, ty, lbl, col, 1.0, track);
+        }
+    }
+
+    /// find-in-scrollback overlay: a single search box pinned below the title
+    /// bar showing the query and match position; matches are highlighted in the
+    /// grid by draw_grid, this only draws the input box
+    #[allow(non_snake_case)]
+    fn build_find(&mut self, out: &mut Vec<Instance>, track: f32) {
+        let Some(fv) = self.find_view.as_ref() else {
+            return;
+        };
+        let query = fv.query.clone();
+        let count = fv.count;
+        let current = fv.current;
+        let INK_0 = self.palette.ink0;
+        let INK_1 = self.palette.ink1;
+        let RULE_2 = self.palette.rule2;
+        let TEXT_2 = self.palette.text2;
+        let MUTE = self.palette.mute;
+        let s = self.scale;
+        let hair = s.max(1.0);
+        let w = self.config.width as f32;
+        let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
+        let bw = (560.0 * s).min(w - 80.0 * s);
+        let bx = ((w - bw) / 2.0).round();
+        let by = (self.title_bar_h + 12.0 * s).round();
+        let row_h = chrome_h + 14.0 * s;
+        let bh = row_h + 8.0 * s;
+        Self::push_rect(out, bx - 2.0 * s, by + 5.0 * s, bw + 4.0 * s, bh, INK_0, 0.5);
+        Self::push_rect(out, bx, by, bw, bh, INK_1, 1.0);
+        Self::stroke_rect(out, (bx, by, bw, bh), hair, RULE_2);
+        let pad = 16.0 * s;
+        let iy = (by + 4.0 * s + (row_h - chrome_h) / 2.0).round();
+        let prompt = format!("\u{f002}  {}", query);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, iy, &prompt, TEXT_2, 1.0, track);
+        let info = if count == 0 {
+            if query.is_empty() {
+                String::new()
+            } else {
+                "no matches".to_string()
+            }
+        } else {
+            format!("{}/{}", current + 1, count)
+        };
+        if !info.is_empty() {
+            let iw = self.text_w(FontId::Chrome, &info, track);
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + bw - pad - iw, iy, &info, MUTE, 1.0, track);
         }
     }
 

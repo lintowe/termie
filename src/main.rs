@@ -133,6 +133,14 @@ struct PaletteState {
     selected: usize,
 }
 
+/// find-in-scrollback overlay state for the focused pane; matches are
+/// (global_line_index, col) into that pane's grid
+struct FindState {
+    query: String,
+    matches: Vec<(usize, usize)>,
+    current: usize,
+}
+
 /// one row in the plugins marketplace overlay: either an installed plugin or a
 /// remote catalog entry not yet installed
 #[derive(Clone)]
@@ -855,6 +863,7 @@ struct App {
     click_seq: u32,
     git: Option<String>,
     palette: Option<PaletteState>,
+    find: Option<FindState>,
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
     cursor: PhysicalPosition<f64>,
@@ -934,6 +943,7 @@ impl App {
             click_seq: 0,
             git: None,
             palette: None,
+            find: None,
             market: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             pressed: None,
@@ -1349,6 +1359,99 @@ impl App {
             .map(|(id, _)| *id)
     }
 
+    fn focused_grid(&self) -> Option<&crate::grid::Grid> {
+        let id = self.active_focused_id()?;
+        self.pool.iter().find(|p| p.id == id).map(|p| &p.term.grid)
+    }
+
+    fn focused_grid_mut(&mut self) -> Option<&mut crate::grid::Grid> {
+        let id = self.active_focused_id()?;
+        self.pool
+            .iter_mut()
+            .find(|p| p.id == id)
+            .map(|p| &mut p.term.grid)
+    }
+
+    fn open_find(&mut self) {
+        self.find = Some(FindState {
+            query: String::new(),
+            matches: Vec::new(),
+            current: 0,
+        });
+        self.redraw();
+    }
+
+    /// re-run the search for the current query against the focused pane and jump
+    /// to the first match
+    fn find_recompute(&mut self) {
+        let query = match &self.find {
+            Some(f) => f.query.clone(),
+            None => return,
+        };
+        let matches = self
+            .focused_grid()
+            .map(|g| g.search(&query))
+            .unwrap_or_default();
+        if let Some(f) = self.find.as_mut() {
+            f.matches = matches;
+            f.current = 0;
+        }
+        self.find_scroll_to_current();
+        self.redraw();
+    }
+
+    fn find_scroll_to_current(&mut self) {
+        let target = self
+            .find
+            .as_ref()
+            .and_then(|f| f.matches.get(f.current).copied());
+        if let Some((g, _)) = target {
+            if let Some(grid) = self.focused_grid_mut() {
+                grid.scroll_to_global(g);
+            }
+        }
+    }
+
+    fn find_step(&mut self, forward: bool) {
+        let len = self.find.as_ref().map(|f| f.matches.len()).unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        if let Some(f) = self.find.as_mut() {
+            f.current = if forward {
+                (f.current + 1) % len
+            } else {
+                (f.current + len - 1) % len
+            };
+        }
+        self.find_scroll_to_current();
+        self.redraw();
+    }
+
+    /// build the renderer's find overlay view: the query/count for the box plus
+    /// on-screen match rects (viewport row, col, len, is_current) for the focused
+    /// pane
+    fn build_find_view(&self) -> Option<render::FindView> {
+        let f = self.find.as_ref()?;
+        let qlen = f.query.chars().count();
+        let mut vps = Vec::new();
+        if qlen > 0 {
+            if let Some(g) = self.focused_grid() {
+                for (i, &(gl, col)) in f.matches.iter().enumerate() {
+                    if let Some(vr) = g.global_to_viewport(gl) {
+                        vps.push((vr, col, qlen, i == f.current));
+                    }
+                }
+            }
+        }
+        Some(render::FindView {
+            query: f.query.clone(),
+            count: f.matches.len(),
+            current: f.current,
+            matches: vps,
+        })
+    }
+
     fn copy_selection(&mut self) {
         let Some(sel) = self.selection else {
             return;
@@ -1404,6 +1507,7 @@ impl App {
                 .collect(),
             selected: p.selected,
         });
+        let find_view = self.build_find_view();
         let market_view = self.market.as_ref().map(|m| render::MarketView {
             rows: m
                 .rows
@@ -1437,6 +1541,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_status(git, clock, sessions);
             r.set_palette(palette_view);
+            r.set_find(find_view);
             r.set_market(market_view);
             r.set_settings(render::SettingsView {
                 scrollback: config.scrollback,
@@ -2348,6 +2453,40 @@ impl App {
         if self.market.is_some() && self.market_input(&event.logical_key) {
             return true;
         }
+        // find-in-scrollback overlay captures every key while open
+        if self.find.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.find = None;
+                    self.redraw();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.find_step(!self.mods.shift_key());
+                }
+                Key::Named(NamedKey::ArrowDown) => self.find_step(true),
+                Key::Named(NamedKey::ArrowUp) => self.find_step(false),
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(f) = self.find.as_mut() {
+                        f.query.pop();
+                    }
+                    self.find_recompute();
+                }
+                _ => {
+                    if !self.mods.control_key() {
+                        if let Some(t) = event.text.as_ref() {
+                            if !t.is_empty() && !t.chars().any(|c| c.is_control()) {
+                                let t = t.to_string();
+                                if let Some(f) = self.find.as_mut() {
+                                    f.query.push_str(&t);
+                                }
+                                self.find_recompute();
+                            }
+                        }
+                    }
+                }
+            }
+            return true;
+        }
         // command palette captures every key while open
         if self.palette.is_some() {
             match &event.logical_key {
@@ -2502,6 +2641,11 @@ impl App {
                     r.set_broadcast(self.broadcast);
                 }
                 self.redraw();
+                true
+            }
+            // find in scrollback
+            Key::Character(c) if shift && c.eq_ignore_ascii_case("f") => {
+                self.open_find();
                 true
             }
             Key::Character(c) if !shift && c.eq_ignore_ascii_case("p") => {

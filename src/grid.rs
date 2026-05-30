@@ -259,6 +259,60 @@ impl Grid {
         hi
     }
 
+    /// total logical lines: scrollback history plus the live screen
+    pub fn total_lines(&self) -> usize {
+        self.scrollback.len() + self.lines.len()
+    }
+
+    /// case-insensitive substring search across scrollback and the live screen;
+    /// returns (global_line_index, col) for each match start, in top-to-bottom
+    /// order. global indices span scrollback (0..len) then live lines
+    pub fn search(&self, needle: &str) -> Vec<(usize, usize)> {
+        let needle: Vec<char> = needle.chars().map(|c| c.to_ascii_lowercase()).collect();
+        let mut out = Vec::new();
+        if needle.is_empty() {
+            return out;
+        }
+        let scan = |cells: &Line, gi: usize, out: &mut Vec<(usize, usize)>| {
+            if cells.len() < needle.len() {
+                return;
+            }
+            let lc: Vec<char> = cells.iter().map(|c| c.c.to_ascii_lowercase()).collect();
+            for start in 0..=(lc.len() - needle.len()) {
+                if lc[start..start + needle.len()] == needle[..] {
+                    out.push((gi, start));
+                }
+            }
+        };
+        for (i, line) in self.scrollback.iter().enumerate() {
+            scan(line, i, &mut out);
+        }
+        let base = self.scrollback.len();
+        for (i, line) in self.lines.iter().enumerate() {
+            scan(line, base + i, &mut out);
+        }
+        out
+    }
+
+    /// viewport row currently displaying global line `g`, or None if off-screen
+    pub fn global_to_viewport(&self, g: usize) -> Option<usize> {
+        let total = self.total_lines();
+        let start = total.saturating_sub(self.rows + self.view_offset);
+        if g >= start && g < start + self.rows {
+            Some(g - start)
+        } else {
+            None
+        }
+    }
+
+    /// scroll so global line `g` sits roughly centered in the viewport
+    pub fn scroll_to_global(&mut self, g: usize) {
+        let total = self.total_lines();
+        let target_start = g.saturating_sub(self.rows / 2);
+        let vo = total.saturating_sub(self.rows).saturating_sub(target_start);
+        self.view_offset = vo.min(self.scrollback.len());
+    }
+
     pub fn scroll_view(&mut self, delta: isize) {
         let max = self.scrollback.len();
         let cur = self.view_offset as isize;
