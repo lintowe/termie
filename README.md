@@ -52,6 +52,10 @@ cargo run --release
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste |
 | `Ctrl+Shift+W` | close pane |
 | `Ctrl+Shift+B` | broadcast input to all panes |
+| `Ctrl+Shift+F` | find in scrollback |
+| `Ctrl+Up` / `Ctrl+Down` | jump to previous / next shell prompt |
+
+In find, `Enter` / `Shift+Enter` step through matches and `Esc` closes. Double-click selects a word, triple-click selects the line. Prompt jumping uses OSC 133 marks, emitted by most shells once their shell-integration hook is enabled (starship, or the zsh/bash/fish integration scripts, or PowerShell's `PSReadLine`); without it the prompt keys pass through to the running program.
 
 Open the command palette (`Ctrl+Shift+P`) for settings, theme cycling, pane mode, and the plugins marketplace.
 
