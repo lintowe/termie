@@ -128,6 +128,23 @@ pub struct PaletteView {
     pub selected: usize,
 }
 
+/// one row in the plugins marketplace overlay
+pub struct MarketRowView {
+    /// left text: plugin name + version
+    pub label: String,
+    /// right tag: "on" / "off" / "install" / "update"
+    pub tag: String,
+    /// dim secondary line (permissions etc.), empty for none
+    pub sub: String,
+}
+
+/// plugins marketplace overlay display state
+pub struct MarketView {
+    pub rows: Vec<MarketRowView>,
+    pub selected: usize,
+    pub status: String,
+}
+
 /// a plugin-declared Tier-1 widget to draw in the side dock. render-side mirror
 /// of the plugin protocol's Widget, so the renderer doesn't depend on the
 /// plugin module
@@ -360,6 +377,7 @@ pub struct Renderer {
     status_clock: String,
     status_sessions: usize,
     palette_view: Option<PaletteView>,
+    market_view: Option<MarketView>,
     /// plugin-declared Tier-1 widgets shown in the right-side dock; when
     /// non-empty the dock carves width off content_rect so panes reflow
     dock: Vec<DockWidget>,
@@ -717,6 +735,7 @@ impl Renderer {
             status_clock: String::new(),
             status_sessions: 1,
             palette_view: None,
+            market_view: None,
             dock: Vec::new(),
             cols: 0,
             rows: 0,
@@ -1035,6 +1054,10 @@ impl Renderer {
 
     pub fn set_palette(&mut self, p: Option<PaletteView>) {
         self.palette_view = p;
+    }
+
+    pub fn set_market(&mut self, m: Option<MarketView>) {
+        self.market_view = m;
     }
 
     fn chrome_track(&self) -> f32 {
@@ -1999,6 +2022,9 @@ impl Renderer {
         if self.palette_view.is_some() {
             self.build_palette(&mut out, track);
         }
+        if self.market_view.is_some() {
+            self.build_market(&mut out, track);
+        }
         // the settings panel draws last so its scrollable body is the final
         // instance range (clipped via scissor in render); build_settings sets
         // panel_clip when it draws the body
@@ -2303,6 +2329,97 @@ impl Renderer {
             let col = if idx == selected { PAPER } else { TEXT_2 };
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, ty, lbl, col, 1.0, track);
         }
+    }
+
+    /// plugins marketplace overlay: a centered panel listing installed + catalog
+    /// plugins, each as name+version with a state tag and a permissions subline,
+    /// plus a status footer. modeled on the command palette
+    fn build_market(&mut self, out: &mut Vec<Instance>, track: f32) {
+        let Some(mv) = self.market_view.as_ref() else {
+            return;
+        };
+        // snapshot so the atlas can be borrowed mutably while drawing
+        let rows: Vec<(String, String, String)> = mv
+            .rows
+            .iter()
+            .map(|r| (r.label.clone(), r.tag.clone(), r.sub.clone()))
+            .collect();
+        let selected = mv.selected;
+        let status = mv.status.clone();
+
+        let INK_0 = self.palette.ink0;
+        let INK_1 = self.palette.ink1;
+        let INK_3 = self.palette.ink3;
+        let RULE_2 = self.palette.rule2;
+        let MUTE = self.palette.mute;
+        let TEXT_2 = self.palette.text2;
+        let PAPER = self.palette.paper;
+        let s = self.scale;
+        let hair = s.max(1.0);
+        let w = self.config.width as f32;
+        let h = self.config.height as f32;
+        let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
+
+        // dim the rest of the screen
+        Self::push_rect(out, 0.0, 0.0, w, h, INK_0, 0.55);
+
+        let bw = (620.0 * s).min(w - 80.0 * s);
+        let bx = ((w - bw) / 2.0).round();
+        let by = (self.title_bar_h + 56.0 * s).round();
+        let head_h = chrome_h + 16.0 * s;
+        let row_h = chrome_h * 2.0 + 16.0 * s; // two text lines per row
+        // cap the visible rows so the panel never runs off-screen
+        let max_visible = (((h - by - head_h - 40.0 * s) / row_h).floor().max(1.0)) as usize;
+        let visible = rows.len().min(max_visible).max(1);
+        // scroll so the selected row stays in view
+        let first = if selected >= visible { selected + 1 - visible } else { 0 };
+        let bh = head_h + row_h * visible as f32 + head_h; // header + rows + footer
+
+        // shadow + body + border + top accent
+        Self::push_rect(out, bx - 2.0 * s, by + 5.0 * s, bw + 4.0 * s, bh, INK_0, 0.5);
+        Self::push_rect(out, bx, by, bw, bh, INK_1, 1.0);
+        Self::stroke_rect(out, (bx, by, bw, bh), hair, RULE_2);
+        Self::push_rect(out, bx, by, bw, hair * 2.0, PAPER, 1.0);
+
+        let pad = 16.0 * s;
+        // header
+        let hy = (by + (head_h - chrome_h) / 2.0).round();
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, hy, "\u{f487} PLUGINS", PAPER, 1.0, track);
+        Self::push_rect(out, bx, by + head_h, bw, hair, RULE_2, 1.0);
+
+        if rows.is_empty() {
+            let ty = (by + head_h + (row_h - chrome_h) / 2.0).round();
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, ty, "no plugins installed", MUTE, 1.0, track);
+        }
+
+        for vi in 0..visible {
+            let idx = first + vi;
+            let Some((label, tag, sub)) = rows.get(idx) else {
+                break;
+            };
+            let ry = by + head_h + row_h * vi as f32;
+            if idx == selected {
+                Self::push_rect(out, bx, ry, bw, row_h, INK_3, 1.0);
+                Self::push_rect(out, bx, ry, 2.0 * s, row_h, PAPER, 1.0);
+            }
+            let lc = if idx == selected { PAPER } else { TEXT_2 };
+            // line 1: label (left) + tag (right)
+            let ly = (ry + 6.0 * s).round();
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, ly, label, lc, 1.0, track);
+            let tag_w = self.text_w(FontId::Chrome, tag, track);
+            let tag_col = if tag == "on" { PAPER } else { MUTE };
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + bw - pad - tag_w, ly, tag, tag_col, 1.0, track);
+            // line 2: permissions subline (dim)
+            if !sub.is_empty() {
+                let sy = (ry + 6.0 * s + chrome_h + 2.0 * s).round();
+                let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, sy, sub, MUTE, 1.0, track);
+            }
+        }
+
+        // footer status line
+        let fy = (by + head_h + row_h * visible as f32 + (head_h - chrome_h) / 2.0).round();
+        Self::push_rect(out, bx, by + head_h + row_h * visible as f32, bw, hair, RULE_2, 1.0);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, fy, &status, MUTE, 1.0, track);
     }
 
     /// `LABEL ─────────` section header with a rule filling the remaining width

@@ -9,6 +9,7 @@
 
 mod json;
 mod manifest;
+pub mod market;
 mod proto;
 
 pub use json::Json;

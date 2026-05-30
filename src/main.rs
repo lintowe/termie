@@ -44,6 +44,8 @@ enum UserEvent {
     PaneReady(Option<Box<Pane>>),
     /// a plugin process emitted a protocol message (id = plugin index)
     Plugin { id: usize, msg: plugin::PluginMsg },
+    /// the marketplace catalog finished fetching on a worker thread
+    Market(Vec<plugin::market::Entry>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,6 +101,7 @@ enum PaletteAction {
     Settings,
     PaneMode,
     Theme,
+    Plugins,
     Quit,
 }
 
@@ -112,6 +115,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
     ("cycle theme", PaletteAction::Theme),
+    ("plugins", PaletteAction::Plugins),
     ("quit", PaletteAction::Quit),
 ];
 
@@ -127,6 +131,31 @@ fn palette_filter(query: &str) -> Vec<(&'static str, PaletteAction)> {
 struct PaletteState {
     query: String,
     selected: usize,
+}
+
+/// one row in the plugins marketplace overlay: either an installed plugin or a
+/// remote catalog entry not yet installed
+#[derive(Clone)]
+struct MarketRow {
+    id: String,
+    name: String,
+    version: String,
+    permissions: Vec<String>,
+    /// installed + currently enabled
+    installed: bool,
+    enabled: bool,
+    /// present in the remote catalog (installable / updatable)
+    available: bool,
+    /// the catalog download url, if available
+    url: Option<String>,
+}
+
+/// the plugins marketplace overlay state
+struct MarketState {
+    rows: Vec<MarketRow>,
+    selected: usize,
+    /// transient status line (last action result / hint)
+    status: String,
 }
 
 // ---- tree helpers (free functions, by-value where ownership moves) ----
@@ -826,6 +855,8 @@ struct App {
     last_click: Option<(Instant, f64, f64)>,
     git: Option<String>,
     palette: Option<PaletteState>,
+    /// the plugins marketplace overlay, when open
+    market: Option<MarketState>,
     cursor: PhysicalPosition<f64>,
     pressed: Option<Hot>,
     last_title: String,
@@ -902,6 +933,7 @@ impl App {
             last_click: None,
             git: None,
             palette: None,
+            market: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             pressed: None,
             last_title: String::new(),
@@ -1369,12 +1401,40 @@ impl App {
                 .collect(),
             selected: p.selected,
         });
+        let market_view = self.market.as_ref().map(|m| render::MarketView {
+            rows: m
+                .rows
+                .iter()
+                .map(|r| {
+                    let tag = if !r.installed {
+                        "install".to_string()
+                    } else if r.enabled {
+                        "on".to_string()
+                    } else {
+                        "off".to_string()
+                    };
+                    let sub = if r.permissions.is_empty() {
+                        format!("v{}", r.version)
+                    } else {
+                        format!("v{} · perms: {}", r.version, r.permissions.join(", "))
+                    };
+                    render::MarketRowView {
+                        label: r.name.clone(),
+                        tag,
+                        sub,
+                    }
+                })
+                .collect(),
+            selected: m.selected,
+            status: m.status.clone(),
+        });
         let config = self.config;
         let settings_open = self.settings_open;
         let settings_p = self.settings_p();
         if let Some(r) = self.renderer.as_mut() {
             r.set_status(git, clock, sessions);
             r.set_palette(palette_view);
+            r.set_market(market_view);
             r.set_settings(render::SettingsView {
                 scrollback: config.scrollback,
                 copy_on_select: config.copy_on_select,
@@ -1628,6 +1688,7 @@ impl App {
                 self.close_tab(i, event_loop);
             }
             PaletteAction::Settings => self.open_settings(),
+            PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
             PaletteAction::Theme => {
                 if let Some(r) = self.renderer.as_mut() {
@@ -1646,6 +1707,230 @@ impl App {
                 event_loop.exit();
             }
         }
+    }
+
+    /// merge the installed plugins (from disk) with the remote catalog into the
+    /// overlay's row list. installed rows come first, then catalog-only entries
+    fn market_rows(&self, catalog: &[plugin::market::Entry]) -> Vec<MarketRow> {
+        let installed = discover_plugins();
+        let mut rows: Vec<MarketRow> = installed
+            .iter()
+            .map(|d| {
+                let cat = catalog.iter().find(|e| e.id == d.manifest.id);
+                MarketRow {
+                    id: d.manifest.id.clone(),
+                    name: d.manifest.name.clone(),
+                    version: d.manifest.version.clone(),
+                    permissions: d.manifest.permissions.clone(),
+                    installed: true,
+                    enabled: d.enabled,
+                    available: cat.is_some(),
+                    url: cat.map(|e| e.url.clone()),
+                }
+            })
+            .collect();
+        // catalog entries that aren't installed yet
+        for e in catalog {
+            if !rows.iter().any(|r| r.id == e.id) {
+                rows.push(MarketRow {
+                    id: e.id.clone(),
+                    name: e.name.clone(),
+                    version: e.version.clone(),
+                    permissions: e.permissions.clone(),
+                    installed: false,
+                    enabled: false,
+                    available: true,
+                    url: Some(e.url.clone()),
+                });
+            }
+        }
+        rows
+    }
+
+    /// open the plugins marketplace overlay. lists installed plugins immediately;
+    /// the remote catalog is fetched on a worker so the UI never blocks on the
+    /// network, arriving later via UserEvent::Market
+    fn open_market(&mut self) {
+        let rows = self.market_rows(&[]);
+        self.market = Some(MarketState {
+            rows,
+            selected: 0,
+            status: "fetching catalog… (enter: toggle/install · r: remove · esc: close)".to_string(),
+        });
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let catalog = plugin::market::fetch_index();
+            let _ = proxy.send_event(UserEvent::Market(catalog));
+        });
+        self.redraw();
+    }
+
+    /// persist one plugin's enabled state to plugins.cfg, preserving others
+    fn set_plugin_enabled(&mut self, id: &str, enabled: bool) {
+        let mut states = load_plugin_states();
+        let st = states.entry(id.to_string()).or_default();
+        st.enabled = enabled;
+        save_plugin_states(&states);
+    }
+
+    /// restart the plugin host so enable/disable/install take effect. cheap:
+    /// kills the running plugin processes and re-discovers from disk
+    fn restart_plugins(&mut self) {
+        self.kill_plugins();
+        self.plugin_widgets.clear();
+        self.rebuild_dock();
+        self.start_plugins();
+    }
+
+    /// act on the selected marketplace row (Enter): toggle enable for an
+    /// installed plugin, or install an available one
+    fn market_activate(&mut self) {
+        let Some(m) = self.market.as_ref() else {
+            return;
+        };
+        let Some(row) = m.rows.get(m.selected).cloned() else {
+            return;
+        };
+        if row.installed {
+            let now = !row.enabled;
+            self.set_plugin_enabled(&row.id, now);
+            self.restart_plugins();
+            if let Some(m) = self.market.as_mut() {
+                if let Some(r) = m.rows.get_mut(m.selected) {
+                    r.enabled = now;
+                }
+                m.status = format!("{} {}", row.id, if now { "enabled" } else { "disabled" });
+            }
+            self.redraw();
+        } else if let Some(url) = row.url.clone() {
+            // install from the catalog (download happens synchronously here; the
+            // catalog is small and installs are user-initiated, rare events)
+            if let Some(m) = self.market.as_mut() {
+                m.status = format!("installing {}…", row.id);
+            }
+            self.redraw();
+            let entry = plugin::market::Entry {
+                id: row.id.clone(),
+                name: row.name.clone(),
+                version: row.version.clone(),
+                description: String::new(),
+                url,
+                permissions: row.permissions.clone(),
+            };
+            let Some(pdir) = plugins_dir() else {
+                return;
+            };
+            let tmp = std::env::temp_dir();
+            match plugin::market::install(&entry, &pdir, &tmp) {
+                Ok(_) => {
+                    self.set_plugin_enabled(&row.id, true);
+                    self.restart_plugins();
+                    self.refresh_market_rows();
+                    if let Some(m) = self.market.as_mut() {
+                        m.status = format!("installed {}", row.id);
+                    }
+                }
+                Err(e) => {
+                    if let Some(m) = self.market.as_mut() {
+                        m.status = format!("install failed: {e}");
+                    }
+                }
+            }
+            self.redraw();
+        }
+    }
+
+    /// remove the selected installed plugin (does nothing for catalog-only rows)
+    fn market_remove(&mut self) {
+        let Some(m) = self.market.as_ref() else {
+            return;
+        };
+        let Some(row) = m.rows.get(m.selected).cloned() else {
+            return;
+        };
+        if !row.installed {
+            return;
+        }
+        let Some(pdir) = plugins_dir() else {
+            return;
+        };
+        // disable first so a running process is stopped, then delete on disk
+        self.set_plugin_enabled(&row.id, false);
+        self.restart_plugins();
+        match plugin::market::remove(&row.id, &pdir) {
+            Ok(()) => {
+                self.refresh_market_rows();
+                if let Some(m) = self.market.as_mut() {
+                    m.status = format!("removed {}", row.id);
+                }
+            }
+            Err(e) => {
+                if let Some(m) = self.market.as_mut() {
+                    m.status = format!("remove failed: {e}");
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// rebuild the overlay rows from disk, keeping the remote catalog info that
+    /// rows already carry (so installed-from-catalog rows keep their url)
+    fn refresh_market_rows(&mut self) {
+        let catalog: Vec<plugin::market::Entry> = self
+            .market
+            .as_ref()
+            .map(|m| {
+                m.rows
+                    .iter()
+                    .filter_map(|r| {
+                        r.url.as_ref().map(|u| plugin::market::Entry {
+                            id: r.id.clone(),
+                            name: r.name.clone(),
+                            version: r.version.clone(),
+                            description: String::new(),
+                            url: u.clone(),
+                            permissions: r.permissions.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let rows = self.market_rows(&catalog);
+        if let Some(m) = self.market.as_mut() {
+            m.selected = m.selected.min(rows.len().saturating_sub(1));
+            m.rows = rows;
+        }
+    }
+
+    /// route a key to the open marketplace overlay; returns true if it consumed it
+    fn market_input(&mut self, key: &Key) -> bool {
+        if self.market.is_none() {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.market = None;
+                self.redraw();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(m) = self.market.as_mut() {
+                    let n = m.rows.len().max(1);
+                    m.selected = (m.selected + 1) % n;
+                }
+                self.redraw();
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(m) = self.market.as_mut() {
+                    let n = m.rows.len().max(1);
+                    m.selected = (m.selected + n - 1) % n;
+                }
+                self.redraw();
+            }
+            Key::Named(NamedKey::Enter) => self.market_activate(),
+            Key::Character(s) if s.as_str() == "r" => self.market_remove(),
+            _ => return false,
+        }
+        true
     }
 
     fn close_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
@@ -2417,6 +2702,22 @@ impl ApplicationHandler<UserEvent> for App {
                     log::info!("plugin {id} exited");
                 }
             },
+            UserEvent::Market(catalog) => {
+                // the remote catalog arrived: merge it into the open overlay
+                if self.market.is_some() {
+                    let rows = self.market_rows(&catalog);
+                    if let Some(m) = self.market.as_mut() {
+                        m.selected = m.selected.min(rows.len().saturating_sub(1));
+                        m.rows = rows;
+                        m.status = if catalog.is_empty() {
+                            "catalog unavailable (offline?) · showing installed only".to_string()
+                        } else {
+                            "enter: toggle/install · r: remove · esc: close".to_string()
+                        };
+                    }
+                    self.redraw();
+                }
+            }
         }
     }
 
