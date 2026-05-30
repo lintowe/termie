@@ -233,12 +233,12 @@ impl GlyphAtlas {
         self.buffer
             .set_text("Mgjpq0", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
-        for run in self.buffer.layout_runs() {
+        // metrics come from the first (only) layout run
+        if let Some(run) = self.buffer.layout_runs().next() {
             m.ascent = run.line_y;
             if let Some(g) = run.glyphs.first() {
                 m.cell_w = g.w;
             }
-            break;
         }
         m.cell_h = m.line_height;
         m
@@ -288,16 +288,12 @@ impl GlyphAtlas {
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
-        let cache_key = {
-            let mut found = None;
-            for run in self.buffer.layout_runs() {
-                if let Some(g) = run.glyphs.first() {
-                    found = Some(g.physical((0.0, 0.0), 1.0).cache_key);
-                }
-                break;
-            }
-            found?
-        };
+        // the glyph's cache key comes from the first run's first glyph
+        let cache_key = self
+            .buffer
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first().map(|g| g.physical((0.0, 0.0), 1.0).cache_key))?;
 
         let (w, h, left, top, pixels) = {
             let image = self.swash.get_image(&mut self.font_system, cache_key);
