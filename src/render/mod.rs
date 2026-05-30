@@ -1966,28 +1966,46 @@ impl Renderer {
             self.build_settings(&mut out, track);
         }
 
-        // startup reveal: a quick ease-out fade up from the background over the
-        // first ~180ms (purely visual — input is live underneath the whole time).
-        // skip if the settings panel is open so the fade rect can't land in the
-        // scissored panel range (it would otherwise be clipped to the panel)
-        let fade = self.startup_fade();
-        if fade > 0.0 && self.panel_clip.is_none() {
-            Self::push_rect(&mut out, 0.0, 0.0, w, h, INK_0, fade);
+        // startup reveal: a dim overlay eases up from the background while a
+        // PAPER accent line sweeps left→right under the title bar, like an
+        // instrument powering on. purely visual — input is live underneath the
+        // whole time. skipped while the settings panel is open so these rects
+        // can't land in the scissored panel range (they'd be clipped to it)
+        if self.panel_clip.is_none() {
+            let t = self.startup_t();
+            if t < 1.0 {
+                let fade = self.startup_fade();
+                if fade > 0.0 {
+                    Self::push_rect(&mut out, 0.0, 0.0, w, h, INK_0, fade);
+                }
+                // ease-out sweep across the title-bar rule: a faint trail behind
+                // a bright leading segment, the whole thing fading as it lands
+                let ease = 1.0 - (1.0 - t) * (1.0 - t);
+                let y = self.title_bar_h - hair * 2.0;
+                let head = w * ease;
+                Self::push_rect(&mut out, 0.0, y, head, hair * 2.0, PAPER, 0.12 * (1.0 - t));
+                let seg = (96.0 * self.scale).min(head);
+                Self::push_rect(&mut out, head - seg, y, seg, hair * 2.0, PAPER, 0.85 * (1.0 - t * t));
+            }
         }
 
         out
     }
 
-    const STARTUP_FADE: f32 = 0.18;
+    const STARTUP_FADE: f32 = 0.22;
 
-    /// overlay alpha for the startup reveal: 1 -> 0 over STARTUP_FADE seconds
-    /// (ease-out), then 0 forever
+    /// normalized startup-reveal progress: 0 → 1 over STARTUP_FADE, then ≥ 1
+    fn startup_t(&self) -> f32 {
+        (self.start.elapsed().as_secs_f32() / Self::STARTUP_FADE).min(1.0)
+    }
+
+    /// dim-overlay alpha for the reveal: 1 → 0 over STARTUP_FADE (ease-out)
     fn startup_fade(&self) -> f32 {
-        let t = self.start.elapsed().as_secs_f32();
-        if t >= Self::STARTUP_FADE {
+        let t = self.startup_t();
+        if t >= 1.0 {
             return 0.0;
         }
-        let e = 1.0 - t / Self::STARTUP_FADE;
+        let e = 1.0 - t;
         e * e
     }
 
@@ -2030,7 +2048,9 @@ impl Renderer {
         Self::push_rect(out, 0.0, g.panel_top, self.config.width as f32, g.panel_h, INK_0, 0.32 * p);
         Self::push_rect(out, g.panel_x, g.panel_top, g.panel_w, g.panel_h, INK_1, 1.0);
         Self::push_rect(out, g.panel_x, g.panel_top, hair, g.panel_h, RULE, 1.0); // left edge
-        Self::push_rect(out, g.panel_x, g.panel_top, g.panel_w, hair * 2.0, PAPER, 1.0); // top accent
+        // top accent runs the full window width so it reads as a continuous rail
+        // the drawer slides in along; alpha tracks the slide so it fades in too
+        Self::push_rect(out, 0.0, g.panel_top, self.config.width as f32, hair * 2.0, PAPER, p);
 
         let _ = Self::draw_text(
             &mut self.atlas, out, FontId::Chrome, cx, g.head_y, "\u{25B8} SETTINGS", PAPER, 1.0, wide,
