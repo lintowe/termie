@@ -845,4 +845,40 @@ mod tests {
         assert_eq!(g.selected_text((1, 0), (1, 1)), "bb");
         assert_eq!(g.selected_text((0, 0), (1, 1)), "aa\nbb");
     }
+
+    #[test]
+    fn prompt_marks_prune_and_jump() {
+        let mut g = Grid::new(3, 8);
+        g.set_scrollback_limit(100);
+        // five prompts separated by several line feeds so they land in distinct
+        // scroll positions
+        for _ in 0..5 {
+            g.mark_prompt();
+            for _ in 0..5 {
+                g.linefeed();
+            }
+        }
+        // generous limit: nothing evicted, every mark within the retained window
+        assert_eq!(g.prompts.len(), 5);
+        assert!(g.prompts.iter().all(|&p| p >= g.prompt_base()));
+        // from the live bottom, jumping back reaches a prompt and scrolls up
+        assert!(g.jump_prompt(false));
+        let v1 = g.view_offset;
+        assert!(v1 > 0);
+        // jumping back again reaches an earlier prompt, further up
+        assert!(g.jump_prompt(false));
+        let v2 = g.view_offset;
+        assert!(v2 > v1);
+        // forward brings the view back down toward the live screen
+        assert!(g.jump_prompt(true));
+        assert!(g.view_offset < v2);
+    }
+
+    #[test]
+    fn jump_prompt_without_marks_is_noop() {
+        let mut g = Grid::new(3, 8);
+        assert!(!g.jump_prompt(false));
+        assert!(!g.jump_prompt(true));
+        assert_eq!(g.view_offset, 0);
+    }
 }
