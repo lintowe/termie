@@ -2334,6 +2334,7 @@ impl Renderer {
     /// plugins marketplace overlay: a centered panel listing installed + catalog
     /// plugins, each as name+version with a state tag and a permissions subline,
     /// plus a status footer. modeled on the command palette
+    #[allow(non_snake_case)]
     fn build_market(&mut self, out: &mut Vec<Instance>, track: f32) {
         let Some(mv) = self.market_view.as_ref() else {
             return;
