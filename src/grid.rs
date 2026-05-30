@@ -207,6 +207,58 @@ impl Grid {
         Some((col_start, col_end, url))
     }
 
+    /// inclusive (col_start, col_end) of the word under viewport cell (row, col)
+    /// for double-click select; expands over identifier/path-like runs, or over a
+    /// whitespace run if the cell is blank. rows are viewport-relative
+    pub fn word_bounds(&self, row: usize, col: usize) -> (usize, usize) {
+        if row >= self.rows {
+            return (col, col);
+        }
+        let line = self.line_at(row);
+        let n = line.len();
+        if n == 0 {
+            return (0, 0);
+        }
+        let col = col.min(n - 1);
+        // word-class: alnum plus the punctuation that usually reads as part of a
+        // path, url, flag, or identifier in terminal output
+        let class = |c: char| -> u8 {
+            if c == ' ' || c == '\0' {
+                0
+            } else if c.is_alphanumeric() || "_./-:~@+".contains(c) {
+                1
+            } else {
+                2
+            }
+        };
+        let here = class(line[col].c);
+        let mut lo = col;
+        while lo > 0 && class(line[lo - 1].c) == here {
+            lo -= 1;
+        }
+        let mut hi = col;
+        while hi + 1 < n && class(line[hi + 1].c) == here {
+            hi += 1;
+        }
+        (lo, hi)
+    }
+
+    /// inclusive last column of content on viewport `row` (trailing blanks
+    /// trimmed) for triple-click line select; 0 if the row is empty
+    pub fn line_last_col(&self, row: usize) -> usize {
+        if row >= self.rows {
+            return 0;
+        }
+        let line = self.line_at(row);
+        let mut hi = 0;
+        for (i, cell) in line.iter().enumerate() {
+            if cell.c != ' ' && cell.c != '\0' {
+                hi = i;
+            }
+        }
+        hi
+    }
+
     pub fn scroll_view(&mut self, delta: isize) {
         let max = self.scrollback.len();
         let cur = self.view_offset as isize;

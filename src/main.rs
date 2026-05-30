@@ -851,6 +851,8 @@ struct App {
     selection: Option<Sel>,
     selecting: bool,
     last_click: Option<(Instant, f64, f64)>,
+    // consecutive click count in a pane's content for word/line select cycling
+    click_seq: u32,
     git: Option<String>,
     palette: Option<PaletteState>,
     /// the plugins marketplace overlay, when open
@@ -3028,11 +3030,53 @@ impl ApplicationHandler<UserEvent> for App {
                         Some(Hit::Button(h)) => self.pressed = Some(h),
                         Some(Hit::Content) => {
                             self.focus_pane_at(cx, cy);
-                            if let (Some(pane), Some(cell)) =
+                            let now = Instant::now();
+                            // cycle 1=char, 2=word, 3=line on rapid clicks in place
+                            let consecutive = self
+                                .last_click
+                                .map(|(t, lx, ly)| {
+                                    now.duration_since(t) < Duration::from_millis(400)
+                                        && (lx - cx as f64).abs() < 6.0
+                                        && (ly - cy as f64).abs() < 6.0
+                                })
+                                .unwrap_or(false);
+                            self.click_seq = if consecutive { (self.click_seq % 3) + 1 } else { 1 };
+                            self.last_click = Some((now, cx as f64, cy as f64));
+                            if let (Some(pane), Some((row, col))) =
                                 (self.active_focused_id(), self.cell_in_focused(cx, cy))
                             {
-                                self.selection = Some(Sel { pane, start: cell, end: cell });
-                                self.selecting = true;
+                                let grid = self.pool.iter().find(|p| p.id == pane).map(|p| &p.grid);
+                                match self.click_seq {
+                                    2 => {
+                                        let (lo, hi) = grid
+                                            .map(|g| g.word_bounds(row, col))
+                                            .unwrap_or((col, col));
+                                        self.selection =
+                                            Some(Sel { pane, start: (row, lo), end: (row, hi) });
+                                        self.selecting = false;
+                                        if self.config.copy_on_select {
+                                            self.copy_selection();
+                                        }
+                                    }
+                                    3 => {
+                                        let hi =
+                                            grid.map(|g| g.line_last_col(row)).unwrap_or(0);
+                                        self.selection =
+                                            Some(Sel { pane, start: (row, 0), end: (row, hi) });
+                                        self.selecting = false;
+                                        if self.config.copy_on_select {
+                                            self.copy_selection();
+                                        }
+                                    }
+                                    _ => {
+                                        self.selection = Some(Sel {
+                                            pane,
+                                            start: (row, col),
+                                            end: (row, col),
+                                        });
+                                        self.selecting = true;
+                                    }
+                                }
                             }
                             self.redraw();
                         }
