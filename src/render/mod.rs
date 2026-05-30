@@ -196,6 +196,13 @@ impl Default for SettingsView {
 }
 
 type Rect = (f32, f32, f32, f32);
+/// a tab in the title bar: (session index, tab rect, close-icon rect)
+type TabEntry = (usize, Rect, Rect);
+/// resolved per-pane paint origin: (origin x, origin y, focused, pane rect)
+type PaneInfo = (f32, f32, bool, Rect);
+/// snapshot of a tab row for painting: index, tab rect, close rect, label,
+/// active, hovered, close-hovered
+type TabItem = (usize, Rect, Rect, String, bool, bool, bool);
 
 /// GPU backend choice for compatibility; persisted + applied at startup
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -316,7 +323,7 @@ struct SettingsGeom {
 
 struct TabLayout {
     /// (session index, tab rect, close-icon rect)
-    tabs: Vec<(usize, (f32, f32, f32, f32), (f32, f32, f32, f32))>,
+    tabs: Vec<TabEntry>,
     newtab: (f32, f32, f32, f32),
 }
 
@@ -1449,6 +1456,9 @@ impl Renderer {
     }
 
     /// banded vertical gradient from `top` (at y) to `bottom` (at y+h)
+    // a flat geometry helper; bundling the rect+colors into a struct would only
+    // obscure the call sites
+    #[allow(clippy::too_many_arguments)]
     fn push_vgradient(out: &mut Vec<Instance>, x: f32, y: f32, w: f32, h: f32, top: Rgb, bottom: Rgb, bands: usize) {
         let n = bands.max(1);
         let band_h = h / n as f32;
@@ -1755,6 +1765,9 @@ impl Renderer {
 
     /// lay out a monospace string at a pixel baseline with optional tracking;
     /// returns the pen end-x
+    // a low-level text helper called ~50 times; a params struct would add noise
+    // at every call site without making any of them clearer
+    #[allow(clippy::too_many_arguments)]
     fn draw_text(
         atlas: &mut GlyphAtlas,
         out: &mut Vec<Instance>,
@@ -1836,7 +1849,7 @@ impl Renderer {
         out.extend_from_slice(&self.gradient_cache);
 
         // pre-resolve pane grid origins (immutable self) before borrowing the atlas
-        let pane_info: Vec<(f32, f32, bool, (f32, f32, f32, f32))> = panes
+        let pane_info: Vec<PaneInfo> = panes
             .iter()
             .map(|p| {
                 let (ox, oy, _, _) = self.pane_metrics(p.rect);
@@ -1924,7 +1937,7 @@ impl Renderer {
         // tabs — snapshot to owned data so the atlas can be borrowed mutably
         let tl = self.tab_layout();
         let active_tab = self.active_tab;
-        let tab_items: Vec<(usize, (f32, f32, f32, f32), (f32, f32, f32, f32), String, bool, bool, bool)> =
+        let tab_items: Vec<TabItem> =
             tl.tabs
                 .iter()
                 .map(|(i, rect, close)| {

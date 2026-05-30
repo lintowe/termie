@@ -66,6 +66,9 @@ struct Pane {
     flash: Option<Instant>,
 }
 
+// Leaf is the common, hot variant (walked every frame to paint panes); boxing
+// it to shrink the enum would add an indirection to that path for no real gain
+#[allow(clippy::large_enum_variant)]
 enum Node {
     Leaf(Pane),
     Split {

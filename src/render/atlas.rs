@@ -423,18 +423,18 @@ fn to_alpha(data: &[u8], w: usize, h: usize, content: SwashContent) -> Vec<u8> {
         SwashContent::Mask => data.to_vec(),
         SwashContent::Color => {
             let mut out = vec![0u8; w * h];
-            for i in 0..(w * h) {
-                out[i] = data.get(i * 4 + 3).copied().unwrap_or(0);
+            for (o, px) in out.iter_mut().zip(data.chunks(4)) {
+                *o = px.get(3).copied().unwrap_or(0);
             }
             out
         }
         SwashContent::SubpixelMask => {
             let mut out = vec![0u8; w * h];
-            for i in 0..(w * h) {
-                let r = data.get(i * 4).copied().unwrap_or(0);
-                let g = data.get(i * 4 + 1).copied().unwrap_or(0);
-                let b = data.get(i * 4 + 2).copied().unwrap_or(0);
-                out[i] = r.max(g).max(b);
+            for (o, px) in out.iter_mut().zip(data.chunks(4)) {
+                let r = px.first().copied().unwrap_or(0);
+                let g = px.get(1).copied().unwrap_or(0);
+                let b = px.get(2).copied().unwrap_or(0);
+                *o = r.max(g).max(b);
             }
             out
         }
