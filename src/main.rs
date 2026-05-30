@@ -1191,6 +1191,8 @@ impl App {
 
     fn kill_plugins(&mut self) {
         for p in &mut self.plugins {
+            // ask politely first so a plugin can flush/save, then force it
+            p.send(&plugin::HostEvent::Shutdown);
             p.kill();
         }
         self.plugins.clear();

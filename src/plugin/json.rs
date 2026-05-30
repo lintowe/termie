@@ -30,6 +30,9 @@ impl Json {
         }
     }
 
+    /// part of the Json accessor surface; not used by the current call sites but
+    /// kept for completeness alongside as_str/as_f64/as_array
+    #[allow(dead_code)]
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Json::Bool(b) => Some(*b),

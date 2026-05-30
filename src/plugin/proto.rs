@@ -45,8 +45,12 @@ impl Widget {
     }
 }
 
-/// termie -> plugin
+/// termie -> plugin. this is the full host event surface (a versioned public
+/// contract); some variants are emitted by the host already and others are wired
+/// to their event sources incrementally, so the unconnected ones are allowed to
+/// be unconstructed for now without churning the protocol definition
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum HostEvent {
     /// handshake: termie's api version + the granted permission list
     Hello { api_version: u32, permissions: Vec<String> },

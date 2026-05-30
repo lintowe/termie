@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # build the app + run the unit tests on the primary (Windows) target
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --all-targets
+      - name: test
+        run: cargo test
+
+  # clippy lints. the project keeps its own (non-rustfmt) source style, so
+  # formatting is intentionally not enforced; clippy runs as a quality gate and
+  # the build is warning-clean, so any new clippy warning shows up clearly
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --all-targets
+
+  # security advisory scan of the dependency tree (RUSTSEC database)
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: audit
+        run: cargo audit
+
+  # the bundled example plugins are independent crates (their own workspace);
+  # build them so the reference plugins never silently break
+  plugins:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build tamagotchi
+        run: cargo build --release --manifest-path plugins/tamagotchi/Cargo.toml
+      - name: build relay
+        run: cargo build --release --manifest-path plugins/relay/Cargo.toml
