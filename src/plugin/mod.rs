@@ -114,6 +114,6 @@ mod tests {
         let ev = HostEvent::Bell { pane: 3 };
         let line = ev.to_line();
         assert!(!line.contains('\n'));
-        assert!(Json::parse(&line).is_some());
+        assert!(crate::plugin::json::Json::parse(&line).is_some());
     }
 }
