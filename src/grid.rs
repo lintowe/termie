@@ -446,7 +446,9 @@ impl Grid {
         let base = self.prompt_base();
         let total = self.total_lines() as u64;
         let top_g = total.saturating_sub((self.rows + self.view_offset) as u64);
-        let cur_abs = base + top_g;
+        // reference the viewport center, where scroll_to_global parks the focused
+        // prompt — stepping off the top would re-select the same mark
+        let cur_abs = base + top_g + (self.rows / 2) as u64;
         let target = if forward {
             self.prompts.iter().copied().find(|&p| p > cur_abs)
         } else {
