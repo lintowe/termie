@@ -931,6 +931,7 @@ impl App {
             selection: None,
             selecting: false,
             last_click: None,
+            click_seq: 0,
             git: None,
             palette: None,
             market: None,
@@ -3045,7 +3046,11 @@ impl ApplicationHandler<UserEvent> for App {
                             if let (Some(pane), Some((row, col))) =
                                 (self.active_focused_id(), self.cell_in_focused(cx, cy))
                             {
-                                let grid = self.pool.iter().find(|p| p.id == pane).map(|p| &p.grid);
+                                let grid = self
+                                    .pool
+                                    .iter()
+                                    .find(|p| p.id == pane)
+                                    .map(|p| &p.term.grid);
                                 match self.click_seq {
                                     2 => {
                                         let (lo, hi) = grid
