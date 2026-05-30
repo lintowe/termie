@@ -1706,6 +1706,24 @@ impl Renderer {
                 }
             }
         }
+
+        // scroll position indicator: a thin thumb on the pane's right edge,
+        // shown only while scrolled into history, sized + positioned to the
+        // viewport's slice of total (scrollback + screen) lines
+        if scrolled {
+            let total = grid.scrollback.len() + grid.rows;
+            if total > grid.rows {
+                let track_h = grid.rows as f32 * cell_h;
+                let tw = (2.0 * beam_w).max(2.0);
+                let track_x = ox + grid.cols as f32 * cell_w - tw;
+                let thumb_h = (track_h * grid.rows as f32 / total as f32).max(cell_h);
+                // viewport top line within total; (total-rows) = live bottom
+                let top_line = (total - grid.rows - grid.view_offset) as f32;
+                let thumb_y = oy + (track_h - thumb_h) * (top_line / (total - grid.rows) as f32);
+                Self::push_rect(out, track_x, oy, tw, track_h, palette.mute, 0.18);
+                Self::push_rect(out, track_x, thumb_y, tw, thumb_h, palette.mute, 0.8);
+            }
+        }
     }
 
     /// lay out a monospace string at a pixel baseline with optional tracking;
