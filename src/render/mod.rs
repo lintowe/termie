@@ -1767,14 +1767,17 @@ impl Renderer {
             }
         }
 
-        // dividers + focus border (only meaningful with more than one pane)
+        // dividers + focus border (only meaningful with more than one pane).
+        // the focused pane gets a dim PAPER-accent outline so it reads at a
+        // glance across a cockpit of panes; thinner than the bell flash
+        // (hair vs hair*2) so the two never read as the same signal
         if panes.len() > 1 {
             for (_, _, _, rect) in &pane_info {
                 Self::stroke_rect(&mut out, *rect, hair, RULE);
             }
             for (_, _, foc, rect) in &pane_info {
                 if *foc {
-                    Self::stroke_rect(&mut out, *rect, hair, MUTE);
+                    Self::stroke_rect_a(&mut out, *rect, hair, PAPER, 0.55);
                 }
             }
         }
