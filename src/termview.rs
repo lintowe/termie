@@ -471,7 +471,9 @@ mod golden {
                 continue;
             }
             let want = std::fs::read_to_string(&path).unwrap_or_default();
-            if want != got {
+            // normalize line endings: the dump is LF, but an autocrlf checkout
+            // could give the snapshot CRLF, which must not read as a mismatch
+            if want.replace("\r\n", "\n") != got {
                 mismatches.push((c.name, want, got));
             }
         }
