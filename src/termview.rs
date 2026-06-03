@@ -1,0 +1,283 @@
+//! dev-only headless harness: feed escape sequences through the real Terminal
+//! and dump the resulting screen + state as text, so changes can be observed
+//! without a window. invoked as `termie --termview ...`; compiled out of release
+
+use std::fmt::Write as _;
+
+use vte::Parser;
+
+use crate::color::Color;
+use crate::grid::Attrs;
+use crate::term::Terminal;
+
+/// returns true if `--termview` was requested and handled (caller should exit)
+pub fn maybe_run() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    if !args.iter().any(|a| a == "--termview") {
+        return false;
+    }
+    let val = |flag: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+
+    let rows = val("--rows").and_then(|v| v.parse().ok()).unwrap_or(10usize).clamp(1, 100);
+    let cols = val("--cols").and_then(|v| v.parse().ok()).unwrap_or(40usize).clamp(1, 200);
+
+    let bytes: Vec<u8> = if let Some(name) = val("--scenario") {
+        match scenario(&name) {
+            Some(b) => b,
+            None => {
+                println!("unknown scenario: {name}");
+                println!("available: {}", SCENARIOS.join(" "));
+                return true;
+            }
+        }
+    } else if let Some(path) = val("--file") {
+        match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("read error {path}: {e}");
+                return true;
+            }
+        }
+    } else if let Some(seq) = val("--seq") {
+        unescape(&seq)
+    } else {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut buf);
+        buf
+    };
+
+    let mut term = Terminal::new(rows, cols);
+    let mut parser = Parser::new();
+    parser.advance(&mut term, &bytes);
+    print!("{}", dump(&term, &bytes));
+    true
+}
+
+const SCENARIOS: &[&str] = &["sgr", "kitty", "altscreen", "osc", "wrap", "cursor", "erase"];
+
+fn scenario(name: &str) -> Option<Vec<u8>> {
+    let s: &[u8] = match name {
+        "sgr" => b"\x1b[1;31mred-bold\x1b[0m \x1b[4munder\x1b[0m \x1b[7minv\x1b[0m \x1b[38;2;0;200;100mtruecol\x1b[0m",
+        "kitty" => b"\x1b[>1u\x1b[?u",
+        "altscreen" => b"primary text\x1b[?1049halt screen here",
+        "osc" => b"\x1b]0;Hello Title\x1b\\\x1b]7;file:///c:/dev/termie\x1b\\hi there",
+        "wrap" => b"abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "cursor" => b"\x1b[3;5Hx\x1b[1 q",
+        "erase" => b"line one\r\nline two\r\nline three\x1b[2;1H\x1b[K",
+        _ => return None,
+    };
+    Some(s.to_vec())
+}
+
+/// decode the common backslash escapes in a --seq argument
+fn unescape(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 1 < b.len() {
+            match b[i + 1] {
+                b'e' => {
+                    out.push(0x1b);
+                    i += 2;
+                }
+                b'r' => {
+                    out.push(b'\r');
+                    i += 2;
+                }
+                b'n' => {
+                    out.push(b'\n');
+                    i += 2;
+                }
+                b't' => {
+                    out.push(b'\t');
+                    i += 2;
+                }
+                b'0' => {
+                    out.push(0);
+                    i += 2;
+                }
+                b'a' => {
+                    out.push(0x07);
+                    i += 2;
+                }
+                b'b' => {
+                    out.push(0x08);
+                    i += 2;
+                }
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'x' if i + 4 <= b.len() => {
+                    if let Ok(h) = std::str::from_utf8(&b[i + 2..i + 4])
+                        && let Ok(v) = u8::from_str_radix(h, 16)
+                    {
+                        out.push(v);
+                        i += 4;
+                    } else {
+                        out.push(b[i]);
+                        i += 1;
+                    }
+                }
+                _ => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn dump(t: &Terminal, fed: &[u8]) -> String {
+    let g = &t.grid;
+    let mut s = String::new();
+    let _ = writeln!(s, "== termview ==");
+    let _ = writeln!(s, "fed {} bytes: {:?}", fed.len(), String::from_utf8_lossy(fed));
+    let _ = writeln!(
+        s,
+        "size {}x{}  cursor (r{}, c{}) shape={:?} vis={} wrap_pending={}  alt={}",
+        g.rows, g.cols, g.cursor.row, g.cursor.col, g.cursor.shape, g.cursor.visible, g.cursor.wrap_pending, t.using_alt
+    );
+    let _ = writeln!(
+        s,
+        "kitty_flags={}  app_cursor={}  bracketed={}  mouse={:?} sgr={}  focus_ev={}  sync={}  bell={}",
+        t.kbd_flags(), t.app_cursor_keys, t.bracketed_paste, t.mouse_proto, t.mouse_sgr, t.focus_events, t.sync_output, t.bell
+    );
+    let _ = writeln!(
+        s,
+        "title={:?}  cwd={:?}  scrollback={} lines  view_offset={}",
+        t.title,
+        t.cwd,
+        g.scrollback.len(),
+        g.view_offset
+    );
+    if !t.responses.is_empty() {
+        let _ = writeln!(s, "responses: {}  ({:?})", hex(&t.responses), String::from_utf8_lossy(&t.responses));
+    }
+
+    // column rulers (tens digit every 10, units below)
+    let gut = 3usize;
+    let pad = " ".repeat(gut + 1);
+    let mut tens = pad.clone();
+    let mut units = pad.clone();
+    for c in 0..g.cols {
+        tens.push(if c % 10 == 0 {
+            char::from(b'0' + ((c / 10) % 10) as u8)
+        } else {
+            ' '
+        });
+        units.push(char::from(b'0' + (c % 10) as u8));
+    }
+    let _ = writeln!(s, "{tens}");
+    let _ = writeln!(s, "{units}");
+
+    let border = format!("{}+{}+", " ".repeat(gut), "-".repeat(g.cols));
+    let _ = writeln!(s, "{border}");
+    for r in 0..g.rows {
+        let mut row = String::new();
+        for c in 0..g.cols {
+            let ch = g.lines[r][c].c;
+            let disp = if ch == '\0' || ch == ' ' {
+                ' '
+            } else if ch.is_control() {
+                '\u{00b7}'
+            } else {
+                ch
+            };
+            row.push(disp);
+        }
+        let mark = if r == g.cursor.row { " <-- cursor row" } else { "" };
+        let _ = writeln!(s, "{r:>gut$}|{row}|{mark}");
+    }
+    let _ = writeln!(s, "{border}");
+
+    // styled runs (cells that differ from the default cell)
+    let mut styles = String::new();
+    for r in 0..g.rows {
+        let line = &g.lines[r];
+        let mut c = 0;
+        while c < g.cols {
+            if is_default(&line[c]) {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            let key = (line[c].fg, line[c].bg, line[c].attrs);
+            while c < g.cols && !is_default(&line[c]) && (line[c].fg, line[c].bg, line[c].attrs) == key {
+                c += 1;
+            }
+            let _ = writeln!(
+                styles,
+                "  r{r} c{start}-{}: fg={} bg={} attrs={}",
+                c - 1,
+                col(key.0),
+                col(key.1),
+                attrs(key.2)
+            );
+        }
+    }
+    if styles.is_empty() {
+        let _ = writeln!(s, "styles: (all default)");
+    } else {
+        let _ = writeln!(s, "styles:");
+        s.push_str(&styles);
+    }
+    s
+}
+
+fn is_default(cell: &crate::grid::Cell) -> bool {
+    cell.fg == Color::Default && cell.bg == Color::DefaultBg && cell.attrs == Attrs::default()
+}
+
+fn col(c: Color) -> String {
+    match c {
+        Color::Default => "def".into(),
+        Color::DefaultBg => "defbg".into(),
+        Color::Indexed(n) => format!("idx{n}"),
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+    }
+}
+
+fn attrs(a: Attrs) -> String {
+    let mut s = String::new();
+    if a.bold {
+        s.push('b');
+    }
+    if a.dim {
+        s.push('d');
+    }
+    if a.italic {
+        s.push('i');
+    }
+    if a.underline {
+        s.push('u');
+    }
+    if a.inverse {
+        s.push('v');
+    }
+    if a.strike {
+        s.push('s');
+    }
+    if a.hidden {
+        s.push('h');
+    }
+    if s.is_empty() {
+        s.push('-');
+    }
+    s
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+}

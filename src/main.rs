@@ -9,6 +9,8 @@ mod pty;
 mod render;
 mod term;
 mod win;
+#[cfg(debug_assertions)]
+mod termview;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -3450,6 +3452,11 @@ impl App {
 }
 
 fn main() -> Result<()> {
+    // dev-only headless screen dumper; never compiled into release
+    #[cfg(debug_assertions)]
+    if termview::maybe_run() {
+        return Ok(());
+    }
     // stop child shells (esp. pool shells racing exit) from popping OS error dialogs
     win::suppress_child_error_dialogs();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
