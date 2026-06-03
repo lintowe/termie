@@ -477,6 +477,31 @@ mod golden {
                 bytes: b"r1\r\nr2\r\nr3\r\nr4\r\nr5\r\nr6\x1b[2;5r\x1b[5;1H\nNEW",
                 resize: None,
             },
+            // tabs advance to the next 8-column stop
+            Case {
+                name: "tab_stops",
+                rows: 2,
+                cols: 28,
+                bytes: b"a\tb\tc\td",
+                resize: None,
+            },
+            // insert-line (IL) pushes the lines at/below the cursor down
+            Case {
+                name: "insert_line",
+                rows: 5,
+                cols: 8,
+                bytes: b"A\r\nB\r\nC\r\nD\x1b[2;1H\x1b[L",
+                resize: None,
+            },
+            // alt screen is a separate cleared buffer; entering it hides the
+            // primary content (which is restored on exit)
+            Case {
+                name: "alt_screen",
+                rows: 3,
+                cols: 10,
+                bytes: b"primary\x1b[?1049halt text",
+                resize: None,
+            },
         ]
     }
 
