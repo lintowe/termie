@@ -1053,6 +1053,8 @@ struct App {
     link: Option<(usize, usize, usize)>,
     /// system fonts are scanned lazily after first paint to keep startup fast
     system_fonts_pending: bool,
+    /// the printable-ASCII glyph cache has been warmed once (off the boot path)
+    ascii_warmed: bool,
     /// consecutive failed pool spawns; backs off + gives up so a broken shell
     /// can't spin a busy respawn loop with a permanently empty window
     warm_fails: usize,
@@ -1122,6 +1124,7 @@ impl App {
             cursor_icon: CursorIcon::Default,
             link: None,
             system_fonts_pending: true,
+            ascii_warmed: false,
             warm_fails: 0,
             warm_backoff_until: None,
             sync_redraw_pending: None,
@@ -3604,9 +3607,20 @@ impl ApplicationHandler<UserEvent> for App {
         // top up the warm pool once the window is up (one per tick, no spawn burst)
         if self.shown {
             self.warm_pool();
-            // scan system fonts once, deferred off the startup path so the window
-            // appears instantly; enables the font picker + non-Latin fallbacks
-            if self.system_fonts_pending {
+            // warm the printable-ASCII glyph cache as soon as the window is up, so
+            // the first shell output paints from a warm atlas instead of shaping
+            // ~95 glyphs on the first content frames. the bundled content font is
+            // already loaded, so this needs no system-font scan
+            if !self.ascii_warmed {
+                self.ascii_warmed = true;
+                if let Some(r) = self.renderer.as_mut() {
+                    r.prewarm_glyphs();
+                }
+            }
+            // scan system fonts once, deferred until the first shell is on screen
+            // so the prompt appears before this (event-loop-blocking) scan rather
+            // than after it; enables the font picker + non-Latin fallbacks
+            if self.system_fonts_pending && !self.tabs.is_empty() {
                 self.system_fonts_pending = false;
                 let want = self.persisted.font.clone();
                 let scanned = if let Some(r) = self.renderer.as_mut() {
@@ -3616,6 +3630,8 @@ impl ApplicationHandler<UserEvent> for App {
                     if s
                         && let Some(f) = want.as_deref() {
                             r.set_font_by_name(f);
+                            // the switch cleared the cache; re-warm for the new font
+                            r.prewarm_glyphs();
                         }
                     s
                 } else {
@@ -3626,12 +3642,6 @@ impl ApplicationHandler<UserEvent> for App {
                     // re-rasterized fallbacks, and any font switch all show
                     self.relayout_all();
                     self.redraw();
-                }
-                // warm the printable-ASCII glyph cache once the final content
-                // font is settled, so shell output paints from a warm atlas
-                // instead of shaping ~95 glyphs on the first content frames
-                if let Some(r) = self.renderer.as_mut() {
-                    r.prewarm_glyphs();
                 }
             }
             // spawn enabled plugins once, deferred off the boot path so a window
