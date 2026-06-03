@@ -56,6 +56,14 @@ pub fn maybe_run() -> bool {
     let mut parser = Parser::new();
     parser.advance(&mut term, &bytes);
 
+    // optionally resize after feeding, to exercise reflow: --resize COLSxROWS
+    if let Some(rs) = val("--resize")
+        && let Some((c, r)) = rs.split_once('x')
+        && let (Ok(c), Ok(r)) = (c.parse::<usize>(), r.parse::<usize>())
+    {
+        term.resize(r, c);
+    }
+
     if let Some(path) = val("--png") {
         let theme = match val("--theme").as_deref() {
             Some("koi") => crate::color::ThemeId::Koi,

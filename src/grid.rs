@@ -89,7 +89,27 @@ impl Default for Cursor {
     }
 }
 
-type Line = Vec<Cell>;
+/// one row of cells plus whether it soft-wrapped into the next row. derefs to
+/// the cell Vec so existing indexing/iteration is unchanged; the wrapped flag
+/// lets resize rejoin logical lines and rewrap them to a new width
+#[derive(Clone, PartialEq, Debug)]
+pub struct Line {
+    cells: Vec<Cell>,
+    pub wrapped: bool,
+}
+
+impl std::ops::Deref for Line {
+    type Target = Vec<Cell>;
+    fn deref(&self) -> &Vec<Cell> {
+        &self.cells
+    }
+}
+
+impl std::ops::DerefMut for Line {
+    fn deref_mut(&mut self) -> &mut Vec<Cell> {
+        &mut self.cells
+    }
+}
 
 pub struct Grid {
     pub rows: usize,
@@ -116,7 +136,10 @@ pub struct Grid {
 }
 
 fn blank_line(cols: usize) -> Line {
-    vec![Cell::default(); cols]
+    Line {
+        cells: vec![Cell::default(); cols],
+        wrapped: false,
+    }
 }
 
 /// terminal cell width of a char: 0 (combining/zero-width), 1 (normal), or 2
@@ -388,6 +411,12 @@ impl Grid {
             return;
         }
 
+        // on a width change, rewrap soft-wrapped logical lines (scrollback + the
+        // live screen) to the new width before the row-count adjustment below
+        if cols != self.cols {
+            self.reflow(cols);
+        }
+
         // adjust the live lines to the new width (put_char indexes by col);
         // leave scrollback lines at their captured width so shrinking doesn't
         // destroy history — draw_grid reads cells via get() and tolerates any
@@ -425,6 +454,105 @@ impl Grid {
         self.cursor.col = self.cursor.col.min(cols - 1);
         self.cursor.wrap_pending = false;
         self.view_offset = self.view_offset.min(self.scrollback.len());
+    }
+
+    /// rewrap soft-wrapped logical lines to `new_cols` across scrollback + the
+    /// live screen, preserving the cursor's logical position. wide glyphs that
+    /// straddle the new boundary may split (rare). sets self.cols
+    fn reflow(&mut self, new_cols: usize) {
+        let cur_abs = self.scrollback.len() + self.cursor.row;
+        let cur_col = self.cursor.col;
+        let mut physical: Vec<Line> = Vec::with_capacity(self.scrollback.len() + self.lines.len());
+        physical.extend(self.scrollback.drain(..));
+        physical.append(&mut self.lines);
+
+        // drop blank lines below the content/cursor so empty screen space can't
+        // push real content into scrollback when the width shrinks
+        let last_content = physical
+            .iter()
+            .rposition(|l| l.iter().any(|c| *c != Cell::default()))
+            .unwrap_or(0);
+        physical.truncate(last_content.max(cur_abs) + 1);
+
+        // join physical lines into logical lines across soft-wraps; record the
+        // cursor's logical line index + character offset within it
+        let mut logical: Vec<Vec<Cell>> = Vec::new();
+        let (mut cur_logical, mut cur_offset, mut found) = (0usize, 0usize, false);
+        let mut i = 0;
+        while i < physical.len() {
+            let li = logical.len();
+            let mut cells: Vec<Cell> = Vec::new();
+            loop {
+                if i == cur_abs && !found {
+                    cur_logical = li;
+                    cur_offset = cells.len() + cur_col;
+                    found = true;
+                }
+                let wrapped = physical[i].wrapped;
+                cells.extend_from_slice(&physical[i].cells);
+                i += 1;
+                if !wrapped || i >= physical.len() {
+                    break;
+                }
+            }
+            // trim trailing blanks, but never past the cursor on its own line
+            let keep = if found && cur_logical == li { cur_offset } else { 0 };
+            while cells.len() > keep && cells.last() == Some(&Cell::default()) {
+                cells.pop();
+            }
+            logical.push(cells);
+        }
+        if !found {
+            cur_logical = logical.len().saturating_sub(1);
+            cur_offset = logical.get(cur_logical).map_or(0, Vec::len);
+        }
+
+        // re-split each logical line at the new width
+        let mut np: Vec<Line> = Vec::new();
+        let mut new_cur_abs = 0usize;
+        for (li, cells) in logical.iter().enumerate() {
+            let start = np.len();
+            if cells.is_empty() {
+                np.push(blank_line(new_cols));
+            } else {
+                let mut j = 0;
+                while j < cells.len() {
+                    let end = (j + new_cols).min(cells.len());
+                    let mut seg: Vec<Cell> = cells[j..end].to_vec();
+                    seg.resize(new_cols, Cell::default());
+                    np.push(Line { cells: seg, wrapped: end < cells.len() });
+                    j = end;
+                }
+            }
+            if li == cur_logical {
+                new_cur_abs = start + cur_offset / new_cols;
+            }
+        }
+        if np.is_empty() {
+            np.push(blank_line(new_cols));
+        }
+        new_cur_abs = new_cur_abs.min(np.len() - 1);
+
+        // the last `rows` physical lines become the live screen; rest -> scrollback
+        let rows = self.rows;
+        let live_start = np.len().saturating_sub(rows);
+        self.lines = np.split_off(live_start);
+        self.scrollback = np.into();
+        while self.lines.len() < rows {
+            self.lines.push(blank_line(new_cols));
+        }
+
+        self.cursor.row = new_cur_abs.saturating_sub(live_start).min(rows - 1);
+        self.cursor.col = (cur_offset % new_cols).min(new_cols - 1);
+        self.cursor.wrap_pending = false;
+        self.cols = new_cols;
+        while self.scrollback.len() > self.scrollback_limit {
+            self.scrollback.pop_front();
+        }
+        // prompt marks reference pre-reflow line indices; reset rather than mis-jump
+        self.prompts.clear();
+        self.total_scrolled = self.scrollback.len() as u64;
+        self.view_offset = 0;
     }
 
     fn push_scrollback(&mut self, line: Line) {
@@ -529,12 +657,14 @@ impl Grid {
             return;
         }
         if self.cursor.wrap_pending {
+            self.lines[self.cursor.row].wrapped = true;
             self.cursor.col = 0;
             self.linefeed();
             self.cursor.wrap_pending = false;
         }
         // a double-width glyph that won't fit in the last column wraps first
         if w == 2 && self.cursor.col + 2 > self.cols {
+            self.lines[self.cursor.row].wrapped = true;
             self.cursor.col = 0;
             self.linefeed();
         }
@@ -948,5 +1078,49 @@ mod tests {
         assert!(!g.jump_prompt(false));
         assert!(!g.jump_prompt(true));
         assert_eq!(g.view_offset, 0);
+    }
+
+    fn row_text(g: &Grid, r: usize) -> String {
+        g.lines[r].iter().map(|c| c.c).collect::<String>().trim_end().to_string()
+    }
+
+    #[test]
+    fn reflow_rejoins_and_resplits_on_width_increase() {
+        let mut g = Grid::new(5, 20);
+        for c in "0123456789ABCDEFGHIJabcdefghij0123456789ABCDEFGHIJ".chars() {
+            g.put_char(c);
+        }
+        g.resize(5, 40);
+        assert_eq!(row_text(&g, 0), "0123456789ABCDEFGHIJabcdefghij0123456789");
+        assert_eq!(row_text(&g, 1), "ABCDEFGHIJ");
+        // cursor stays at the logical end (offset 50 -> row 1, col 10)
+        assert_eq!((g.cursor.row, g.cursor.col), (1, 10));
+    }
+
+    #[test]
+    fn reflow_splits_on_width_decrease_without_losing_content() {
+        let mut g = Grid::new(5, 40);
+        for c in "012345678901234567890123456789".chars() {
+            g.put_char(c);
+        }
+        g.resize(5, 20);
+        assert_eq!(row_text(&g, 0), "01234567890123456789");
+        assert_eq!(row_text(&g, 1), "0123456789");
+    }
+
+    #[test]
+    fn reflow_preserves_hard_newlines() {
+        let mut g = Grid::new(5, 20);
+        for c in "AAAA".chars() {
+            g.put_char(c);
+        }
+        g.carriage_return();
+        g.linefeed();
+        for c in "BBBBBBBBBBBBBBBBBBBBBBBBB".chars() {
+            g.put_char(c);
+        }
+        g.resize(5, 40);
+        assert_eq!(row_text(&g, 0), "AAAA");
+        assert_eq!(row_text(&g, 1), "BBBBBBBBBBBBBBBBBBBBBBBBB");
     }
 }

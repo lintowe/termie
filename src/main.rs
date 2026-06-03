@@ -3513,6 +3513,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Resized(size) => {
+                // reflow on a width change moves cell coordinates, so a stale
+                // selection would highlight the wrong cells
+                self.selection = None;
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
                 }
