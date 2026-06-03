@@ -1,4 +1,6 @@
 mod atlas;
+#[cfg(debug_assertions)]
+pub mod preview;
 
 use std::sync::Arc;
 use std::time::Instant;

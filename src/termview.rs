@@ -55,7 +55,22 @@ pub fn maybe_run() -> bool {
     let mut term = Terminal::new(rows, cols);
     let mut parser = Parser::new();
     parser.advance(&mut term, &bytes);
-    print!("{}", dump(&term, &bytes));
+
+    if let Some(path) = val("--png") {
+        let theme = match val("--theme").as_deref() {
+            Some("koi") => crate::color::ThemeId::Koi,
+            Some("paper") => crate::color::ThemeId::Paper,
+            _ => crate::color::ThemeId::Instrument,
+        };
+        let pt = val("--pt").and_then(|v| v.parse().ok()).unwrap_or(16.0f32);
+        let scale = val("--scale").and_then(|v| v.parse().ok()).unwrap_or(2.0f32);
+        match crate::render::preview::render_png(&term, theme, pt, scale, &path) {
+            Ok((w, h)) => println!("wrote {path} ({w}x{h})"),
+            Err(e) => println!("png error: {e}"),
+        }
+    } else {
+        print!("{}", dump(&term, &bytes));
+    }
     true
 }
 
