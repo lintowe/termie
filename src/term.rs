@@ -632,4 +632,14 @@ mod tests {
         assert_eq!(t.grid.cursor.row, 2);
         assert_eq!(t.grid.cursor.col, 3);
     }
+
+    #[test]
+    fn apc_graphics_payload_is_swallowed() {
+        // advertising ghostty invites kitty-graphics (APC G) payloads; the
+        // parser must consume them, not leak base64 into the grid
+        let mut t = Terminal::new(4, 20);
+        feed(&mut t, b"\x1b_Gf=100,a=T,m=0;iVBORw0KGgo=\x1b\\hi");
+        assert_eq!(t.grid.lines[0][0].c, 'h');
+        assert_eq!(t.grid.lines[0][1].c, 'i');
+    }
 }
