@@ -846,4 +846,22 @@ mod tests {
         // reaching here without panicking is the assertion
         assert_eq!(t.grid.cols, 80);
     }
+
+    #[test]
+    fn renders_a_box_drawing_frame() {
+        let mut t = Terminal::new(4, 8);
+        feed(
+            &mut t,
+            "\x1b[1;1H\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}\
+             \x1b[2;1H\u{2502}      \u{2502}\
+             \x1b[3;1H\u{2502}      \u{2502}\
+             \x1b[4;1H\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}"
+                .as_bytes(),
+        );
+        let top: String = t.grid.lines[0].iter().map(|c| c.c).collect();
+        assert_eq!(top, "\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}");
+        assert_eq!(t.grid.lines[1][0].c, '\u{2502}');
+        assert_eq!(t.grid.lines[1][7].c, '\u{2502}');
+        assert_eq!(t.grid.lines[3][7].c, '\u{2518}');
+    }
 }
