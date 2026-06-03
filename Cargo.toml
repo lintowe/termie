@@ -2,6 +2,9 @@
 name = "termie"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A GPU-rendered terminal multiplexer for Windows — a cockpit for AI TUIs"
+repository = "https://github.com/lintowe/termie"
 
 [dependencies]
 anyhow = "1.0.102"
