@@ -140,6 +140,11 @@ impl Pty {
         let Some(mut reader) = self.reader.take() else {
             return;
         };
+        // optional raw-output capture for debugging a rendering issue: set
+        // TERMIE_CAPTURE=<path> to append every byte the shell emits, then replay
+        // it through `termie --termview --file <path>` to reproduce exactly
+        let mut capture = std::env::var_os("TERMIE_CAPTURE")
+            .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -149,6 +154,9 @@ impl Pty {
                         break;
                     }
                     Ok(n) => {
+                        if let Some(f) = capture.as_mut() {
+                            let _ = f.write_all(&buf[..n]);
+                        }
                         on_event(PtyMsg::Output(buf[..n].to_vec()));
                     }
                     Err(_) => {
