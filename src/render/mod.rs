@@ -1661,6 +1661,8 @@ impl Renderer {
                 if cell.attrs.dim {
                     fg = Rgb::new(fg.r / 2, fg.g / 2, fg.b / 2);
                 }
+                // blinking cells hide their glyph + decorations on the off phase
+                let blink_hidden = cell.attrs.blink && !blink_on;
 
                 let x = ox + c as f32 * cell_w;
                 let y = oy + r as f32 * cell_h;
@@ -1718,7 +1720,7 @@ impl Renderer {
                 }
                 // '\0' marks the second cell of a wide glyph — the lead cell's
                 // glyph already covers it, so skip drawing here
-                if cell.c != ' ' && cell.c != '\0' {
+                if !blink_hidden && cell.c != ' ' && cell.c != '\0' {
                     // box-drawing / block glyphs are drawn procedurally so they
                     // tile seamlessly (font glyphs leave gaps at cell edges)
                     if Self::draw_box(out, x, y, cell_w, cell_h, cell.c, fg) {
@@ -1739,6 +1741,22 @@ impl Renderer {
                             kind: 1,
                             _pad: [0; 3],
                         });
+                    }
+                }
+                // underline / strikethrough decorations, drawn in the cell's fg
+                // so they also show on blank underlined cells
+                if !blink_hidden {
+                    let t = (cell_h * 0.06).max(1.0);
+                    match cell.attrs.underline {
+                        crate::grid::UnderlineStyle::None => {}
+                        crate::grid::UnderlineStyle::Double => {
+                            Self::push_rect(out, x, y + cell_h - t, cell_w, t, fg, 1.0);
+                            Self::push_rect(out, x, y + cell_h - t * 3.0, cell_w, t, fg, 1.0);
+                        }
+                        _ => Self::push_rect(out, x, y + cell_h - t, cell_w, t, fg, 1.0),
+                    }
+                    if cell.attrs.strike {
+                        Self::push_rect(out, x, (y + cell_h * 0.5).round(), cell_w, t, fg, 1.0);
                     }
                 }
             }

@@ -3,14 +3,26 @@ use std::collections::VecDeque;
 use crate::color::Color;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct Attrs {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: UnderlineStyle,
     pub inverse: bool,
     pub strike: bool,
     pub hidden: bool,
+    pub blink: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

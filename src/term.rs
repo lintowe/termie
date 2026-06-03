@@ -1,7 +1,7 @@
 use vte::{Params, Perform};
 
 use crate::color::Color;
-use crate::grid::{CursorShape, Grid};
+use crate::grid::{CursorShape, Grid, UnderlineStyle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Osc133 {
@@ -226,6 +226,19 @@ impl Terminal {
                 i += 1;
                 continue;
             }
+            // colon-encoded underline style, e.g. 4:3 (curly)
+            if g.len() > 1 && code == 4 {
+                cur.attrs.underline = match g.get(1).copied().unwrap_or(1) {
+                    0 => UnderlineStyle::None,
+                    2 => UnderlineStyle::Double,
+                    3 => UnderlineStyle::Curly,
+                    4 => UnderlineStyle::Dotted,
+                    5 => UnderlineStyle::Dashed,
+                    _ => UnderlineStyle::Single,
+                };
+                i += 1;
+                continue;
+            }
             match code {
                 0 => {
                     cur.fg = Color::Default;
@@ -235,7 +248,8 @@ impl Terminal {
                 1 => cur.attrs.bold = true,
                 2 => cur.attrs.dim = true,
                 3 => cur.attrs.italic = true,
-                4 => cur.attrs.underline = true,
+                4 => cur.attrs.underline = UnderlineStyle::Single,
+                5 | 6 => cur.attrs.blink = true,
                 7 => cur.attrs.inverse = true,
                 8 => cur.attrs.hidden = true,
                 9 => cur.attrs.strike = true,
@@ -244,7 +258,9 @@ impl Terminal {
                     cur.attrs.dim = false;
                 }
                 23 => cur.attrs.italic = false,
-                24 => cur.attrs.underline = false,
+                21 => cur.attrs.underline = UnderlineStyle::Double,
+                24 => cur.attrs.underline = UnderlineStyle::None,
+                25 => cur.attrs.blink = false,
                 27 => cur.attrs.inverse = false,
                 28 => cur.attrs.hidden = false,
                 29 => cur.attrs.strike = false,
@@ -641,5 +657,24 @@ mod tests {
         feed(&mut t, b"\x1b_Gf=100,a=T,m=0;iVBORw0KGgo=\x1b\\hi");
         assert_eq!(t.grid.lines[0][0].c, 'h');
         assert_eq!(t.grid.lines[0][1].c, 'i');
+    }
+
+    #[test]
+    fn sgr_underline_styles_and_blink() {
+        let mut t = Terminal::new(2, 10);
+        feed(&mut t, b"\x1b[4mA");
+        assert_eq!(t.grid.lines[0][0].attrs.underline, UnderlineStyle::Single);
+        feed(&mut t, b"\x1b[4:3mB");
+        assert_eq!(t.grid.lines[0][1].attrs.underline, UnderlineStyle::Curly);
+        feed(&mut t, b"\x1b[4:5mC");
+        assert_eq!(t.grid.lines[0][2].attrs.underline, UnderlineStyle::Dashed);
+        feed(&mut t, b"\x1b[21mD");
+        assert_eq!(t.grid.lines[0][3].attrs.underline, UnderlineStyle::Double);
+        feed(&mut t, b"\x1b[24mE");
+        assert_eq!(t.grid.lines[0][4].attrs.underline, UnderlineStyle::None);
+        feed(&mut t, b"\x1b[5mF");
+        assert!(t.grid.lines[0][5].attrs.blink);
+        feed(&mut t, b"\x1b[25mG");
+        assert!(!t.grid.lines[0][6].attrs.blink);
     }
 }

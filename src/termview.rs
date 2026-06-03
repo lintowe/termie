@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use vte::Parser;
 
 use crate::color::Color;
-use crate::grid::Attrs;
+use crate::grid::{Attrs, UnderlineStyle};
 use crate::term::Terminal;
 
 /// returns true if `--termview` was requested and handled (caller should exit)
@@ -260,8 +260,13 @@ fn attrs(a: Attrs) -> String {
     if a.italic {
         s.push('i');
     }
-    if a.underline {
-        s.push('u');
+    match a.underline {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => s.push('u'),
+        UnderlineStyle::Double => s.push('2'),
+        UnderlineStyle::Curly => s.push('~'),
+        UnderlineStyle::Dotted => s.push('.'),
+        UnderlineStyle::Dashed => s.push('='),
     }
     if a.inverse {
         s.push('v');
@@ -271,6 +276,9 @@ fn attrs(a: Attrs) -> String {
     }
     if a.hidden {
         s.push('h');
+    }
+    if a.blink {
+        s.push('*');
     }
     if s.is_empty() {
         s.push('-');
