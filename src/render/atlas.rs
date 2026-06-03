@@ -29,6 +29,9 @@ pub struct AtlasGlyph {
     pub height: f32,
     pub left: f32,
     pub top: f32,
+    /// true for a color (emoji) glyph: its pixels live in the RGBA color atlas
+    /// and carry their own color, so the renderer must not tint them with fg
+    pub color: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +60,11 @@ pub struct GlyphAtlas {
     /// row band [y0, y1) needing GPU re-upload; None while dirty means upload
     /// the whole texture (used after a full repack/reconfigure)
     pub dirty_y: Option<(u32, u32)>,
+    /// parallel RGBA atlas for color (emoji) glyphs, packed in the same coords
+    /// as `data`; the renderer samples this when a glyph is color
+    pub color_data: Vec<u8>,
+    pub color_dirty: bool,
+    pub color_dirty_y: Option<(u32, u32)>,
     cursor_x: u32,
     cursor_y: u32,
     shelf_h: u32,
@@ -119,6 +127,9 @@ impl GlyphAtlas {
             dim: 1024,
             dirty: true,
             dirty_y: None,
+            color_data: vec![0u8; 0],
+            color_dirty: false,
+            color_dirty_y: None,
             cursor_x: PAD,
             cursor_y: PAD,
             shelf_h: 0,
@@ -126,6 +137,7 @@ impl GlyphAtlas {
             cache: HashMap::new(),
         };
         atlas.data = vec![0u8; (atlas.dim * atlas.dim) as usize];
+        atlas.color_data = vec![0u8; (atlas.dim * atlas.dim * 4) as usize];
 
         atlas.content = atlas.measure(atlas.content);
         atlas.chrome = atlas.measure(atlas.chrome);
@@ -223,8 +235,13 @@ impl GlyphAtlas {
         for b in self.data.iter_mut() {
             *b = 0;
         }
+        for b in self.color_data.iter_mut() {
+            *b = 0;
+        }
         self.dirty = true;
         self.dirty_y = None;
+        self.color_dirty = true;
+        self.color_dirty_y = None;
     }
 
     fn measure(&mut self, mut m: FontMetrics) -> FontMetrics {
@@ -295,7 +312,7 @@ impl GlyphAtlas {
             .next()
             .and_then(|run| run.glyphs.first().map(|g| g.physical((0.0, 0.0), 1.0).cache_key))?;
 
-        let (w, h, left, top, pixels) = {
+        let (w, h, left, top, is_color, pixels) = {
             let image = self.swash.get_image(&mut self.font_system, cache_key);
             let image = image.as_ref()?;
             let w = image.placement.width;
@@ -303,17 +320,33 @@ impl GlyphAtlas {
             if w == 0 || h == 0 {
                 return None;
             }
-            let pixels = to_alpha(&image.data, w as usize, h as usize, image.content);
-            (w, h, image.placement.left, image.placement.top, pixels)
+            let is_color = matches!(image.content, SwashContent::Color);
+            // color glyphs keep their RGBA; everything else collapses to coverage
+            let pixels = if is_color {
+                image.data.clone()
+            } else {
+                to_alpha(&image.data, w as usize, h as usize, image.content)
+            };
+            (w, h, image.placement.left, image.placement.top, is_color, pixels)
         };
 
         let (x, y) = self.alloc(w, h)?;
-        for row in 0..h {
-            let dst = ((y + row) * self.dim + x) as usize;
-            let src = (row * w) as usize;
-            self.data[dst..dst + w as usize].copy_from_slice(&pixels[src..src + w as usize]);
+        if is_color {
+            for row in 0..h {
+                let dst = (((y + row) * self.dim + x) * 4) as usize;
+                let src = (row * w * 4) as usize;
+                let n = (w * 4) as usize;
+                self.color_data[dst..dst + n].copy_from_slice(&pixels[src..src + n]);
+            }
+            self.mark_color_dirty(y, y + h);
+        } else {
+            for row in 0..h {
+                let dst = ((y + row) * self.dim + x) as usize;
+                let src = (row * w) as usize;
+                self.data[dst..dst + w as usize].copy_from_slice(&pixels[src..src + w as usize]);
+            }
+            self.mark_dirty_rows(y, y + h);
         }
-        self.mark_dirty_rows(y, y + h);
 
         let d = self.dim as f32;
         Some(AtlasGlyph {
@@ -323,7 +356,19 @@ impl GlyphAtlas {
             height: h as f32,
             left: left as f32,
             top: top as f32,
+            color: is_color,
         })
+    }
+
+    /// extend the color atlas's pending-upload band, mirroring mark_dirty_rows
+    fn mark_color_dirty(&mut self, y0: u32, y1: u32) {
+        if !(self.color_dirty && self.color_dirty_y.is_none()) {
+            self.color_dirty_y = Some(match self.color_dirty_y {
+                Some((a, b)) => (a.min(y0), b.max(y1)),
+                None => (y0, y1),
+            });
+        }
+        self.color_dirty = true;
     }
 
     fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
