@@ -1347,7 +1347,14 @@ impl App {
         let id = self.active_focused_id()?;
         let root = self.tabs.get(self.active_tab)?.root.as_ref()?;
         let p = find_pane(root, id)?;
-        let (start, end, url) = p.term.grid.url_at(row, col)?;
+        let g = &p.term.grid;
+        // an explicit OSC 8 hyperlink on the cell wins over url autodetection
+        let cell_link = g.line_at(row).get(col).map(|c| c.link).unwrap_or(0);
+        if let Some(uri) = g.link_uri(cell_link) {
+            let (start, end) = g.link_span(row, col, cell_link);
+            return Some((row, start, end, uri.to_string()));
+        }
+        let (start, end, url) = g.url_at(row, col)?;
         Some((row, start, end, url))
     }
 

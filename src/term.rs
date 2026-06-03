@@ -512,6 +512,17 @@ impl Perform for Terminal {
                     self.cwd = Some(String::from_utf8_lossy(u).into_owned());
                 }
             }
+            b"8" => {
+                // OSC 8 ; params ; URI  — an empty URI ends the current link;
+                // rejoin fields past the id in case the URI itself contains ';'
+                let uri = params.get(2..).map(|rest| {
+                    rest.iter()
+                        .map(|p| String::from_utf8_lossy(p))
+                        .collect::<Vec<_>>()
+                        .join(";")
+                });
+                self.grid.set_link(uri.as_deref());
+            }
             b"133" => {
                 if let Some(m) = params.get(1) {
                     self.last_osc133 = match m.first() {
@@ -676,5 +687,16 @@ mod tests {
         assert!(t.grid.lines[0][5].attrs.blink);
         feed(&mut t, b"\x1b[25mG");
         assert!(!t.grid.lines[0][6].attrs.blink);
+    }
+
+    #[test]
+    fn osc8_hyperlink() {
+        let mut t = Terminal::new(2, 20);
+        feed(&mut t, b"\x1b]8;;https://example.com\x1b\\Link\x1b]8;;\x1b\\X");
+        let id = t.grid.lines[0][0].link;
+        assert_ne!(id, 0);
+        assert_eq!(t.grid.lines[0][3].link, id); // 'k' of Link
+        assert_eq!(t.grid.link_uri(id), Some("https://example.com"));
+        assert_eq!(t.grid.lines[0][4].link, 0); // 'X' after the link ended
     }
 }

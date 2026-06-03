@@ -31,6 +31,8 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub attrs: Attrs,
+    /// OSC 8 hyperlink id into Grid::links; 0 = no link
+    pub link: u16,
 }
 
 impl Default for Cell {
@@ -40,6 +42,7 @@ impl Default for Cell {
             fg: Color::Default,
             bg: Color::DefaultBg,
             attrs: Attrs::default(),
+            link: 0,
         }
     }
 }
@@ -65,6 +68,8 @@ pub struct Cursor {
     pub shape_set: bool,
     /// deferred wrap: cursor sits past the last column until the next print
     pub wrap_pending: bool,
+    /// active OSC 8 hyperlink id applied to printed cells; 0 = none
+    pub link: u16,
 }
 
 impl Default for Cursor {
@@ -79,6 +84,7 @@ impl Default for Cursor {
             shape: CursorShape::Block,
             shape_set: false,
             wrap_pending: false,
+            link: 0,
         }
     }
 }
@@ -104,6 +110,9 @@ pub struct Grid {
     /// absolute line indices of OSC 133 prompt starts, ascending; pruned as
     /// history is evicted
     prompts: Vec<u64>,
+    /// OSC 8 hyperlink targets; a cell's link id indexes here, 0 = none and
+    /// links[0] is the empty sentinel
+    pub links: Vec<String>,
 }
 
 fn blank_line(cols: usize) -> Line {
@@ -150,6 +159,7 @@ impl Grid {
             lines: (0..rows).map(|_| blank_line(cols)).collect(),
             scrollback: VecDeque::new(),
             scrollback_limit: 10_000,
+            links: vec![String::new()],
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             region_top: 0,
@@ -530,19 +540,19 @@ impl Grid {
         }
         let row = self.cursor.row;
         let col = self.cursor.col;
-        let (fg, bg, attrs) = (self.cursor.fg, self.cursor.bg, self.cursor.attrs);
+        let (fg, bg, attrs, link) = (self.cursor.fg, self.cursor.bg, self.cursor.attrs, self.cursor.link);
         // reconcile a wide pair we're partially overwriting so no orphan lead or
         // continuation cell is left behind to render as a phantom gap
         if col + 1 < self.cols && self.lines[row][col + 1].c == '\0' {
-            self.lines[row][col + 1] = Cell { c: ' ', fg, bg, attrs };
+            self.lines[row][col + 1] = Cell { c: ' ', fg, bg, attrs, link };
         }
         if col > 0 && self.lines[row][col].c == '\0' {
-            self.lines[row][col - 1] = Cell { c: ' ', fg, bg, attrs };
+            self.lines[row][col - 1] = Cell { c: ' ', fg, bg, attrs, link };
         }
-        self.lines[row][col] = Cell { c, fg, bg, attrs };
+        self.lines[row][col] = Cell { c, fg, bg, attrs, link };
         if w == 2 && col + 1 < self.cols {
             // continuation cell marks the second half of a wide glyph
-            self.lines[row][col + 1] = Cell { c: '\0', fg, bg, attrs };
+            self.lines[row][col + 1] = Cell { c: '\0', fg, bg, attrs, link };
         }
         if col + w >= self.cols {
             self.cursor.col = self.cols - 1;
@@ -752,7 +762,51 @@ impl Grid {
             fg: self.cursor.fg,
             bg: self.cursor.bg,
             attrs: Attrs::default(),
+            link: 0,
         }
+    }
+
+    /// set the active OSC 8 hyperlink (None or empty ends it); printed cells
+    /// carry the interned id
+    pub fn set_link(&mut self, uri: Option<&str>) {
+        self.cursor.link = match uri {
+            Some(u) if !u.is_empty() => self.intern_link(u),
+            _ => 0,
+        };
+    }
+
+    fn intern_link(&mut self, uri: &str) -> u16 {
+        if let Some(i) = self.links.iter().position(|l| l == uri) {
+            return i as u16;
+        }
+        if self.links.len() >= u16::MAX as usize {
+            return 0;
+        }
+        self.links.push(uri.to_string());
+        (self.links.len() - 1) as u16
+    }
+
+    /// the URI a cell's link id points at, if any
+    pub fn link_uri(&self, id: u16) -> Option<&str> {
+        if id == 0 {
+            return None;
+        }
+        self.links.get(id as usize).map(|s| s.as_str())
+    }
+
+    /// the contiguous run of cells on `row` sharing hyperlink `id`, as a
+    /// [start, end) column range (end exclusive, matching url_at)
+    pub fn link_span(&self, row: usize, col: usize, id: u16) -> (usize, usize) {
+        let line = self.line_at(row);
+        let mut start = col;
+        while start > 0 && line.get(start - 1).map(|c| c.link) == Some(id) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end + 1 < self.cols && line.get(end + 1).map(|c| c.link) == Some(id) {
+            end += 1;
+        }
+        (start, end + 1)
     }
 }
 

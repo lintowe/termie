@@ -248,6 +248,29 @@ fn dump(t: &Terminal, fed: &[u8]) -> String {
         let _ = writeln!(s, "styles:");
         s.push_str(&styles);
     }
+
+    // OSC 8 hyperlink runs
+    let mut links = String::new();
+    for r in 0..g.rows {
+        let line = &g.lines[r];
+        let mut c = 0;
+        while c < g.cols {
+            let id = line[c].link;
+            if id == 0 {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < g.cols && line[c].link == id {
+                c += 1;
+            }
+            let _ = writeln!(links, "  r{r} c{start}-{}: -> {}", c - 1, g.link_uri(id).unwrap_or(""));
+        }
+    }
+    if !links.is_empty() {
+        let _ = writeln!(s, "links:");
+        s.push_str(&links);
+    }
     s
 }
 
