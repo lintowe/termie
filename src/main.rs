@@ -3110,6 +3110,21 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                // right-click copies the active selection, or pastes when there
+                // is none — the familiar one-button terminal convenience
+                if self.selection.is_some() {
+                    self.copy_selection();
+                    self.selection = None;
+                    self.redraw();
+                } else {
+                    self.paste();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
                 button: MouseButton::Middle,
                 ..
             } => {
