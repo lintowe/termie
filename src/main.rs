@@ -235,7 +235,7 @@ fn first_leaf(node: &Node) -> usize {
     }
 }
 
-/// derive a short tab/title label from an OSC-7 cwd uri (e.g. file:///C:/Users/miko -> miko)
+/// derive a short tab/title label from an OSC-7 cwd uri (e.g. file:///C:/Users/dev -> dev)
 fn cwd_label(cwd: Option<&str>) -> String {
     let Some(u) = cwd else {
         return "pwsh".to_string();
@@ -3760,7 +3760,7 @@ mod tests {
 
     #[test]
     fn cwd_path_parses_osc7_uris() {
-        assert_eq!(cwd_path(Some("file:///C:/Users/miko")).as_deref(), Some("C:/Users/miko"));
+        assert_eq!(cwd_path(Some("file:///C:/Users/dev")).as_deref(), Some("C:/Users/dev"));
         assert_eq!(cwd_path(Some("file://host/C:/dev")).as_deref(), Some("C:/dev"));
         assert_eq!(cwd_path(Some("file:///C:/a%20b")).as_deref(), Some("C:/a b"));
         assert_eq!(cwd_path(None), None);
