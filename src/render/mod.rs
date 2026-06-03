@@ -392,6 +392,7 @@ pub struct Renderer {
     uniform_bind_group: wgpu::BindGroup,
 
     atlas_texture: wgpu::Texture,
+    color_texture: wgpu::Texture,
     atlas_bind_group: wgpu::BindGroup,
     /// kept alive for the icon badge texture referenced by atlas_bind_group
     _icon_texture: wgpu::Texture,
@@ -632,6 +633,30 @@ impl Renderer {
             ..Default::default()
         });
 
+        // RGBA atlas for color (emoji) glyphs; srgb so the gpu linearizes on
+        // sample, matching the icon path
+        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("color-glyph-atlas"),
+            size: wgpu::Extent3d {
+                width: atlas.dim,
+                height: atlas.dim,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("color-atlas-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let atlas_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("atlas-bgl"),
             entries: &[
@@ -667,6 +692,22 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -688,6 +729,14 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&icon_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&color_sampler),
                 },
             ],
         });
@@ -766,6 +815,7 @@ impl Renderer {
             uniform_buffer,
             uniform_bind_group,
             atlas_texture,
+            color_texture,
             atlas_bind_group,
             _icon_texture: icon_texture,
             instance_buffer,
@@ -1485,40 +1535,70 @@ impl Renderer {
     }
 
     fn upload_atlas(&mut self) {
-        if !self.atlas.dirty {
-            return;
-        }
         let dim = self.atlas.dim;
         // upload only the row band that changed; a freshly repacked atlas has no
         // band and uploads in full. width is the full atlas width (R8, so
         // bytes_per_row == dim, already 256-aligned for dim=1024)
-        let (y0, y1) = self.atlas.dirty_y.unwrap_or((0, dim));
-        let (y0, y1) = (y0.min(dim), y1.min(dim));
-        if y1 > y0 {
-            let off = (y0 * dim) as usize;
-            let end = (y1 * dim) as usize;
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.atlas.data[off..end],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(dim),
-                    rows_per_image: Some(y1 - y0),
-                },
-                wgpu::Extent3d {
-                    width: dim,
-                    height: y1 - y0,
-                    depth_or_array_layers: 1,
-                },
-            );
+        if self.atlas.dirty {
+            let (y0, y1) = self.atlas.dirty_y.unwrap_or((0, dim));
+            let (y0, y1) = (y0.min(dim), y1.min(dim));
+            if y1 > y0 {
+                let off = (y0 * dim) as usize;
+                let end = (y1 * dim) as usize;
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.atlas_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &self.atlas.data[off..end],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(dim),
+                        rows_per_image: Some(y1 - y0),
+                    },
+                    wgpu::Extent3d {
+                        width: dim,
+                        height: y1 - y0,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            self.atlas.dirty = false;
+            self.atlas.dirty_y = None;
         }
-        self.atlas.dirty = false;
-        self.atlas.dirty_y = None;
+        // the color (emoji) atlas uploads independently; RGBA so bytes_per_row
+        // is dim*4 (16384 for dim=1024, still 256-aligned)
+        if self.atlas.color_dirty {
+            let (y0, y1) = self.atlas.color_dirty_y.unwrap_or((0, dim));
+            let (y0, y1) = (y0.min(dim), y1.min(dim));
+            if y1 > y0 {
+                let off = (y0 * dim * 4) as usize;
+                let end = (y1 * dim * 4) as usize;
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.color_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &self.atlas.color_data[off..end],
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(dim * 4),
+                        rows_per_image: Some(y1 - y0),
+                    },
+                    wgpu::Extent3d {
+                        width: dim,
+                        height: y1 - y0,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            self.atlas.color_dirty = false;
+            self.atlas.color_dirty_y = None;
+        }
     }
 
     fn push_rect(out: &mut Vec<Instance>, x: f32, y: f32, w: f32, h: f32, rgb: Rgb, alpha: f32) {
@@ -1831,7 +1911,7 @@ impl Renderer {
                             uv_min: g.uv_min,
                             uv_max: g.uv_max,
                             color: [lin[0], lin[1], lin[2], 1.0],
-                            kind: 1,
+                            kind: if g.color { 3 } else { 1 },
                             _pad: [0; 3],
                         });
                     }
@@ -1901,7 +1981,7 @@ impl Renderer {
                         uv_min: g.uv_min,
                         uv_max: g.uv_max,
                         color: [lin[0], lin[1], lin[2], alpha],
-                        kind: 1,
+                        kind: if g.color { 3 } else { 1 },
                         _pad: [0; 3],
                     });
                 }
