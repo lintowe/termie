@@ -2334,6 +2334,8 @@ impl App {
         } else {
             tab.focused = new_id;
         }
+        // ease the new pane's accent border in
+        self.focus_anim = Some(Instant::now());
         self.relayout_all();
         self.sync_tabs();
         self.redraw();
@@ -2352,6 +2354,8 @@ impl App {
             Some(node) => {
                 tab.focused = first_leaf(&node);
                 tab.root = Some(node);
+                // ease the surviving pane's accent border in
+                self.focus_anim = Some(Instant::now());
                 self.relayout_all();
                 self.redraw();
             }
