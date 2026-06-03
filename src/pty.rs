@@ -17,6 +17,7 @@ pub enum ShellKind {
     Pwsh,
     PowerShell,
     Cmd,
+    Wsl,
 }
 
 impl ShellKind {
@@ -25,7 +26,8 @@ impl ShellKind {
             ShellKind::Auto => ShellKind::Pwsh,
             ShellKind::Pwsh => ShellKind::PowerShell,
             ShellKind::PowerShell => ShellKind::Cmd,
-            ShellKind::Cmd => ShellKind::Auto,
+            ShellKind::Cmd => ShellKind::Wsl,
+            ShellKind::Wsl => ShellKind::Auto,
         }
     }
 
@@ -35,6 +37,7 @@ impl ShellKind {
             ShellKind::Pwsh => "pwsh",
             ShellKind::PowerShell => "powershell",
             ShellKind::Cmd => "cmd",
+            ShellKind::Wsl => "wsl",
         }
     }
 
@@ -43,6 +46,7 @@ impl ShellKind {
             "pwsh" => ShellKind::Pwsh,
             "powershell" => ShellKind::PowerShell,
             "cmd" => ShellKind::Cmd,
+            "wsl" => ShellKind::Wsl,
             _ => ShellKind::Auto,
         }
     }
@@ -109,6 +113,11 @@ impl Pty {
         cmd.env("POWERSHELL_TELEMETRY_OPTOUT", "1");
         cmd.env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
         cmd.env("DOTNET_NOLOGO", "1");
+        if lower.ends_with("wsl.exe") {
+            // forward the terminal env into the WSL distro so colors and the
+            // kitty-keyboard hint reach programs running inside wsl
+            cmd.env("WSLENV", "TERM/u:COLORTERM/u:TERM_PROGRAM/u");
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
         // close the slave side in the parent so EOF propagates on child exit
@@ -220,5 +229,8 @@ fn resolve_shell(kind: ShellKind) -> String {
         ShellKind::Cmd => find_in_path("cmd.exe")
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "cmd.exe".to_string()),
+        ShellKind::Wsl => find_in_path("wsl.exe")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "wsl.exe".to_string()),
     }
 }
