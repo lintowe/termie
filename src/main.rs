@@ -1781,7 +1781,7 @@ impl App {
         for sp in &mut self.pool {
             if sp.ready && (sp.term.grid.cols != pool_cols || sp.term.grid.rows != pool_rows) {
                 sp.term.resize(pool_rows, pool_cols);
-                sp.pty.resize(pool_cols as u16, pool_rows as u16);
+                sp.pty.resize(pool_rows as u16, pool_cols as u16);
             }
         }
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
@@ -2957,7 +2957,7 @@ impl ApplicationHandler<UserEvent> for App {
                         sp.ready = true;
                         if sp.term.grid.cols != ccols || sp.term.grid.rows != crows {
                             sp.term.resize(crows, ccols);
-                            sp.pty.resize(ccols as u16, crows as u16);
+                            sp.pty.resize(crows as u16, ccols as u16);
                         }
                         if !sp.term.responses.is_empty() {
                             responses = Some(std::mem::take(&mut sp.term.responses));
