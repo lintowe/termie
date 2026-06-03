@@ -450,6 +450,24 @@ mod golden {
                 bytes: b"0123456789|\r\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80|\r\n\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c\xe4\xbd\xa0|\r\n\xe2\x97\x8f\xe2\x97\x86\xe2\x96\xa0\xe2\x96\xb2ABCDEF|",
                 resize: None,
             },
+            // a wide char that won't fit in the last column must wrap whole to
+            // the next row, not split: col 9 stays blank and 你 starts row 1
+            Case {
+                name: "wide_at_edge",
+                rows: 4,
+                cols: 10,
+                bytes: b"123456789\xe4\xbd\xa0ABC",
+                resize: None,
+            },
+            // insert/delete chars: DCH shifts the tail left (blanks in at the
+            // right edge), ICH shifts it right (truncating at the edge)
+            Case {
+                name: "ich_dch",
+                rows: 3,
+                cols: 14,
+                bytes: b"hello world\x1b[1;1H\x1b[6P\x1b[2;1Habcdefg\x1b[2;1H\x1b[3@",
+                resize: None,
+            },
         ]
     }
 
