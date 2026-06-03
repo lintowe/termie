@@ -333,6 +333,53 @@ fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
     x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
 }
 
+/// emit the rects (cell-local x,y,w,h) that draw an underline of the given
+/// style; shared by the GPU renderer and the dev PNG preview so they match
+fn underline_rects(
+    style: crate::grid::UnderlineStyle,
+    cell_w: f32,
+    cell_h: f32,
+    t: f32,
+    mut emit: impl FnMut(f32, f32, f32, f32),
+) {
+    use crate::grid::UnderlineStyle as U;
+    let yb = cell_h - t;
+    match style {
+        U::None => {}
+        U::Single => emit(0.0, yb, cell_w, t),
+        U::Double => {
+            emit(0.0, yb, cell_w, t);
+            emit(0.0, yb - t * 2.0, cell_w, t);
+        }
+        U::Dotted => {
+            let step = (t * 2.0).max(2.0);
+            let mut dx = 0.0;
+            while dx < cell_w {
+                emit(dx, yb, t.min(cell_w - dx), t);
+                dx += step;
+            }
+        }
+        U::Dashed => {
+            let dash = (cell_w / 3.0).max(2.0);
+            let mut dx = 0.0;
+            while dx < cell_w {
+                emit(dx, yb, dash.min(cell_w - dx), t);
+                dx += dash * 2.0;
+            }
+        }
+        U::Curly => {
+            let amp = t;
+            let cy = yb - amp;
+            let cols = cell_w.max(1.0) as i32;
+            for i in 0..cols {
+                let dx = i as f32;
+                let yoff = ((dx / cell_w) * std::f32::consts::TAU).sin() * amp;
+                emit(dx, cy + yoff, 1.0, t);
+            }
+        }
+    }
+}
+
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -1749,14 +1796,9 @@ impl Renderer {
                 // so they also show on blank underlined cells
                 if !blink_hidden {
                     let t = (cell_h * 0.06).max(1.0);
-                    match cell.attrs.underline {
-                        crate::grid::UnderlineStyle::None => {}
-                        crate::grid::UnderlineStyle::Double => {
-                            Self::push_rect(out, x, y + cell_h - t, cell_w, t, fg, 1.0);
-                            Self::push_rect(out, x, y + cell_h - t * 3.0, cell_w, t, fg, 1.0);
-                        }
-                        _ => Self::push_rect(out, x, y + cell_h - t, cell_w, t, fg, 1.0),
-                    }
+                    underline_rects(cell.attrs.underline, cell_w, cell_h, t, |rx, ry, rw, rh| {
+                        Self::push_rect(out, x + rx, y + ry, rw, rh, fg, 1.0);
+                    });
                     if cell.attrs.strike {
                         Self::push_rect(out, x, (y + cell_h * 0.5).round(), cell_w, t, fg, 1.0);
                     }

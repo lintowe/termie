@@ -5,7 +5,6 @@
 
 use super::atlas::{FontId, GlyphAtlas, GlyphKey};
 use crate::color::{Palette, Rgb, ThemeId};
-use crate::grid::UnderlineStyle;
 use crate::term::Terminal;
 
 pub fn render_png(
@@ -93,17 +92,20 @@ pub fn render_png(
                 }
             }
 
-            // decorations mirror the renderer (mod.rs cell loop)
-            match cell.attrs.underline {
-                UnderlineStyle::None => {}
-                UnderlineStyle::Double => {
-                    fill(&mut fb, (iw, ih),x0, y0 + chh - t, cw, t, fgl);
-                    fill(&mut fb, (iw, ih),x0, y0 + chh.saturating_sub(t * 3), cw, t, fgl);
-                }
-                _ => fill(&mut fb, (iw, ih),x0, y0 + chh - t, cw, t, fgl),
-            }
+            // decorations use the shared geometry so they match the renderer
+            super::underline_rects(cell.attrs.underline, cw as f32, chh as f32, t as f32, |rx, ry, rw, rh| {
+                fill(
+                    &mut fb,
+                    (iw, ih),
+                    x0 + rx.max(0.0) as usize,
+                    y0 + ry.max(0.0) as usize,
+                    (rw.ceil() as usize).max(1),
+                    (rh.ceil() as usize).max(1),
+                    fgl,
+                );
+            });
             if cell.attrs.strike {
-                fill(&mut fb, (iw, ih),x0, y0 + chh / 2, cw, t, fgl);
+                fill(&mut fb, (iw, ih), x0, y0 + chh / 2, cw, t, fgl);
             }
         }
     }
