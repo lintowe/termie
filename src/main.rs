@@ -18,12 +18,12 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use vte::Parser;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
 
 use pty::{Pty, PtyMsg, ShellKind};
 use render::{Hit, Hot, PaneView, Renderer};
@@ -48,6 +48,8 @@ enum UserEvent {
     Plugin { id: usize, msg: plugin::PluginMsg },
     /// the marketplace catalog finished fetching on a worker thread
     Market(Vec<plugin::market::Entry>),
+    /// the global quake hotkey fired (from the hotkey thread)
+    ToggleQuake,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -116,6 +118,7 @@ enum PaletteAction {
     CloseTab,
     Settings,
     PaneMode,
+    Quake,
     Theme,
     Plugins,
     Quit,
@@ -134,6 +137,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("close tab", PaletteAction::CloseTab),
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
+    ("quake drop-down", PaletteAction::Quake),
     ("cycle theme", PaletteAction::Theme),
     ("plugins", PaletteAction::Plugins),
     ("quit", PaletteAction::Quit),
@@ -763,6 +767,8 @@ struct Config {
     load_profile: bool,
     close_action: CloseAction,
     backend: render::BackendChoice,
+    // global quake hotkey as (win32 modifiers, virtual-key); None disables it
+    quake_key: Option<(u32, u32)>,
 }
 
 impl Default for Config {
@@ -774,6 +780,7 @@ impl Default for Config {
             load_profile: false,
             close_action: CloseAction::Quit,
             backend: render::BackendChoice::Auto,
+            quake_key: None,
         }
     }
 }
@@ -793,6 +800,7 @@ struct Persisted {
     theme: color::ThemeId,
     font: Option<String>,
     opacity: i32,
+    quake_key: Option<(u32, u32)>,
 }
 
 impl Default for Persisted {
@@ -811,6 +819,7 @@ impl Default for Persisted {
             theme: color::ThemeId::Instrument,
             font: None,
             opacity: 85,
+            quake_key: None,
         }
     }
 }
@@ -944,6 +953,70 @@ struct Discovered {
     granted: Vec<String>,
 }
 
+/// parse a quake hotkey combo like "ctrl+grave" or "ctrl+shift+t" into
+/// (win32 modifiers, virtual-key). returns None if empty or missing a real
+/// modifier so the global hotkey simply stays off
+fn parse_quake_key(s: &str) -> Option<(u32, u32)> {
+    // win32 MOD_* values, plus MOD_NOREPEAT so a held key fires once
+    const MOD_ALT: u32 = 0x0001;
+    const MOD_CONTROL: u32 = 0x0002;
+    const MOD_SHIFT: u32 = 0x0004;
+    const MOD_WIN: u32 = 0x0008;
+    const MOD_NOREPEAT: u32 = 0x4000;
+    let mut mods = MOD_NOREPEAT;
+    let mut vk: Option<u32> = None;
+    for part in s.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "ctrl" | "control" => mods |= MOD_CONTROL,
+            "alt" => mods |= MOD_ALT,
+            "shift" => mods |= MOD_SHIFT,
+            "win" | "super" | "meta" => mods |= MOD_WIN,
+            other => vk = vk.or_else(|| vk_from_name(other)),
+        }
+    }
+    let vk = vk?;
+    // a bare key as a global hotkey would swallow it everywhere; require a mod
+    if mods == MOD_NOREPEAT {
+        return None;
+    }
+    Some((mods, vk))
+}
+
+/// map a key name to a win32 virtual-key code
+fn vk_from_name(name: &str) -> Option<u32> {
+    let b = name.as_bytes();
+    if b.len() == 1 {
+        let c = b[0];
+        // VK 'A'..='Z' and '0'..='9' share their ascii codepoints
+        if c.is_ascii_lowercase() {
+            return Some(c.to_ascii_uppercase() as u32);
+        }
+        if c.is_ascii_digit() {
+            return Some(c as u32);
+        }
+    }
+    if let Some(n) = name.strip_prefix('f').and_then(|d| d.parse::<u32>().ok())
+        && (1..=12).contains(&n)
+    {
+        return Some(0x70 + n - 1); // VK_F1..VK_F12
+    }
+    Some(match name {
+        "grave" | "backtick" | "tilde" | "`" => 0xC0, // VK_OEM_3
+        "space" => 0x20,
+        "tab" => 0x09,
+        "esc" | "escape" => 0x1B,
+        "enter" | "return" => 0x0D,
+        "minus" | "-" => 0xBD,
+        "equal" | "equals" | "=" => 0xBB,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        _ => return None,
+    })
+}
+
 fn load_persisted() -> Persisted {
     let mut p = Persisted::default();
     let Some(path) = config_path() else {
@@ -991,6 +1064,7 @@ fn load_persisted() -> Persisted {
                     p.font = Some(v.to_string());
                 }
             }
+            "quake_key" => p.quake_key = parse_quake_key(v),
             _ => {}
         }
     }
@@ -1037,6 +1111,10 @@ struct App {
     /// pane-mode drag state: a divider being resized (path) or a pane being moved
     drag_divider: Option<Vec<usize>>,
     drag_pane: Option<usize>,
+    /// quake drop-down currently summoned (always-on-top at screen top)
+    quake_shown: bool,
+    /// the global quake hotkey thread has been spawned (once per process)
+    quake_hotkey_spawned: bool,
     /// persisted settings loaded at startup; renderer-owned ones applied in boot
     persisted: Persisted,
     /// last cwd we computed a git branch for (skip the FS walk when unchanged)
@@ -1114,6 +1192,7 @@ impl App {
                 load_profile: p.load_profile,
                 close_action: p.close_action,
                 backend: p.backend,
+                quake_key: p.quake_key,
             },
             persisted: p,
             last_git_cwd: None,
@@ -1137,6 +1216,8 @@ impl App {
             shutting_down: false,
             drag_divider: None,
             drag_pane: None,
+            quake_shown: false,
+            quake_hotkey_spawned: false,
         }
     }
 
@@ -1179,6 +1260,19 @@ impl App {
         }
 
         self.active_tab = 0;
+        // register the global quake hotkey once (opt-in via the quake_key setting)
+        if !self.quake_hotkey_spawned
+            && let Some((mods, vk)) = self.config.quake_key
+        {
+            self.quake_hotkey_spawned = true;
+            let proxy = self.proxy.clone();
+            let ok = win::spawn_global_hotkey(1, mods, vk, move || {
+                let _ = proxy.send_event(UserEvent::ToggleQuake);
+            });
+            if !ok {
+                log::warn!("quake hotkey unavailable (already in use by another app)");
+            }
+        }
         // paint the chrome immediately (no pane yet) and reveal the window, then
         // spawn the first shell asynchronously — pwsh startup never blocks the
         // window appearing. the first pool shell to arrive becomes tab one.
@@ -1981,6 +2075,7 @@ impl App {
             PaletteAction::Settings => self.open_settings(),
             PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
+            PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.cycle_theme();
@@ -2523,6 +2618,37 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_pane_mode(on);
         }
+        self.redraw();
+    }
+
+    /// toggle the quake drop-down: summon the window to the top of the active
+    /// monitor (full width, ~45% height, always-on-top, focused), or hide it.
+    /// only ever reached via the global hotkey or the palette action
+    fn toggle_quake(&mut self) {
+        let Some(win) = self.window.clone() else {
+            return;
+        };
+        if self.quake_shown {
+            win.set_visible(false);
+            win.set_window_level(WindowLevel::Normal);
+            self.quake_shown = false;
+            return;
+        }
+        let mon = win
+            .current_monitor()
+            .or_else(|| win.primary_monitor())
+            .or_else(|| win.available_monitors().next());
+        if let Some(mon) = mon {
+            let pos = mon.position();
+            let size = mon.size();
+            let h = ((size.height as f64 * 0.45).round() as u32).max(120);
+            win.set_outer_position(PhysicalPosition::new(pos.x, pos.y));
+            let _ = win.request_inner_size(PhysicalSize::new(size.width, h));
+        }
+        win.set_window_level(WindowLevel::AlwaysOnTop);
+        win.set_visible(true);
+        win.focus_window();
+        self.quake_shown = true;
         self.redraw();
     }
 
@@ -3109,6 +3235,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                 }
             }
+            UserEvent::ToggleQuake => self.toggle_quake(),
         }
     }
 
@@ -3784,5 +3911,20 @@ mod tests {
         assert_eq!(m2, ModifiersState::ALT);
         assert_eq!(k2, Key::Named(NamedKey::Enter));
         assert!(parse_combo("ctrl+").is_none());
+    }
+
+    #[test]
+    fn parse_quake_key_forms() {
+        // MOD_NOREPEAT(0x4000) is always set; ctrl=0x2, shift=0x4, alt=0x1
+        // ctrl+grave -> VK_OEM_3 (0xC0)
+        assert_eq!(parse_quake_key("ctrl+grave"), Some((0x4002, 0xC0)));
+        // letters map to their uppercase ascii == virtual-key
+        assert_eq!(parse_quake_key("ctrl+shift+t"), Some((0x4006, 0x54)));
+        // f-keys -> 0x70.. ; alt only
+        assert_eq!(parse_quake_key("alt+f12"), Some((0x4001, 0x7B)));
+        // a bare key (no real modifier) is rejected so it can't swallow the key
+        assert_eq!(parse_quake_key("grave"), None);
+        assert_eq!(parse_quake_key(""), None);
+        assert_eq!(parse_quake_key("ctrl+nonsense"), None);
     }
 }

@@ -13,6 +13,7 @@
 - **Per-tab shell** via "new tab: pwsh / cmd / wsl"; **WSL** added as a shell option.
 - **Drag a file** into the terminal to type its path; **right-click** to copy the selection or paste.
 - **Plugin dock widgets are clickable**, delivering a `widget_clicked` event to the owning plugin.
+- **Quake drop-down mode** (opt-in): set `quake_key=ctrl+grave` in `config` to register a process-global hotkey that drops termie down from the top of the screen (always-on-top) and hides it again. Also on the command palette as "quake drop-down".
 
 ### Customization
 - **`colors.conf`** color overrides and **`keybindings.conf`** rebindable keys under `%APPDATA%\termie\`.
