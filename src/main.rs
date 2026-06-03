@@ -98,6 +98,7 @@ struct Sel {
 #[derive(Clone, Copy)]
 enum PaletteAction {
     NewTab,
+    NewTabHere,
     SplitV,
     SplitH,
     NextTab,
@@ -112,6 +113,7 @@ enum PaletteAction {
 
 const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("new tab", PaletteAction::NewTab),
+    ("new tab here", PaletteAction::NewTabHere),
     ("split vertical", PaletteAction::SplitV),
     ("split horizontal", PaletteAction::SplitH),
     ("next tab", PaletteAction::NextTab),
@@ -561,8 +563,9 @@ fn build_pane(
     shell: ShellKind,
     load_profile: bool,
     scrollback: usize,
+    cwd: Option<&str>,
 ) -> Result<Pane> {
-    let pty = Pty::spawn(rows as u16, cols as u16, shell, load_profile)?;
+    let pty = Pty::spawn(rows as u16, cols as u16, shell, load_profile, cwd)?;
     let mut term = Terminal::new(rows, cols);
     term.grid.set_scrollback_limit(scrollback);
     Ok(Pane {
@@ -1050,7 +1053,7 @@ impl App {
     }
 
     /// build a pane synchronously and start its reader (boot + split fallback)
-    fn spawn_pane(&mut self, cols: usize, rows: usize) -> Result<Pane> {
+    fn spawn_pane(&mut self, cols: usize, rows: usize, cwd: Option<String>) -> Result<Pane> {
         let id = self.next_id;
         self.next_id += 1;
         let mut pane = build_pane(
@@ -1060,6 +1063,7 @@ impl App {
             self.config.shell,
             self.config.load_profile,
             self.config.scrollback,
+            cwd.as_deref(),
         )?;
         self.start_reader(&mut pane);
         Ok(pane)
@@ -1137,7 +1141,7 @@ impl App {
             let proxy = self.proxy.clone();
             self.pending_warm += 1;
             std::thread::spawn(move || {
-                let pane = build_pane(id, cols, rows, shell, profile, sb).ok().map(Box::new);
+                let pane = build_pane(id, cols, rows, shell, profile, sb, None).ok().map(Box::new);
                 let _ = proxy.send_event(UserEvent::PaneReady(pane));
             });
         }
@@ -1690,19 +1694,34 @@ impl App {
         self.tabs.get(self.active_tab).map(|t| t.focused)
     }
 
+    /// the focused pane's working directory (from OSC 7), as a filesystem path
+    fn focused_cwd(&self) -> Option<String> {
+        let id = self.active_focused_id()?;
+        let root = self.tabs.get(self.active_tab)?.root.as_ref()?;
+        let p = find_pane(root, id)?;
+        cwd_path(p.term.cwd.as_deref())
+    }
+
     fn new_tab(&mut self) {
+        self.new_tab_cwd(None);
+    }
+
+    /// open a new tab; Some(cwd) opens a fresh shell there (a "new tab here"),
+    /// None grabs a warm pool shell for an instant home-dir tab
+    fn new_tab_cwd(&mut self, cwd: Option<String>) {
         if self.renderer.is_none() {
             return;
         }
         let (cols, rows) = self.content_pane_size();
-        // grab a pre-warmed pool shell that already fits (instant); else spawn fresh
-        let pane = match self
-            .pool
-            .iter()
-            .position(|p| p.term.grid.cols == cols && p.term.grid.rows == rows)
+        let pane = if cwd.is_none()
+            && let Some(i) = self
+                .pool
+                .iter()
+                .position(|p| p.term.grid.cols == cols && p.term.grid.rows == rows)
         {
-            Some(i) => Ok(self.pool.remove(i)),
-            None => self.spawn_pane(cols, rows),
+            Ok(self.pool.remove(i))
+        } else {
+            self.spawn_pane(cols, rows, cwd)
         };
         if let Ok(pane) = pane {
             let fid = pane.id;
@@ -1774,6 +1793,10 @@ impl App {
     fn run_palette_action(&mut self, a: PaletteAction, event_loop: &ActiveEventLoop) {
         match a {
             PaletteAction::NewTab => self.new_tab(),
+            PaletteAction::NewTabHere => {
+                let cwd = self.focused_cwd();
+                self.new_tab_cwd(cwd);
+            }
             PaletteAction::SplitV => self.split_focused(Dir::Vertical),
             PaletteAction::SplitH => self.split_focused(Dir::Horizontal),
             PaletteAction::NextTab => {
@@ -2076,10 +2099,14 @@ impl App {
         let Some(focused) = self.active_focused_id() else {
             return;
         };
+        let cwd = self.focused_cwd();
+        // a known cwd means spawn fresh there (pool shells live in home); else
         // prefer a ready pool shell (instant — relayout resizes it to the split
-        // rect, safe since it's past startup); else spawn fresh at exactly the
-        // post-split rect so the immediate relayout never resizes pwsh mid-startup
-        let pane = if let Some(i) = self.pool.iter().position(|p| p.ready) {
+        // rect, safe since it's past startup), spawning fresh at the post-split
+        // rect only as a fallback so pwsh is never resized mid-startup
+        let pane = if cwd.is_none()
+            && let Some(i) = self.pool.iter().position(|p| p.ready)
+        {
             self.pool.remove(i)
         } else {
             let foc_rect = self
@@ -2104,7 +2131,7 @@ impl App {
                 }
                 _ => self.content_pane_size(),
             };
-            let Ok(p) = self.spawn_pane(cols, rows) else {
+            let Ok(p) = self.spawn_pane(cols, rows, cwd) else {
                 return;
             };
             p
@@ -3500,4 +3527,17 @@ fn main() -> Result<()> {
     let mut app = App::new(proxy);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cwd_path_parses_osc7_uris() {
+        assert_eq!(cwd_path(Some("file:///C:/Users/miko")).as_deref(), Some("C:/Users/miko"));
+        assert_eq!(cwd_path(Some("file://host/C:/dev")).as_deref(), Some("C:/dev"));
+        assert_eq!(cwd_path(Some("file:///C:/a%20b")).as_deref(), Some("C:/a b"));
+        assert_eq!(cwd_path(None), None);
+    }
 }

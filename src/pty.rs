@@ -65,7 +65,7 @@ pub struct Pty {
 impl Pty {
     /// create the pty + child process (the slow part — safe to call off-thread).
     /// the output thread isn't started until start_reader().
-    pub fn spawn(rows: u16, cols: u16, shell: ShellKind, load_profile: bool) -> Result<Pty> {
+    pub fn spawn(rows: u16, cols: u16, shell: ShellKind, load_profile: bool, cwd: Option<&str>) -> Result<Pty> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: rows.max(1),
@@ -88,7 +88,11 @@ impl Pty {
             cmd.arg("-Command");
             cmd.arg(PWSH_OSC7_PROMPT);
         }
-        if let Some(home) = env::var_os("USERPROFILE") {
+        // start in the requested directory (a new tab/split in the focused repo),
+        // falling back to home if it's unset or no longer a valid directory
+        if let Some(dir) = cwd.filter(|d| std::path::Path::new(*d).is_dir()) {
+            cmd.cwd(dir);
+        } else if let Some(home) = env::var_os("USERPROFILE") {
             cmd.cwd(home);
         }
         cmd.env("TERM", "xterm-256color");
