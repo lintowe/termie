@@ -3020,3 +3020,39 @@ impl Renderer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod gpu_tests {
+    // validate shader.wgsl headlessly: create a device with no surface and run
+    // it through naga's front-end validation. catches wgsl syntax/type errors
+    // (e.g. a malformed binding or fragment branch) without a window. skips when
+    // no GPU adapter is available, so CI without a GPU still passes
+    #[test]
+    fn shader_validates() {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        desc.backends = wgpu::Backends::all();
+        let instance = wgpu::Instance::new(desc);
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) else {
+            return;
+        };
+        let Ok((device, _queue)) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("shader-test-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        })) else {
+            return;
+        };
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cell-shader-test"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let err = pollster::block_on(scope.pop());
+        assert!(err.is_none(), "shader.wgsl failed validation: {err:?}");
+    }
+}
