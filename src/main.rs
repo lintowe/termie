@@ -322,6 +322,89 @@ fn load_color_overrides() -> Vec<(String, color::Rgb)> {
     out
 }
 
+/// match a key event's logical key against a parsed binding key
+fn key_matches(ev: &Key, bind: &Key) -> bool {
+    match (ev, bind) {
+        (Key::Named(a), Key::Named(b)) => a == b,
+        (Key::Character(a), Key::Character(b)) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
+/// parse a single key token: a name (enter/tab/esc/up/f5/...) or a one-char key
+fn parse_key(s: &str) -> Option<Key> {
+    Some(match s {
+        "enter" | "return" => Key::Named(NamedKey::Enter),
+        "tab" => Key::Named(NamedKey::Tab),
+        "space" => Key::Named(NamedKey::Space),
+        "esc" | "escape" => Key::Named(NamedKey::Escape),
+        "up" => Key::Named(NamedKey::ArrowUp),
+        "down" => Key::Named(NamedKey::ArrowDown),
+        "left" => Key::Named(NamedKey::ArrowLeft),
+        "right" => Key::Named(NamedKey::ArrowRight),
+        "f1" => Key::Named(NamedKey::F1),
+        "f2" => Key::Named(NamedKey::F2),
+        "f3" => Key::Named(NamedKey::F3),
+        "f4" => Key::Named(NamedKey::F4),
+        "f5" => Key::Named(NamedKey::F5),
+        "f6" => Key::Named(NamedKey::F6),
+        "f7" => Key::Named(NamedKey::F7),
+        "f8" => Key::Named(NamedKey::F8),
+        "f9" => Key::Named(NamedKey::F9),
+        "f10" => Key::Named(NamedKey::F10),
+        "f11" => Key::Named(NamedKey::F11),
+        "f12" => Key::Named(NamedKey::F12),
+        s if s.chars().count() == 1 => Key::Character(s.into()),
+        _ => return None,
+    })
+}
+
+/// parse a combo like "ctrl+shift+t" into modifiers + a key
+fn parse_combo(s: &str) -> Option<(ModifiersState, Key)> {
+    let mut mods = ModifiersState::empty();
+    let mut key = None;
+    for part in s.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => mods |= ModifiersState::CONTROL,
+            "shift" => mods |= ModifiersState::SHIFT,
+            "alt" => mods |= ModifiersState::ALT,
+            "super" | "win" | "cmd" | "meta" => mods |= ModifiersState::SUPER,
+            "" => {}
+            other => key = parse_key(other),
+        }
+    }
+    key.map(|k| (mods, k))
+}
+
+/// load user keybindings from %APPDATA%\termie\keybindings.conf (combo=action,
+/// where action matches a command-palette entry, e.g. `ctrl+alt+t=new tab here`)
+fn load_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
+    let mut out = Vec::new();
+    let Some(dir) = std::env::var_os("APPDATA") else {
+        return out;
+    };
+    let path = std::path::Path::new(&dir).join("termie").join("keybindings.conf");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((combo, action)) = line.split_once('=')
+            && let Some((mods, key)) = parse_combo(combo.trim())
+            && let Some(a) = PALETTE_ACTIONS
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(action.trim()))
+                .map(|(_, a)| *a)
+        {
+            out.push((mods, key, a));
+        }
+    }
+    out
+}
+
 /// the git branch (or short detached hash) for a cwd, walking up to the repo root.
 /// reads at most a few hundred bytes of .git/HEAD and caps the walk depth so a
 /// hostile cwd / oversized HEAD can't hang or OOM the UI thread
@@ -933,6 +1016,9 @@ struct App {
     pressed: Option<Hot>,
     last_title: String,
     config: Config,
+    /// user keybindings (combo -> palette action) loaded from disk; checked
+    /// before the built-in shortcuts, empty when there is no config file
+    keybindings: Vec<(ModifiersState, Key, PaletteAction)>,
     settings_open: bool,
     settings_anim: Option<Instant>,
     /// pool shells currently spawning on worker threads (not yet in `pool`)
@@ -995,6 +1081,7 @@ impl App {
             next_id: 0,
             layout_cache: Vec::new(),
             mods: ModifiersState::empty(),
+            keybindings: load_keybindings(),
             focused: true,
             maximized: false,
             pane_mode: false,
@@ -2542,6 +2629,26 @@ impl App {
         if event.state != ElementState::Pressed {
             return false;
         }
+        // user keybindings take precedence over the built-in shortcuts, but
+        // never over an open overlay or pane mode
+        if !self.keybindings.is_empty()
+            && self.market.is_none()
+            && self.find.is_none()
+            && self.palette.is_none()
+            && !self.settings_open
+            && !self.pane_mode
+        {
+            let mods = self.mods;
+            let act = self
+                .keybindings
+                .iter()
+                .find(|(m, k, _)| *m == mods && key_matches(&event.logical_key, k))
+                .map(|(_, _, a)| *a);
+            if let Some(a) = act {
+                self.run_palette_action(a, event_loop);
+                return true;
+            }
+        }
         // the plugins marketplace overlay captures keys while open
         if self.market.is_some() && self.market_input(&event.logical_key) {
             return true;
@@ -3643,5 +3750,17 @@ mod tests {
         assert_eq!(parse_color("#f80"), Some(color::Rgb::new(255, 136, 0)));
         assert_eq!(parse_color("255, 136, 0"), Some(color::Rgb::new(255, 136, 0)));
         assert_eq!(parse_color("nope"), None);
+    }
+
+    #[test]
+    fn parse_combo_forms() {
+        let (m, k) = parse_combo("ctrl+shift+t").unwrap();
+        assert_eq!(m, ModifiersState::CONTROL | ModifiersState::SHIFT);
+        // matching is case-insensitive (shift uppercases the char)
+        assert!(key_matches(&Key::Character("T".into()), &k));
+        let (m2, k2) = parse_combo("alt+enter").unwrap();
+        assert_eq!(m2, ModifiersState::ALT);
+        assert_eq!(k2, Key::Named(NamedKey::Enter));
+        assert!(parse_combo("ctrl+").is_none());
     }
 }
