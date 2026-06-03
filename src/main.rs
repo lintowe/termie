@@ -2719,6 +2719,7 @@ impl ApplicationHandler<UserEvent> for App {
         match ev {
             UserEvent::Pty { id, bytes } => {
                 let mut responses: Option<Vec<u8>> = None;
+                let mut clip: Option<String> = None;
                 let mut found = false;
                 let mut in_sync = false;
                 let mut rang = false;
@@ -2729,6 +2730,9 @@ impl ApplicationHandler<UserEvent> for App {
                             in_sync = p.term.sync_output;
                             if !p.term.responses.is_empty() {
                                 responses = Some(std::mem::take(&mut p.term.responses));
+                            }
+                            if let Some(text) = p.term.clipboard.take() {
+                                clip = Some(text);
                             }
                             if p.term.bell {
                                 p.term.bell = false;
@@ -2757,7 +2761,13 @@ impl ApplicationHandler<UserEvent> for App {
                         if !sp.term.responses.is_empty() {
                             responses = Some(std::mem::take(&mut sp.term.responses));
                         }
+                        if let Some(text) = sp.term.clipboard.take() {
+                            clip = Some(text);
+                        }
                     }
+                }
+                if let Some(t) = clip {
+                    win::clipboard_set(&t);
                 }
                 if let Some(r) = responses {
                     let mut wrote = false;

@@ -180,6 +180,9 @@ fn dump(t: &Terminal, fed: &[u8]) -> String {
     if !t.responses.is_empty() {
         let _ = writeln!(s, "responses: {}  ({:?})", hex(&t.responses), String::from_utf8_lossy(&t.responses));
     }
+    if let Some(cb) = &t.clipboard {
+        let _ = writeln!(s, "clipboard: {cb:?}");
+    }
 
     // column rulers (tens digit every 10, units below)
     let gut = 3usize;

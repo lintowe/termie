@@ -55,6 +55,8 @@ pub struct Terminal {
     /// kitty keyboard protocol flag stack; the last entry is active. starts as
     /// [0] (legacy encoding) and apps push/set richer reporting onto it
     kbd_stack: Vec<u8>,
+    /// pending OSC 52 clipboard write, drained by the app to the OS clipboard
+    pub clipboard: Option<String>,
 }
 
 impl Terminal {
@@ -76,6 +78,7 @@ impl Terminal {
             dirty: true,
             sync_output: false,
             kbd_stack: vec![0],
+            clipboard: None,
         }
     }
 
@@ -328,6 +331,36 @@ fn parse_ext_color_slice(s: &[u16]) -> Option<Color> {
     }
 }
 
+/// minimal base64 decode for OSC 52 clipboard payloads (skips padding and
+/// whitespace, returns None on an invalid character)
+fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in input {
+        if c == b'=' || c == b'\n' || c == b'\r' {
+            continue;
+        }
+        buf = (buf << 6) | val(c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
 fn param_at(params: &Params, idx: usize, default: u16) -> u16 {
     params
         .iter()
@@ -523,6 +556,16 @@ impl Perform for Terminal {
                 });
                 self.grid.set_link(uri.as_deref());
             }
+            b"52" => {
+                // OSC 52 ; targets ; base64 — clipboard write. ignore "?" (a
+                // read query) so a remote program can't exfiltrate the clipboard
+                if let Some(&data) = params.get(2)
+                    && data != b"?"
+                    && let Some(bytes) = base64_decode(data)
+                {
+                    self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
+                }
+            }
             b"133" => {
                 if let Some(m) = params.get(1) {
                     self.last_osc133 = match m.first() {
@@ -698,5 +741,17 @@ mod tests {
         assert_eq!(t.grid.lines[0][3].link, id); // 'k' of Link
         assert_eq!(t.grid.link_uri(id), Some("https://example.com"));
         assert_eq!(t.grid.lines[0][4].link, 0); // 'X' after the link ended
+    }
+
+    #[test]
+    fn osc52_sets_clipboard() {
+        let mut t = Terminal::new(2, 20);
+        // base64("hello") == aGVsbG8=
+        feed(&mut t, b"\x1b]52;c;aGVsbG8=\x1b\\");
+        assert_eq!(t.clipboard.as_deref(), Some("hello"));
+        // a read query ("?") must be ignored, not answered
+        t.clipboard = None;
+        feed(&mut t, b"\x1b]52;c;?\x1b\\");
+        assert_eq!(t.clipboard, None);
     }
 }
