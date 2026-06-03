@@ -1123,4 +1123,45 @@ mod tests {
         assert_eq!(row_text(&g, 0), "AAAA");
         assert_eq!(row_text(&g, 1), "BBBBBBBBBBBBBBBBBBBBBBBBB");
     }
+
+    #[test]
+    fn reflow_preserves_scrollback_content() {
+        let mut g = Grid::new(4, 10);
+        g.set_scrollback_limit(100);
+        // ten distinct hard-newline lines on a 4-row screen, so six scroll into
+        // scrollback; "line-NN" is 7 chars so nothing wraps at width 10
+        for i in 0..10 {
+            for ch in format!("line-{i:02}").chars() {
+                g.put_char(ch);
+            }
+            g.carriage_return();
+            g.linefeed();
+        }
+        // rejoin soft-wrapped physical rows into logical lines before reading,
+        // so the check holds even at a width where the labels wrap
+        let collect_labels = |g: &Grid| -> Vec<String> {
+            let mut out = Vec::new();
+            let mut cur = String::new();
+            for l in g.scrollback.iter().chain(g.lines.iter()) {
+                cur.extend(l.iter().map(|c| c.c));
+                if !l.wrapped {
+                    let t = cur.trim_end().to_string();
+                    if t.starts_with("line-") {
+                        out.push(t);
+                    }
+                    cur.clear();
+                }
+            }
+            out
+        };
+        let expect: Vec<String> = (0..10).map(|i| format!("line-{i:02}")).collect();
+        // widen then narrow: reflow drains + rejoins + redistributes scrollback
+        // each time, and must never lose, duplicate, or reorder a line
+        g.resize(4, 20);
+        assert_eq!(collect_labels(&g), expect, "after widen");
+        g.resize(4, 6);
+        assert_eq!(collect_labels(&g), expect, "after narrow (each line wraps)");
+        g.resize(4, 30);
+        assert_eq!(collect_labels(&g), expect, "after re-widen");
+    }
 }
