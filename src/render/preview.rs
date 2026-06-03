@@ -12,10 +12,16 @@ pub fn render_png(
     theme: ThemeId,
     content_pt: f32,
     scale: f32,
+    system_fonts: bool,
     path: &str,
 ) -> std::io::Result<(usize, usize)> {
     let pal = Palette::from_theme(theme);
     let mut atlas = GlyphAtlas::new(content_pt, content_pt, scale, None);
+    // mirror the app's lazy fallback: with system fonts loaded, cosmic-text can
+    // shape CJK/emoji the bundled font lacks instead of rendering tofu
+    if system_fonts {
+        atlas.load_system_fonts();
+    }
     let m = atlas.metrics(FontId::Content);
     let cw = (m.cell_w.round() as usize).max(1);
     let chh = (m.cell_h.round() as usize).max(1);

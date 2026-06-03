@@ -72,7 +72,9 @@ pub fn maybe_run() -> bool {
         };
         let pt = val("--pt").and_then(|v| v.parse().ok()).unwrap_or(16.0f32);
         let scale = val("--scale").and_then(|v| v.parse().ok()).unwrap_or(2.0f32);
-        match crate::render::preview::render_png(&term, theme, pt, scale, &path) {
+        // --system-fonts loads installed fonts so CJK/emoji fall back like the app
+        let system_fonts = args.iter().any(|a| a == "--system-fonts");
+        match crate::render::preview::render_png(&term, theme, pt, scale, system_fonts, &path) {
             Ok((w, h)) => println!("wrote {path} ({w}x{h})"),
             Err(e) => println!("png error: {e}"),
         }
