@@ -440,6 +440,16 @@ mod golden {
                 bytes: b"\x1b[4:3mcurly\x1b[0m \x1b[4:2mdouble\x1b[0m \x1b[4:4mdotted\x1b[0m",
                 resize: None,
             },
+            // cell-width correctness: each line is 10 cells of content then a
+            // `|` marker, which must land in the same column on every row.
+            // ascii (w1), box-drawing (w1), CJK (w2 x5), symbols (w1) + ascii
+            Case {
+                name: "char_widths",
+                rows: 6,
+                cols: 16,
+                bytes: b"0123456789|\r\n\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80|\r\n\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c\xe4\xbd\xa0|\r\n\xe2\x97\x8f\xe2\x97\x86\xe2\x96\xa0\xe2\x96\xb2ABCDEF|",
+                resize: None,
+            },
         ]
     }
 
