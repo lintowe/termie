@@ -1030,6 +1030,9 @@ struct App {
     keybindings: Vec<(ModifiersState, Key, PaletteAction)>,
     settings_open: bool,
     settings_anim: Option<Instant>,
+    /// set when the focused pane changes, so its accent border eases in instead
+    /// of snapping; cleared once the ease settles
+    focus_anim: Option<Instant>,
     /// pool shells currently spawning on worker threads (not yet in `pool`)
     pending_warm: usize,
     /// set once the app is exiting so no new shells are spawned during teardown
@@ -1136,6 +1139,7 @@ impl App {
             plugin_subs: Vec::new(),
             settings_open: false,
             settings_anim: None,
+            focus_anim: None,
             pending_warm: 0,
             shutting_down: false,
             drag_divider: None,
@@ -1664,6 +1668,7 @@ impl App {
     /// render one frame: window title + every visible pane
     fn paint(&mut self) {
         let clock = win::local_hm();
+        let focus_ease = self.focus_ease();
         let git = self.git.clone();
         let sessions = self.tabs.len();
         let palette_view = self.palette.as_ref().map(|p| render::PaletteView {
@@ -1776,7 +1781,7 @@ impl App {
                     .unwrap_or_default(),
                 None => Vec::new(),
             };
-            if let Err(e) = r.render(&views, *focused, *maximized) {
+            if let Err(e) = r.render(&views, *focused, *maximized, focus_ease) {
                 log::error!("render error: {e:#}");
             }
         }
@@ -1945,6 +1950,19 @@ impl App {
                 } else {
                     1.0 - eased
                 }
+            }
+        }
+    }
+
+    /// 0→1 fade for the focused-pane accent border after a focus change, so it
+    /// eases in rather than snapping (1.0 once settled)
+    fn focus_ease(&self) -> f32 {
+        const DUR: f32 = 0.16;
+        match self.focus_anim {
+            None => 1.0,
+            Some(t) => {
+                let e = (t.elapsed().as_secs_f32() / DUR).clamp(0.0, 1.0);
+                1.0 - (1.0 - e).powi(3)
             }
         }
     }
@@ -2362,7 +2380,8 @@ impl App {
             false
         };
         if changed {
-            // tab label + git track the focused pane
+            // tab label + git track the focused pane; ease the accent border in
+            self.focus_anim = Some(Instant::now());
             self.sync_tabs();
             self.redraw();
             if let (Some(id), false) = (hit, self.plugins.is_empty()) {
@@ -2632,6 +2651,8 @@ impl App {
             if let Some(tab) = self.tabs.get_mut(self.active_tab) {
                 tab.focused = id;
             }
+            // ease the accent border in on the newly focused pane
+            self.focus_anim = Some(Instant::now());
             self.sync_tabs();
             self.redraw();
         }
@@ -3686,6 +3707,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(t) = self.settings_anim {
             if t.elapsed().as_secs_f32() >= 0.14 {
                 self.settings_anim = None;
+            } else {
+                self.redraw();
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    Instant::now() + Duration::from_millis(16),
+                ));
+                return;
+            }
+        }
+        // focused-pane accent border ease: drive ~60fps until it settles, then
+        // fall back to the idle (event-driven) cadence
+        if let Some(t) = self.focus_anim {
+            if t.elapsed().as_secs_f32() >= 0.16 {
+                self.focus_anim = None;
             } else {
                 self.redraw();
                 event_loop.set_control_flow(ControlFlow::WaitUntil(

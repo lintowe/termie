@@ -1917,7 +1917,7 @@ impl Renderer {
     }
 
     #[allow(non_snake_case)]
-    fn build(&mut self, panes: &[PaneView], focused: bool, maximized: bool) -> Vec<Instance> {
+    fn build(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32) -> Vec<Instance> {
         // chrome colors come from the active theme's palette
         let INK_0 = self.palette.ink0;
         let INK_1 = self.palette.ink1;
@@ -2003,7 +2003,8 @@ impl Renderer {
             }
             for (_, _, foc, rect) in &pane_info {
                 if *foc {
-                    Self::stroke_rect_a(&mut out, *rect, hair, PAPER, 0.55);
+                    // ease the accent border in on focus change (1.0 once settled)
+                    Self::stroke_rect_a(&mut out, *rect, hair, PAPER, 0.55 * focus_ease);
                 }
             }
         }
@@ -2831,8 +2832,8 @@ impl Renderer {
         Self::draw_text(&mut self.atlas, out, FontId::Chrome, px, y_top, val, val_c, 1.0, track)
     }
 
-    pub fn render(&mut self, panes: &[PaneView], focused: bool, maximized: bool) -> Result<()> {
-        let instances = self.build(panes, focused, maximized);
+    pub fn render(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32) -> Result<()> {
+        let instances = self.build(panes, focused, maximized, focus_ease);
         self.upload_atlas();
 
         let needed = instances.len() as u64;
