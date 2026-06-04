@@ -182,3 +182,37 @@ pub fn clipboard_set(_text: &str) {}
 pub fn clipboard_get() -> String {
     String::new()
 }
+
+/// register a process-global hotkey on a dedicated thread and call `on_press`
+/// each time it fires. returns true if it registered (false if the combination
+/// is already taken). the thread lives for the process; the os frees the hotkey
+/// on exit
+#[cfg(windows)]
+pub fn spawn_global_hotkey(id: i32, modifiers: u32, vk: u32, on_press: impl Fn() + Send + 'static) -> bool {
+    use std::sync::mpsc;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+    use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+    // RegisterHotKey with a null hwnd posts WM_HOTKEY to the calling thread's
+    // queue, so register and pump on the same dedicated thread
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || unsafe {
+        let ok = RegisterHotKey(None, id, HOT_KEY_MODIFIERS(modifiers), vk).is_ok();
+        let _ = tx.send(ok);
+        if !ok {
+            return;
+        }
+        let mut msg = MSG::default();
+        // GetMessageW returns >0 for a message, 0 for WM_QUIT, -1 on error
+        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            if msg.message == WM_HOTKEY {
+                on_press();
+            }
+        }
+    });
+    rx.recv().unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+pub fn spawn_global_hotkey(_id: i32, _modifiers: u32, _vk: u32, _on_press: impl Fn() + Send + 'static) -> bool {
+    false
+}
