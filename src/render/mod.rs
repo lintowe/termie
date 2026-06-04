@@ -108,6 +108,7 @@ pub enum Hot {
     LoadProfile,
     CloseActionCycle,
     BackendCycle,
+    OpenPlugins,
 }
 
 /// a terminal to draw at a pixel rect within the window
@@ -297,6 +298,7 @@ struct SettingsGeom {
     sec_app_y: f32,
     sec_beh_y: f32,
     sec_shell_y: f32,
+    sec_plugins_y: f32,
     sec_keys_y: f32,
     sec_about_y: f32,
     // row label baselines (absolute, scroll-adjusted)
@@ -312,6 +314,7 @@ struct SettingsGeom {
     profile_y: f32,
     close_y: f32,
     backend_y: f32,
+    plugins_y: f32,
     keys_start_y: f32,
     about_start_y: f32,
     // interactive rects (absolute, scroll-adjusted)
@@ -331,6 +334,7 @@ struct SettingsGeom {
     profile_btn: Rect,
     close_action_btn: Rect,
     backend_btn: Rect,
+    plugins_btn: Rect,
     /// body controls only (absolute); `close_btn` is handled separately
     controls: Vec<(Hot, Rect)>,
 }
@@ -1446,6 +1450,11 @@ impl Renderer {
         let backend_l = y;
         y += row;
         y += sec_gap;
+        let sec_plugins = y;
+        y += hdr_adv;
+        let plugins_l = y;
+        y += row;
+        y += sec_gap;
         let sec_keys = y;
         y += hdr_adv;
         let keys_start_l = y;
@@ -1474,6 +1483,7 @@ impl Renderer {
         let profile_btn = (val_x, ay(profile_l), cluster, bh);
         let close_action_btn = (val_x, ay(close_l), cluster, bh);
         let backend_btn = (val_x, ay(backend_l), cluster, bh);
+        let plugins_btn = (val_x, ay(plugins_l), cluster, bh);
 
         let chip_gap = 8.0 * s;
         let chip_w = ((content_w - chip_gap * 2.0) / 3.0).floor();
@@ -1504,6 +1514,7 @@ impl Renderer {
             (Hot::LoadProfile, profile_btn),
             (Hot::CloseActionCycle, close_action_btn),
             (Hot::BackendCycle, backend_btn),
+            (Hot::OpenPlugins, plugins_btn),
         ];
 
         SettingsGeom {
@@ -1525,6 +1536,7 @@ impl Renderer {
             sec_app_y: ay(sec_app),
             sec_beh_y: ay(sec_beh),
             sec_shell_y: ay(sec_shell),
+            sec_plugins_y: ay(sec_plugins),
             sec_keys_y: ay(sec_keys),
             sec_about_y: ay(sec_about),
             font_y: ay(font_l),
@@ -1539,6 +1551,7 @@ impl Renderer {
             profile_y: ay(profile_l),
             close_y: ay(close_l),
             backend_y: ay(backend_l),
+            plugins_y: ay(plugins_l),
             keys_start_y: ay(keys_start_l),
             about_start_y: ay(about_start_l),
             font_dec,
@@ -1557,6 +1570,7 @@ impl Renderer {
             profile_btn,
             close_action_btn,
             backend_btn,
+            plugins_btn,
             controls,
         }
     }
@@ -2578,6 +2592,11 @@ impl Renderer {
         // backend can't swap live; hint that it applies next launch
         let (bbx, _, bbw, _) = g.backend_btn;
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bbx + bbw + 10.0 * s, lbl(g.backend_y), "(restart)", RULE_2, 1.0, track);
+
+        // PLUGINS
+        self.section_label(out, cx, g.sec_plugins_y, cw, "PLUGINS", wide, RULE_2, MUTE);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.plugins_y), "MARKETPLACE", MUTE, 1.0, wide);
+        self.cycle_btn(out, g.plugins_btn, "browse \u{25B8}", Hot::OpenPlugins, track);
 
         // KEYBINDINGS (two sub-columns)
         self.section_label(out, cx, g.sec_keys_y, cw, "KEYBINDINGS", wide, RULE_2, MUTE);

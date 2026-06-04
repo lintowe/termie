@@ -2702,6 +2702,10 @@ impl App {
                 self.config.backend = self.config.backend.next();
                 self.redraw();
             }
+            Hot::OpenPlugins => {
+                self.close_settings();
+                self.open_market();
+            }
         }
         // persist whenever a setting changed
         if is_settings_hot(hot) {
