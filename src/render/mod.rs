@@ -3256,9 +3256,16 @@ impl Renderer {
     /// dev capture harness: render the scene into the offscreen target and write
     /// it to `path` as a PNG. only valid on a renderer from `new_headless`
     #[cfg(debug_assertions)]
-    pub fn render_png(&mut self, panes: &[PaneView], focused: bool, maximized: bool, path: &str) -> std::io::Result<()> {
+    pub fn render_png(
+        &mut self,
+        panes: &[PaneView],
+        focused: bool,
+        maximized: bool,
+        bare: bool,
+        path: &str,
+    ) -> std::io::Result<()> {
         use std::io::Error;
-        let instances = self.build(panes, focused, maximized, 1.0);
+        let instances = self.build(panes, focused, maximized, 1.0, bare);
         self.upload_atlas();
 
         let needed = instances.len() as u64;
