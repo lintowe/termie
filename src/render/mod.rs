@@ -85,6 +85,7 @@ pub enum Hot {
     Gear,
     SplitV,
     SplitH,
+    PaneMode,
     NewTab,
     Tab(usize),
     TabClose(usize),
@@ -1177,12 +1178,13 @@ impl Renderer {
     }
 
     /// title-bar buttons, left→right: splitV, splitH, gear, minimize, maximize, close
-    fn control_rects(&self) -> [(Hot, f32, f32); 6] {
+    fn control_rects(&self) -> [(Hot, f32, f32); 7] {
         let cw = (46.0 * self.scale).round();
         let w = self.config.width as f32;
         [
-            (Hot::SplitV, w - cw * 6.0, w - cw * 5.0),
-            (Hot::SplitH, w - cw * 5.0, w - cw * 4.0),
+            (Hot::SplitV, w - cw * 7.0, w - cw * 6.0),
+            (Hot::SplitH, w - cw * 6.0, w - cw * 5.0),
+            (Hot::PaneMode, w - cw * 5.0, w - cw * 4.0),
             (Hot::Gear, w - cw * 4.0, w - cw * 3.0),
             (Hot::Minimize, w - cw * 3.0, w - cw * 2.0),
             (Hot::Maximize, w - cw * 2.0, w - cw),
@@ -2116,6 +2118,7 @@ impl Renderer {
         let glyphs = [
             (Hot::SplitV, "\u{eb56}"),
             (Hot::SplitH, "\u{eb57}"),
+            (Hot::PaneMode, ""),
             (Hot::Gear, "\u{f013}"),
             (Hot::Minimize, "\u{f2d1}"),
             (Hot::Maximize, if maximized { "\u{f2d2}" } else { "\u{f2d0}" }),
@@ -2123,7 +2126,9 @@ impl Renderer {
         ];
         for ((c, x0, x1), (_, glyph)) in self.control_rects().into_iter().zip(glyphs) {
             Self::push_rect(&mut out, x0, hair, hair, self.title_bar_h - hair * 2.0, RULE, 1.0);
-            let active = self.hovered == Some(c) || (c == Hot::Gear && self.settings_open);
+            let active = self.hovered == Some(c)
+                || (c == Hot::Gear && self.settings_open)
+                || (c == Hot::PaneMode && self.pane_mode);
             if active {
                 let (hc, ha) = if c == Hot::Close { (PAPER, 1.0) } else { (INK_4, 1.0) };
                 Self::push_rect(&mut out, x0, hair, x1 - x0, self.title_bar_h - hair * 2.0, hc, ha);
@@ -2148,6 +2153,17 @@ impl Renderer {
                 let by = self.title_bar_h - arm - 3.0 * self.scale;
                 Self::push_rect(&mut out, bx - arm, by - th * 0.5, arm * 2.0, th, color, 1.0);
                 Self::push_rect(&mut out, bx - th * 0.5, by - arm, th, arm * 2.0, color, 1.0);
+            }
+            // pane-mode toggle: a 2x2 grid of panes, lit while the mode is active
+            if c == Hot::PaneMode {
+                let sz = (10.0 * self.scale).round();
+                let gap = (2.0 * self.scale).max(1.0);
+                let cell = ((sz - gap) / 2.0).max(1.0);
+                let gx0 = ((x0 + x1) / 2.0 - sz / 2.0).round();
+                let gy0 = (self.title_bar_h / 2.0 - sz / 2.0).round();
+                for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                    Self::push_rect(&mut out, gx0 + dx * (cell + gap), gy0 + dy * (cell + gap), cell, cell, color, 1.0);
+                }
             }
         }
 

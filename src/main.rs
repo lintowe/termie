@@ -2457,6 +2457,7 @@ impl App {
             }
             Hot::SplitV => self.split_focused(Dir::Vertical),
             Hot::SplitH => self.split_focused(Dir::Horizontal),
+            Hot::PaneMode => self.set_pane_mode(!self.pane_mode),
             Hot::NewTab => self.new_tab(),
             Hot::Tab(i) => self.switch_tab(i),
             Hot::TabClose(i) => self.close_tab(i, event_loop),
