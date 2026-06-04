@@ -3364,6 +3364,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut in_sync = false;
                 let mut rang = false;
                 let mut newly_ready = false;
+                let mut cwd_changed = false;
                 for tab in &mut self.tabs {
                     if let Some(root) = tab.root.as_mut()
                         && let Some(p) = find_pane_mut(root, id) {
@@ -3373,6 +3374,10 @@ impl ApplicationHandler<UserEvent> for App {
                             if !p.ready {
                                 p.ready = true;
                                 newly_ready = true;
+                            }
+                            if p.term.cwd_dirty {
+                                p.term.cwd_dirty = false;
+                                cwd_changed = true;
                             }
                             in_sync = p.term.sync_output;
                             if !p.term.responses.is_empty() {
@@ -3467,8 +3472,8 @@ impl ApplicationHandler<UserEvent> for App {
                             sp.pty.write(&r);
                         }
                 }
-                // refresh tab labels when a cwd (OSC-7) likely just arrived
-                if bytes.windows(3).any(|w| w == b"\x1b]7") {
+                // relabel tabs only when a tab pane's cwd actually changed
+                if cwd_changed {
                     self.sync_tabs();
                 }
                 if self.layout_cache.iter().any(|(pid, _)| *pid == id) {

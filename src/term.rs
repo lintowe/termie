@@ -68,6 +68,10 @@ pub struct Terminal {
 
     pub title: String,
     pub cwd: Option<String>,
+    /// set when OSC-7 updates cwd; the app consumes it to relabel tabs instead
+    /// of rescanning every output chunk for the escape (which also missed an
+    /// OSC-7 split across two reads and fired on the byte pattern in file data)
+    pub cwd_dirty: bool,
     pub last_osc133: Option<Osc133>,
     pub bell: bool,
 
@@ -99,6 +103,7 @@ impl Terminal {
             focus_events: false,
             title: String::new(),
             cwd: None,
+            cwd_dirty: false,
             last_osc133: None,
             bell: false,
             responses: Vec::new(),
@@ -563,6 +568,7 @@ impl Perform for Terminal {
             b"7" => {
                 if let Some(u) = params.get(1) {
                     self.cwd = Some(String::from_utf8_lossy(u).into_owned());
+                    self.cwd_dirty = true;
                 }
             }
             b"8" => {
@@ -787,6 +793,28 @@ mod tests {
         assert_eq!(t.grid.lines[0][3].link, id); // 'k' of Link
         assert_eq!(t.grid.link_uri(id), Some("https://example.com"));
         assert_eq!(t.grid.lines[0][4].link, 0); // 'X' after the link ended
+    }
+
+    #[test]
+    fn osc7_sets_cwd_dirty_only_on_real_cwd_change() {
+        let mut t = Terminal::new(2, 40);
+        let mut p = Parser::new();
+        // a real OSC-7 sets cwd and raises the relabel flag
+        p.advance(&mut t, b"\x1b]7;file:///C:/work\x07");
+        assert_eq!(t.cwd.as_deref(), Some("file:///C:/work"));
+        assert!(t.cwd_dirty);
+        t.cwd_dirty = false;
+        // still fires when the OSC-7 is split across two reads — the old byte
+        // scan missed this since no 3-byte window spanned the chunk boundary
+        p.advance(&mut t, b"\x1b]7;file:///C:/a");
+        p.advance(&mut t, b"nother\x07");
+        assert_eq!(t.cwd.as_deref(), Some("file:///C:/another"));
+        assert!(t.cwd_dirty);
+        t.cwd_dirty = false;
+        // a different OSC that merely starts with '7' (OSC 70) must NOT relabel,
+        // though the old `windows(3) == ESC ] 7` scan matched its prefix
+        p.advance(&mut t, b"\x1b]70;ignored\x07");
+        assert!(!t.cwd_dirty);
     }
 
     #[test]
