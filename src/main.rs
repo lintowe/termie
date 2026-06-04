@@ -4466,4 +4466,35 @@ mod tests {
         assert!(popped.is_none());
         assert_eq!(ids(&kept), vec![9]);
     }
+
+    #[test]
+    fn grow_focused_adjusts_the_matching_split_in_the_right_direction() {
+        // a vertical split (left | right); growing the left pane raises A's ratio
+        let mut tree = split(Dir::Vertical, 0.5, leaf(1), leaf(2));
+        let mut done = false;
+        assert!(grow_focused(&mut tree, 1, Dir::Vertical, true, 0.1, &mut done));
+        assert!(done);
+        if let Node::Split { ratio, .. } = &tree {
+            assert!((*ratio - 0.6).abs() < 1e-6, "ratio {ratio}");
+        } else {
+            panic!("expected split");
+        }
+        // growing the right pane (B side) lowers A's ratio
+        let mut done = false;
+        grow_focused(&mut tree, 2, Dir::Vertical, true, 0.1, &mut done);
+        if let Node::Split { ratio, .. } = &tree {
+            assert!((*ratio - 0.5).abs() < 1e-6, "ratio {ratio}");
+        }
+        // a resize whose axis doesn't match the split orientation is ignored
+        let mut done = false;
+        grow_focused(&mut tree, 1, Dir::Horizontal, true, 0.1, &mut done);
+        assert!(!done);
+        // the ratio can't drive a pane below the 0.1 floor
+        let mut tree = split(Dir::Vertical, 0.15, leaf(1), leaf(2));
+        let mut done = false;
+        grow_focused(&mut tree, 1, Dir::Vertical, false, 0.1, &mut done);
+        if let Node::Split { ratio, .. } = &tree {
+            assert!(*ratio >= 0.1, "ratio {ratio} below floor");
+        }
+    }
 }
