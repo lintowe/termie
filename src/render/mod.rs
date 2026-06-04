@@ -449,6 +449,9 @@ pub struct Renderer {
     hovered: Option<Hot>,
     /// when the current hovered target was entered, for the hover fade-in
     hover_since: Option<Instant>,
+    /// (previous active tab index, start) so the active-tab accent rail slides
+    /// to the newly selected tab instead of teleporting
+    tab_slide: Option<(usize, Instant)>,
     settings_open: bool,
     settings_p: f32,
     settings_scroll: f32,
@@ -460,6 +463,8 @@ pub struct Renderer {
     content_font: Option<&'static str>,
     fonts: Vec<&'static str>,
     font_idx: usize,
+    /// the gpu backend actually resolved at init (for the settings ABOUT block)
+    backend_label: &'static str,
     settings_view: SettingsView,
     theme: ThemeId,
     /// user color overrides loaded from disk, applied on top of the theme
@@ -593,6 +598,18 @@ fn build_cell_pipeline(
     })
 }
 
+/// label the resolved gpu backend for the settings ABOUT block
+fn backend_label(b: wgpu::Backend) -> &'static str {
+    match b {
+        wgpu::Backend::Dx12 => "wgpu / DX12",
+        wgpu::Backend::Vulkan => "wgpu / Vulkan",
+        wgpu::Backend::Gl => "wgpu / GL",
+        wgpu::Backend::Metal => "wgpu / Metal",
+        wgpu::Backend::BrowserWebGpu => "wgpu / WebGPU",
+        _ => "wgpu",
+    }
+}
+
 impl Renderer {
     pub fn new(window: Arc<Window>, content_pt: f32, chrome_pt: f32, backend: BackendChoice) -> Result<Renderer> {
         let size = window.inner_size();
@@ -678,9 +695,11 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let atlas = atlas_handle.join().expect("atlas build thread panicked");
-        Ok(Self::from_parts(
+        let mut r = Self::from_parts(
             device, queue, Some(surface), format, config, atlas, scale, content_pt, chrome_pt, transparent,
-        ))
+        );
+        r.backend_label = backend_label(adapter.get_info().backend);
+        Ok(r)
     }
 
     /// build the renderer from already-created gpu parts. shared by the windowed
@@ -891,6 +910,7 @@ impl Renderer {
             reveal_start: Instant::now(),
             hovered: None,
             hover_since: None,
+            tab_slide: None,
             settings_open: false,
             settings_p: 0.0,
             settings_scroll: 0.0,
@@ -899,6 +919,7 @@ impl Renderer {
             cursor_blink: true,
             pane_pad_px: 6.0,
             content_font: None,
+            backend_label: "wgpu",
             fonts,
             font_idx: 0,
             settings_view: SettingsView::default(),
@@ -1274,8 +1295,35 @@ impl Renderer {
     }
 
     pub fn set_tabs(&mut self, tabs: Vec<String>, active: usize) {
+        if tabs.len() != self.tabs.len() {
+            // a tab opened/closed — every rect shifts, so don't slide across it
+            self.tab_slide = None;
+        } else if active != self.active_tab && !self.tabs.is_empty() {
+            // a pure switch: slide the accent rail from the old tab to the new
+            self.tab_slide = Some((self.active_tab, Instant::now()));
+        }
         self.tabs = tabs;
         self.active_tab = active;
+    }
+
+    const TAB_SLIDE: f32 = 0.13;
+
+    /// eased 0→1 progress of the active-tab rail slide, with the source index;
+    /// None once settled (the rail just sits on the active tab)
+    fn tab_slide_p(&self) -> Option<(usize, f32)> {
+        let (old, t) = self.tab_slide?;
+        let e = (t.elapsed().as_secs_f32() / Self::TAB_SLIDE).clamp(0.0, 1.0);
+        if e >= 1.0 {
+            None
+        } else {
+            Some((old, 1.0 - (1.0 - e).powi(3)))
+        }
+    }
+
+    pub fn tab_animating(&self) -> bool {
+        self.tab_slide
+            .map(|(_, t)| t.elapsed().as_secs_f32() < Self::TAB_SLIDE)
+            .unwrap_or(false)
     }
 
     pub fn set_status(&mut self, git: Option<String>, clock: String, sessions: usize) {
@@ -1367,7 +1415,9 @@ impl Renderer {
         let cw = (46.0 * s).round();
         let newtab_w = (40.0 * s).round();
         let start = self.tabs_start_x();
-        let controls_start = self.config.width as f32 - cw * 6.0;
+        // reserve all 7 title-bar control buttons (control_rects starts at w-7cw,
+        // the SplitV slot) so the new-tab '+' never overruns the split icon
+        let controls_start = self.config.width as f32 - cw * 7.0;
         let avail = (controls_start - start - newtab_w - 4.0 * s).max(0.0);
         let n = self.tabs.len();
 
@@ -2280,8 +2330,7 @@ impl Renderer {
             let (tx, _ty, tw, _th) = *rect;
             if *active {
                 Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_4, 1.0);
-                // accent underline on the active tab
-                Self::push_rect(&mut out, tx, self.title_bar_h - hair * 2.0, tw, hair * 2.0, PAPER, 1.0);
+                // the accent underline is drawn after the loop so it can slide
             } else if *hov {
                 Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_3, he);
             }
@@ -2311,6 +2360,20 @@ impl Renderer {
             let _ = Self::draw_text(
                 &mut self.atlas, &mut out, FontId::Chrome, cgx, cy.round(), "\u{f00d}", cc, 1.0, track,
             );
+        }
+
+        // active-tab accent rail: slides from the old tab to the new on a switch,
+        // otherwise sits on the active tab
+        if let Some(item) = tab_items.iter().find(|t| t.0 == active_tab) {
+            let (ax, _, aw, _) = item.1;
+            let (ux, uw) = match self
+                .tab_slide_p()
+                .and_then(|(old, e)| tab_items.iter().find(|t| t.0 == old).map(|o| (o.1, e)))
+            {
+                Some(((ox, _, ow, _), e)) => (ox + (ax - ox) * e, ow + (aw - ow) * e),
+                None => (ax, aw),
+            };
+            Self::push_rect(&mut out, ux, self.title_bar_h - hair * 2.0, uw, hair * 2.0, PAPER, 1.0);
         }
 
         // new-tab button (nerd-font plus)
@@ -2666,9 +2729,9 @@ impl Renderer {
         // ABOUT
         self.section_label(out, cx, g.sec_about_y, cw, "ABOUT", wide, RULE_2, MUTE);
         let about: [(&str, &str); 3] = [
-            ("FONT", "Maple Mono NF"),
+            ("FONT", font_name),
             ("VERSION", "termie 0.1"),
-            ("RENDERER", "wgpu / DX12"),
+            ("RENDERER", self.backend_label),
         ];
         let about_dx = 120.0 * s;
         for (i, (k, v)) in about.into_iter().enumerate() {
@@ -2974,14 +3037,15 @@ impl Renderer {
     fn cycle_btn(&mut self, out: &mut Vec<Instance>, rect: (f32, f32, f32, f32), text: &str, hot: Hot, track: f32) {
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let (bx, by, bw, bh) = rect;
-        let on = self.hovered == Some(hot);
-        if on {
-            Self::push_rect(out, bx, by, bw, bh, self.palette.paper, 1.0);
-        } else {
-            Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
+        // ease the bright fill in on hover (and cross-fade the label dark) to
+        // match the title bar instead of snapping
+        let he = if self.hovered == Some(hot) { self.hover_ease() } else { 0.0 };
+        Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
+        if he > 0.0 {
+            Self::push_rect(out, bx, by, bw, bh, self.palette.paper, he);
         }
         let tw = self.text_w(FontId::Chrome, text, track);
-        let col = if on { self.palette.ink0 } else { self.palette.text2 };
+        let col = self.palette.text2.lerp(self.palette.ink0, he);
         let _ = Self::draw_text(
             &mut self.atlas, out, FontId::Chrome,
             bx + (bw - tw) / 2.0, (by + (bh - chrome_h) / 2.0).round(), text, col, 1.0, track,
@@ -2992,21 +3056,15 @@ impl Renderer {
     fn toggle_btn(&mut self, out: &mut Vec<Instance>, rect: (f32, f32, f32, f32), on: bool, hot: Hot, track: f32) {
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let (bx, by, bw, bh) = rect;
-        let hov = self.hovered == Some(hot);
-        if hov {
-            Self::push_rect(out, bx, by, bw, bh, self.palette.paper, 1.0);
-        } else {
-            Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
+        let he = if self.hovered == Some(hot) { self.hover_ease() } else { 0.0 };
+        Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
+        if he > 0.0 {
+            Self::push_rect(out, bx, by, bw, bh, self.palette.paper, he);
         }
         let txt = if on { "on" } else { "off" };
         let tw = self.text_w(FontId::Chrome, txt, track);
-        let col = if hov {
-            self.palette.ink0
-        } else if on {
-            self.palette.paper
-        } else {
-            self.palette.mute
-        };
+        let base = if on { self.palette.paper } else { self.palette.mute };
+        let col = base.lerp(self.palette.ink0, he);
         let _ = Self::draw_text(
             &mut self.atlas, out, FontId::Chrome,
             bx + (bw - tw) / 2.0, (by + (bh - chrome_h) / 2.0).round(), txt, col, 1.0, track,
@@ -3021,13 +3079,14 @@ impl Renderer {
         let (bx, by, bw, bh) = rect;
         let hot = Hot::ThemeSet(id);
         let hov = self.hovered == Some(hot);
+        let he = if hov { self.hover_ease() } else { 0.0 };
         if active {
             Self::push_rect(out, bx, by, bw, bh, self.palette.paper, 1.0);
-        } else if hov {
-            Self::push_rect(out, bx, by, bw, bh, self.palette.ink4, 1.0);
-            Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
         } else {
             Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
+            if he > 0.0 {
+                Self::push_rect(out, bx, by, bw, bh, self.palette.ink4, he);
+            }
         }
         // theme name (truncated to fit), centered at the top
         let name = id.name();
@@ -3040,10 +3099,8 @@ impl Renderer {
         let tw = self.text_w(FontId::Chrome, &t, track);
         let col = if active {
             self.palette.ink0
-        } else if hov {
-            self.palette.paper
         } else {
-            self.palette.text2
+            self.palette.text2.lerp(self.palette.paper, he)
         };
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + (bw - tw) / 2.0, (by + 6.0 * s).round(), &t, col, 1.0, track);
 
@@ -3101,19 +3158,18 @@ impl Renderer {
 
         for (rect, glyph, hot) in [(dec, "\u{2013}", hot_dec), (inc, "+", hot_inc)] {
             let (bx, by, bw, bh) = rect;
-            let on = self.hovered == Some(hot);
-            if on {
-                Self::push_rect(out, bx, by, bw, bh, PAPER, 1.0);
-            } else {
-                // 1px outline button
-                Self::push_rect(out, bx, by, bw, 1.0, RULE_2, 1.0);
-                Self::push_rect(out, bx, by + bh - 1.0, bw, 1.0, RULE_2, 1.0);
-                Self::push_rect(out, bx, by, 1.0, bh, RULE_2, 1.0);
-                Self::push_rect(out, bx + bw - 1.0, by, 1.0, bh, RULE_2, 1.0);
+            let he = if self.hovered == Some(hot) { self.hover_ease() } else { 0.0 };
+            // 1px outline button, with the fill easing in over it on hover
+            Self::push_rect(out, bx, by, bw, 1.0, RULE_2, 1.0);
+            Self::push_rect(out, bx, by + bh - 1.0, bw, 1.0, RULE_2, 1.0);
+            Self::push_rect(out, bx, by, 1.0, bh, RULE_2, 1.0);
+            Self::push_rect(out, bx + bw - 1.0, by, 1.0, bh, RULE_2, 1.0);
+            if he > 0.0 {
+                Self::push_rect(out, bx, by, bw, bh, PAPER, he);
             }
             let gx = (bx + (bw - self.atlas.metrics(FontId::Chrome).cell_w) / 2.0).round();
             let gy = (by + (bh - chrome_h) / 2.0).round();
-            let col = if on { INK_0 } else { TEXT_2 };
+            let col = TEXT_2.lerp(INK_0, he);
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, gx, gy, glyph, col, 1.0, track);
         }
         // value centered between the buttons
