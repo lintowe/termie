@@ -9,7 +9,7 @@ repository = "https://github.com/lintowe/termie"
 [dependencies]
 anyhow = "1.0.102"
 bytemuck = { version = "1.25.0", features = ["derive"] }
-cosmic-text = "0.19.0"
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash"] }
 log = "0.4.30"
 pollster = "0.4.0"
 portable-pty = "0.9.0"
