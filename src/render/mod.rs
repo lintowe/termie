@@ -131,6 +131,16 @@ pub struct PaletteView {
     pub selected: usize,
 }
 
+/// right-click pane context menu: a small overlay at (x, y). the item index
+/// maps to a fixed action in main.rs's handler (kept in sync with PANE_MENU_ITEMS)
+pub struct PaneMenuView {
+    pub x: f32,
+    pub y: f32,
+    pub hovered: Option<usize>,
+}
+
+pub const PANE_MENU_ITEMS: [&str; 4] = ["split vertical", "split horizontal", "close pane", "paste"];
+
 /// find-in-scrollback overlay display state. `matches` are on-screen rects
 /// (viewport row, col, len, is_current) for the focused pane
 pub struct FindView {
@@ -445,6 +455,7 @@ pub struct Renderer {
     status_clock: String,
     status_sessions: usize,
     palette_view: Option<PaletteView>,
+    pane_menu_view: Option<PaneMenuView>,
     find_view: Option<FindView>,
     market_view: Option<MarketView>,
     /// plugin-declared Tier-1 widgets shown in the right-side dock; when
@@ -813,6 +824,7 @@ impl Renderer {
             status_clock: String::new(),
             status_sessions: 1,
             palette_view: None,
+            pane_menu_view: None,
             find_view: None,
             market_view: None,
             dock: Vec::new(),
@@ -1163,6 +1175,37 @@ impl Renderer {
 
     pub fn set_palette(&mut self, p: Option<PaletteView>) {
         self.palette_view = p;
+    }
+
+    pub fn set_pane_menu(&mut self, m: Option<PaneMenuView>) {
+        self.pane_menu_view = m;
+    }
+
+    /// clamped (x, y, width, row_h, pad) of the pane context menu, shared by the
+    /// renderer and the hit-test so the two never drift
+    fn pane_menu_geom(&self, mx: f32, my: f32) -> (f32, f32, f32, f32, f32) {
+        let s = self.scale;
+        let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
+        let row_h = chrome_h + 10.0 * s;
+        let pad = 8.0 * s;
+        let mw = (172.0 * s).round();
+        let mh = row_h * PANE_MENU_ITEMS.len() as f32 + pad * 2.0;
+        let w = self.config.width as f32;
+        let h = self.config.height as f32;
+        let bx = mx.min(w - mw - 4.0 * s).max(0.0).round();
+        let by = my.min(h - mh - 4.0 * s).max(self.title_bar_h).round();
+        (bx, by, mw, row_h, pad)
+    }
+
+    /// the menu item under (px, py), or None if outside the menu's rows
+    pub fn pane_menu_item_at(&self, px: f32, py: f32) -> Option<usize> {
+        let v = self.pane_menu_view.as_ref()?;
+        let (bx, by, mw, row_h, pad) = self.pane_menu_geom(v.x, v.y);
+        let rows = PANE_MENU_ITEMS.len() as f32;
+        if px < bx || px >= bx + mw || py < by + pad || py >= by + pad + row_h * rows {
+            return None;
+        }
+        Some((((py - by - pad) / row_h) as usize).min(PANE_MENU_ITEMS.len() - 1))
     }
 
     pub fn set_market(&mut self, m: Option<MarketView>) {
@@ -2224,6 +2267,9 @@ impl Renderer {
         }
 
         // ---- overlays ----
+        if self.pane_menu_view.is_some() {
+            self.build_pane_menu(&mut out, track);
+        }
         if self.palette_view.is_some() {
             self.build_palette(&mut out, track);
         }
@@ -2487,6 +2533,39 @@ impl Renderer {
             }
             y += pad * 0.5;
             self.dock_hitboxes.push((dx, band_top, dw, (y - band_top).max(0.0)));
+        }
+    }
+
+    /// right-click pane context menu: a small panel of pane actions at the click
+    #[allow(non_snake_case)]
+    fn build_pane_menu(&mut self, out: &mut Vec<Instance>, track: f32) {
+        let Some(v) = self.pane_menu_view.as_ref() else {
+            return;
+        };
+        let (mx, my, hovered) = (v.x, v.y, v.hovered);
+        let (bx, by, mw, row_h, pad) = self.pane_menu_geom(mx, my);
+        let INK_0 = self.palette.ink0;
+        let INK_1 = self.palette.ink1;
+        let INK_3 = self.palette.ink3;
+        let RULE_2 = self.palette.rule2;
+        let TEXT_2 = self.palette.text2;
+        let PAPER = self.palette.paper;
+        let s = self.scale;
+        let hair = s.max(1.0);
+        let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
+        let mh = row_h * PANE_MENU_ITEMS.len() as f32 + pad * 2.0;
+        Self::push_rect(out, bx - 2.0 * s, by + 4.0 * s, mw + 4.0 * s, mh, INK_0, 0.5);
+        Self::push_rect(out, bx, by, mw, mh, INK_1, 1.0);
+        Self::stroke_rect(out, (bx, by, mw, mh), hair, RULE_2);
+        for (i, lbl) in PANE_MENU_ITEMS.iter().enumerate() {
+            let ry = by + pad + row_h * i as f32;
+            if hovered == Some(i) {
+                Self::push_rect(out, bx, ry, mw, row_h, INK_3, 1.0);
+                Self::push_rect(out, bx, ry, 2.0 * s, row_h, PAPER, 1.0);
+            }
+            let ty = (ry + (row_h - chrome_h) / 2.0).round();
+            let col = if hovered == Some(i) { PAPER } else { TEXT_2 };
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad + 4.0 * s, ty, lbl, col, 1.0, track);
         }
     }
 

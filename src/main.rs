@@ -153,6 +153,13 @@ struct PaletteState {
     selected: usize,
 }
 
+/// right-click pane context menu state: anchor point + hovered item
+struct PaneMenu {
+    x: f32,
+    y: f32,
+    hovered: Option<usize>,
+}
+
 /// find-in-scrollback overlay state for the focused pane; matches are
 /// (global_line_index, col) into that pane's grid
 struct FindState {
@@ -1009,6 +1016,8 @@ struct App {
     focused: bool,
     maximized: bool,
     pane_mode: bool,
+    /// open right-click pane context menu (None = closed)
+    pane_menu: Option<PaneMenu>,
     shown: bool,
     pool: Vec<Pane>,
     selection: Option<Sel>,
@@ -1105,6 +1114,7 @@ impl App {
             focused: true,
             maximized: false,
             pane_mode: false,
+            pane_menu: None,
             shown: false,
             pool: Vec::new(),
             selection: None,
@@ -1721,9 +1731,15 @@ impl App {
         let config = self.config;
         let settings_open = self.settings_open;
         let settings_p = self.settings_p();
+        let pane_menu_view = self.pane_menu.as_ref().map(|m| render::PaneMenuView {
+            x: m.x,
+            y: m.y,
+            hovered: m.hovered,
+        });
         if let Some(r) = self.renderer.as_mut() {
             r.set_status(git, clock, sessions);
             r.set_palette(palette_view);
+            r.set_pane_menu(pane_menu_view);
             r.set_find(find_view);
             r.set_market(market_view);
             r.set_settings(render::SettingsView {
@@ -2581,6 +2597,18 @@ impl App {
         self.redraw();
     }
 
+    /// run a pane context-menu item (index into render::PANE_MENU_ITEMS:
+    /// 0 split vertical, 1 split horizontal, 2 close pane, 3 paste)
+    fn pane_menu_action(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
+        match idx {
+            0 => self.split_focused(Dir::Vertical),
+            1 => self.split_focused(Dir::Horizontal),
+            2 => self.close_focused_pane(event_loop),
+            3 => self.paste(),
+            _ => {}
+        }
+    }
+
     /// report a mouse event to the pane under the cursor if it has mouse mode on;
     /// returns true if forwarded (caller should skip local selection/scroll)
     fn mouse_report(&mut self, btn: u8, pressed: bool, motion: bool) -> bool {
@@ -2692,6 +2720,12 @@ impl App {
     fn handle_shortcut(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         if event.state != ElementState::Pressed {
             return false;
+        }
+        // Esc closes an open pane context menu before anything else sees it
+        if self.pane_menu.is_some() && event.logical_key == Key::Named(NamedKey::Escape) {
+            self.pane_menu = None;
+            self.redraw();
+            return true;
         }
         // user keybindings take precedence over the built-in shortcuts, but
         // never over an open overlay or pane mode
@@ -3213,6 +3247,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 let (px, py) = (position.x as f32, position.y as f32);
+                // while the pane menu is open, only track which item is hovered
+                if self.pane_menu.is_some() {
+                    let h = self.renderer.as_ref().and_then(|r| r.pane_menu_item_at(px, py));
+                    if let Some(m) = self.pane_menu.as_mut()
+                        && m.hovered != h
+                    {
+                        m.hovered = h;
+                        self.redraw();
+                    }
+                    return;
+                }
                 // mouse-tracking motion (1002 drag / 1003 any-motion)
                 if self.drag_divider.is_none() && !self.settings_open && !self.mods.shift_key() {
                     if let Some((btn, id)) = self.mouse_down {
@@ -3340,14 +3385,16 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Right,
                 ..
             } => {
-                // right-click copies the active selection, or pastes when there
-                // is none — the familiar one-button terminal convenience
-                if self.selection.is_some() {
-                    self.copy_selection();
-                    self.selection = None;
+                // right-click on a pane opens the pane context menu (split / close
+                // / paste) at the cursor; focus the pane under it first so the
+                // actions target it
+                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let on_content =
+                    matches!(self.renderer.as_ref().map(|r| r.hit_test(cx, cy)), Some(Hit::Content));
+                if on_content {
+                    self.focus_pane_at(cx, cy);
+                    self.pane_menu = Some(PaneMenu { x: cx, y: cy, hovered: None });
                     self.redraw();
-                } else {
-                    self.paste();
                 }
             }
             WindowEvent::MouseInput {
@@ -3369,6 +3416,17 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
                 let hit = self.renderer.as_ref().map(|r| r.hit_test(cx, cy));
+                // a left-press while the pane menu is open runs the clicked item
+                // (or dismisses it when the click lands elsewhere)
+                if self.pane_menu.is_some() && state == ElementState::Pressed {
+                    let item = self.renderer.as_ref().and_then(|r| r.pane_menu_item_at(cx, cy));
+                    self.pane_menu = None;
+                    if let Some(i) = item {
+                        self.pane_menu_action(i, event_loop);
+                    }
+                    self.redraw();
+                    return;
+                }
                 // always finalize a forwarded press with a release report, even if
                 // the cursor left the pane (else the TUI sees a stuck drag)
                 if state == ElementState::Released
