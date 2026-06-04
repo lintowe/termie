@@ -1033,6 +1033,12 @@ struct App {
     /// set when the focused pane changes, so its accent border eases in instead
     /// of snapping; cleared once the ease settles
     focus_anim: Option<Instant>,
+    /// debug-only: TERMIE_BENCH=N auto-opens N tabs after startup to measure
+    /// warm-pool tab-open latency via the TERMIE_TIMING log
+    #[cfg(debug_assertions)]
+    bench_left: u32,
+    #[cfg(debug_assertions)]
+    bench_next: Option<Instant>,
     /// pool shells currently spawning on worker threads (not yet in `pool`)
     pending_warm: usize,
     /// set once the app is exiting so no new shells are spawned during teardown
@@ -1140,6 +1146,10 @@ impl App {
             settings_open: false,
             settings_anim: None,
             focus_anim: None,
+            #[cfg(debug_assertions)]
+            bench_left: std::env::var("TERMIE_BENCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            #[cfg(debug_assertions)]
+            bench_next: None,
             pending_warm: 0,
             shutting_down: false,
             drag_divider: None,
@@ -1876,7 +1886,14 @@ impl App {
         if self.renderer.is_none() {
             return;
         }
+        let t0 = Instant::now();
         let (cols, rows) = self.content_pane_size();
+        let from_pool = cwd.is_none()
+            && shell.is_none()
+            && self
+                .pool
+                .iter()
+                .any(|p| p.term.grid.cols == cols && p.term.grid.rows == rows);
         let pane = if cwd.is_none()
             && shell.is_none()
             && let Some(i) = self
@@ -1884,6 +1901,8 @@ impl App {
                 .iter()
                 .position(|p| p.term.grid.cols == cols && p.term.grid.rows == rows)
         {
+            // a ready pool shell already has its prompt — opening the tab is just
+            // a move + relayout, no shell spawn on the critical path
             Ok(self.pool.remove(i))
         } else {
             self.spawn_pane(cols, rows, cwd, shell)
@@ -1899,6 +1918,11 @@ impl App {
             self.sync_tabs();
             self.redraw();
             self.warm_pool();
+            timing(&format!(
+                "new tab ({}) in {:.2}ms",
+                if from_pool { "warm pool" } else { "fresh spawn" },
+                t0.elapsed().as_secs_f64() * 1000.0
+            ));
         }
     }
 
@@ -3681,6 +3705,22 @@ impl ApplicationHandler<UserEvent> for App {
                 self.plugins_started = true;
                 self.start_plugins();
             }
+        }
+        // debug-only: drive TERMIE_BENCH auto-opens once the first shell + pool
+        // are up, so warm-pool tab-open latency lands in the TERMIE_TIMING log
+        #[cfg(debug_assertions)]
+        if self.bench_left > 0 && !self.tabs.is_empty() {
+            match self.bench_next {
+                None => self.bench_next = Some(Instant::now() + Duration::from_millis(600)),
+                Some(t) if Instant::now() >= t => {
+                    self.new_tab();
+                    self.bench_left -= 1;
+                    self.bench_next = Some(Instant::now() + Duration::from_millis(600));
+                }
+                _ => {}
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(50)));
+            return;
         }
         // first shell hasn't spawned yet after a failure: wake at the backoff
         // deadline to retry, rather than hot-looping or sleeping indefinitely
