@@ -657,6 +657,7 @@ impl Renderer {
                 try_init(fallback)?
             }
         };
+        crate::timing("  gpu: adapter+surface");
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("termie-device"),
@@ -664,6 +665,7 @@ impl Renderer {
             required_limits: wgpu::Limits::default(),
             ..Default::default()
         }))?;
+        crate::timing("  gpu: device");
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
@@ -697,8 +699,10 @@ impl Renderer {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
+        crate::timing("  gpu: surface configured");
 
         let atlas = atlas_handle.join().expect("atlas build thread panicked");
+        crate::timing("  gpu: atlas joined");
         let mut r = Self::from_parts(
             device, queue, Some(surface), format, config, atlas, scale, content_pt, chrome_pt, transparent,
         );
@@ -863,6 +867,7 @@ impl Renderer {
         });
 
         let pipeline = build_cell_pipeline(&device, &uniform_bgl, &atlas_bgl, format);
+        crate::timing("  gpu: pipeline built");
 
         let instance_capacity = 8192u64;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {

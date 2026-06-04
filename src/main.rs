@@ -4307,7 +4307,7 @@ impl App {
 /// opt-in startup timing: when TERMIE_TIMING names a file, append "<ms> label"
 /// lines at key milestones so startup latency can be measured. release is a
 /// windowed subsystem with no console, so this writes to a file, not stderr
-fn timing(label: &str) {
+pub(crate) fn timing(label: &str) {
     use std::io::Write;
     use std::sync::OnceLock;
     static START: OnceLock<Instant> = OnceLock::new();
