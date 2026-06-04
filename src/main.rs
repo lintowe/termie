@@ -3776,6 +3776,14 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
+        // chrome-button hover fade-in: drive ~60fps only while it's in flight
+        if self.renderer.as_ref().is_some_and(|r| r.hover_animating()) {
+            self.redraw();
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(16),
+            ));
+            return;
+        }
         // only tick (~2 redraws/sec) when a blinking cursor is actually on screen;
         // otherwise stay event-driven so idle panes cost nothing. content changes
         // already request redraws from their own events (pty output, keys, resize)

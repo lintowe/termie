@@ -418,6 +418,8 @@ pub struct Renderer {
     opacity: f32,
     start: Instant,
     hovered: Option<Hot>,
+    /// when the current hovered target was entered, for the hover fade-in
+    hover_since: Option<Instant>,
     settings_open: bool,
     settings_p: f32,
     settings_scroll: f32,
@@ -796,6 +798,7 @@ impl Renderer {
             opacity: 0.85,
             start: Instant::now(),
             hovered: None,
+            hover_since: None,
             settings_open: false,
             settings_p: 0.0,
             settings_scroll: 0.0,
@@ -932,8 +935,29 @@ impl Renderer {
 
     pub fn set_hovered(&mut self, h: Option<Hot>) -> bool {
         let changed = self.hovered != h;
+        if changed {
+            // restart the fade-in when entering a target; clear it when leaving
+            self.hover_since = h.is_some().then(Instant::now);
+        }
         self.hovered = h;
         changed
+    }
+
+    /// hover fade-in factor (0..1) for the currently hovered chrome target
+    fn hover_ease(&self) -> f32 {
+        const DUR: f32 = 0.11;
+        match self.hover_since {
+            None => 1.0,
+            Some(t) => {
+                let e = (t.elapsed().as_secs_f32() / DUR).clamp(0.0, 1.0);
+                1.0 - (1.0 - e).powi(3)
+            }
+        }
+    }
+
+    /// true while the hover fade-in is still in flight (drives redraws)
+    pub fn hover_animating(&self) -> bool {
+        self.hover_since.is_some_and(|t| t.elapsed().as_secs_f32() < 0.11)
     }
 
     pub fn set_pane_mode(&mut self, on: bool) {
@@ -2068,6 +2092,7 @@ impl Renderer {
                 .collect();
         let newtab_rect = tl.newtab;
         let newtab_hover = self.hovered == Some(Hot::NewTab);
+        let he = self.hover_ease();
 
         for (_, rect, close, label, active, hov, close_hov) in &tab_items {
             let (tx, _ty, tw, _th) = *rect;
@@ -2076,7 +2101,7 @@ impl Renderer {
                 // accent underline on the active tab
                 Self::push_rect(&mut out, tx, self.title_bar_h - hair * 2.0, tw, hair * 2.0, PAPER, 1.0);
             } else if *hov {
-                Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_3, 1.0);
+                Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_3, he);
             }
             Self::push_rect(&mut out, tx, hair, hair, self.title_bar_h - hair * 2.0, RULE, 1.0);
 
@@ -2104,7 +2129,7 @@ impl Renderer {
         {
             let (nx, _ny, nw, _nh) = newtab_rect;
             if newtab_hover {
-                Self::push_rect(&mut out, nx, hair, nw, self.title_bar_h - hair * 2.0, INK_3, 1.0);
+                Self::push_rect(&mut out, nx, hair, nw, self.title_bar_h - hair * 2.0, INK_3, he);
             }
             let ngx = (nx + (nw - cw_c) / 2.0).round();
             let ncol = if newtab_hover { TEXT_2 } else { MUTE };
@@ -2125,9 +2150,12 @@ impl Renderer {
         ];
         for ((c, x0, x1), (_, glyph)) in self.control_rects().into_iter().zip(glyphs) {
             Self::push_rect(&mut out, x0, hair, hair, self.title_bar_h - hair * 2.0, RULE, 1.0);
-            let active = self.hovered == Some(c) || (c == Hot::Gear && self.settings_open);
+            let is_hover = self.hovered == Some(c);
+            let active = is_hover || (c == Hot::Gear && self.settings_open);
             if active {
-                let (hc, ha) = if c == Hot::Close { (PAPER, 1.0) } else { (INK_4, 1.0) };
+                // fade the hover fill in; a settings-pinned gear stays at full
+                let ha = if is_hover { he } else { 1.0 };
+                let hc = if c == Hot::Close { PAPER } else { INK_4 };
                 Self::push_rect(&mut out, x0, hair, x1 - x0, self.title_bar_h - hair * 2.0, hc, ha);
             }
             let gx = (x0 + (x1 - x0 - cw_c) / 2.0).round();
