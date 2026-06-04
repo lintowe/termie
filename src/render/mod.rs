@@ -533,7 +533,9 @@ impl Renderer {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: 2,
+            // a terminal renders far below a refresh of gpu work, so queue only
+            // one frame ahead — cuts up to a frame of input-to-photon latency
+            desired_maximum_frame_latency: 1,
             alpha_mode,
             view_formats: vec![],
         };
