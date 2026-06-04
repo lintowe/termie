@@ -81,19 +81,32 @@ pub fn render_png(
                 let px_top = y0 as f32 + ascent - gl.top;
                 for gy in 0..gh {
                     for gx in 0..gw {
-                        let a = atlas.data[(ay + gy) * dim + ax + gx] as f32 / 255.0;
-                        if a <= 0.0 {
-                            continue;
-                        }
                         let dx = px_left as i32 + gx as i32;
                         let dy = px_top as i32 + gy as i32;
                         if dx < 0 || dy < 0 || dx as usize >= iw || dy as usize >= ih {
                             continue;
                         }
                         let p = &mut fb[dy as usize * iw + dx as usize];
-                        p[0] = p[0] * (1.0 - a) + fgl[0] * a;
-                        p[1] = p[1] * (1.0 - a) + fgl[1] * a;
-                        p[2] = p[2] * (1.0 - a) + fgl[2] * a;
+                        if gl.color {
+                            // emoji: composite the glyph's own (srgb) color over
+                            // the cell, straight alpha — fg is not applied
+                            let i = ((ay + gy) * dim + ax + gx) * 4;
+                            let a = atlas.color_data[i + 3] as f32 / 255.0;
+                            if a <= 0.0 {
+                                continue;
+                            }
+                            p[0] = p[0] * (1.0 - a) + srgb_to_lin(atlas.color_data[i]) * a;
+                            p[1] = p[1] * (1.0 - a) + srgb_to_lin(atlas.color_data[i + 1]) * a;
+                            p[2] = p[2] * (1.0 - a) + srgb_to_lin(atlas.color_data[i + 2]) * a;
+                        } else {
+                            let a = atlas.data[(ay + gy) * dim + ax + gx] as f32 / 255.0;
+                            if a <= 0.0 {
+                                continue;
+                            }
+                            p[0] = p[0] * (1.0 - a) + fgl[0] * a;
+                            p[1] = p[1] * (1.0 - a) + fgl[1] * a;
+                            p[2] = p[2] * (1.0 - a) + fgl[2] * a;
+                        }
                     }
                 }
             }
@@ -130,6 +143,16 @@ pub fn render_png(
 fn lin3(c: Rgb) -> [f32; 3] {
     let l = c.to_linear_f32();
     [l[0], l[1], l[2]]
+}
+
+/// one srgb-encoded byte to linear light (for color-emoji compositing)
+fn srgb_to_lin(c: u8) -> f32 {
+    let s = c as f32 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn fill(fb: &mut [[f32; 3]], dims: (usize, usize), x: usize, y: usize, w: usize, h: usize, col: [f32; 3]) {

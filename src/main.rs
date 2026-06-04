@@ -1612,15 +1612,14 @@ impl App {
 
     fn focused_grid(&self) -> Option<&crate::grid::Grid> {
         let id = self.active_focused_id()?;
-        self.pool.iter().find(|p| p.id == id).map(|p| &p.term.grid)
+        let root = self.tabs.get(self.active_tab)?.root.as_ref()?;
+        find_pane(root, id).map(|p| &p.term.grid)
     }
 
     fn focused_grid_mut(&mut self) -> Option<&mut crate::grid::Grid> {
         let id = self.active_focused_id()?;
-        self.pool
-            .iter_mut()
-            .find(|p| p.id == id)
-            .map(|p| &mut p.term.grid)
+        let root = self.tabs.get_mut(self.active_tab)?.root.as_mut()?;
+        find_pane_mut(root, id).map(|p| &mut p.term.grid)
     }
 
     fn open_find(&mut self) {
@@ -3795,9 +3794,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 (self.active_focused_id(), self.cell_in_focused(cx, cy))
                             {
                                 let grid = self
-                                    .pool
-                                    .iter()
-                                    .find(|p| p.id == pane)
+                                    .tabs
+                                    .get(self.active_tab)
+                                    .and_then(|t| t.root.as_ref())
+                                    .and_then(|r| find_pane(r, pane))
                                     .map(|p| &p.term.grid);
                                 match self.click_seq {
                                     2 => {
@@ -4065,6 +4065,14 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
+        // chrome-button hover fade-in: drive ~60fps only while it's in flight
+        if self.renderer.as_ref().is_some_and(|r| r.hover_animating()) {
+            self.redraw();
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(16),
+            ));
+            return;
+        }
         // only tick (~2 redraws/sec) when a blinking cursor is actually on screen;
         // otherwise stay event-driven so idle panes cost nothing. content changes
         // already request redraws from their own events (pty output, keys, resize)
@@ -4188,5 +4196,125 @@ mod tests {
         assert_eq!(m2, ModifiersState::ALT);
         assert_eq!(k2, Key::Named(NamedKey::Enter));
         assert!(parse_combo("ctrl+").is_none());
+    }
+
+    // ---- headless pane-tree harness ----
+    // build real Panes (with a no-op pty) so the split/close/swap/layout logic
+    // can be exercised without a window or a shell
+
+    fn tp(id: usize) -> Pane {
+        Pane {
+            id,
+            term: Terminal::new(24, 80),
+            parser: Parser::new(),
+            pty: pty::Pty::null(),
+            ready: true,
+            flash: None,
+        }
+    }
+    fn leaf(id: usize) -> Node {
+        Node::Leaf(tp(id))
+    }
+    fn split(dir: Dir, ratio: f32, a: Node, b: Node) -> Node {
+        Node::Split { dir, ratio, a: Box::new(a), b: Box::new(b) }
+    }
+    fn ids(node: &Node) -> Vec<usize> {
+        let mut v = Vec::new();
+        each_pane(node, &mut |p| v.push(p.id));
+        v
+    }
+
+    #[test]
+    fn split_rects_partitions_without_gaps_or_overlap() {
+        let rect = (0.0, 0.0, 100.0, 60.0);
+        let (a, b) = split_rects(Dir::Vertical, rect, 0.5);
+        // left + right tile the width exactly, share full height, no overlap
+        assert_eq!(a, (0.0, 0.0, 50.0, 60.0));
+        assert_eq!(b, (50.0, 0.0, 50.0, 60.0));
+        assert_eq!(a.2 + b.2, rect.2);
+        let (t, btm) = split_rects(Dir::Horizontal, rect, 0.25);
+        assert_eq!(t, (0.0, 0.0, 100.0, 15.0));
+        assert_eq!(btm, (0.0, 15.0, 100.0, 45.0));
+        assert_eq!(t.3 + btm.3, rect.3);
+        // an extreme ratio is clamped so neither side collapses to zero
+        let (a2, b2) = split_rects(Dir::Vertical, rect, 0.0);
+        assert!(a2.2 >= 1.0 && b2.2 >= 1.0);
+    }
+
+    #[test]
+    fn layout_covers_every_leaf_once_and_tiles_the_rect() {
+        // a vertical split whose right child is itself split horizontally
+        let tree = split(
+            Dir::Vertical,
+            0.5,
+            leaf(1),
+            split(Dir::Horizontal, 0.5, leaf(2), leaf(3)),
+        );
+        let mut out = Vec::new();
+        layout(&tree, (0.0, 0.0, 100.0, 80.0), &mut out);
+        let got: Vec<usize> = out.iter().map(|(id, _)| *id).collect();
+        assert_eq!(got, vec![1, 2, 3]);
+        // total leaf area equals the parent rect area (a tiling, no overlap/gap)
+        let area: f32 = out.iter().map(|(_, r)| r.2 * r.3).sum();
+        assert!((area - 100.0 * 80.0).abs() < 1.0, "covered area {area}");
+        // pane 1 owns the left half; 2 and 3 share the right half stacked
+        assert_eq!(out[0].1, (0.0, 0.0, 50.0, 80.0));
+        assert_eq!(out[1].1.0, 50.0);
+        assert_eq!(out[2].1.0, 50.0);
+    }
+
+    #[test]
+    fn close_pane_promotes_the_sibling() {
+        let tree = split(Dir::Vertical, 0.5, leaf(1), split(Dir::Horizontal, 0.5, leaf(2), leaf(3)));
+        // closing pane 2 collapses its split so 3 takes the whole right side
+        let after = close_pane(tree, 2).expect("tree not empty");
+        assert_eq!(ids(&after), vec![1, 3]);
+        // the surviving structure is a single vertical split (1 | 3)
+        match &after {
+            Node::Split { a, b, .. } => {
+                assert!(matches!(**a, Node::Leaf(ref p) if p.id == 1));
+                assert!(matches!(**b, Node::Leaf(ref p) if p.id == 3));
+            }
+            _ => panic!("expected a split, got a leaf"),
+        }
+        // closing the last pane yields an empty tree
+        assert!(close_pane(leaf(7), 7).is_none());
+        // closing a missing id leaves the tree intact
+        let keep = close_pane(leaf(7), 99).expect("kept");
+        assert_eq!(ids(&keep), vec![7]);
+    }
+
+    #[test]
+    fn swap_panes_exchanges_two_leaves_in_place() {
+        let mut tree = split(Dir::Vertical, 0.5, leaf(1), split(Dir::Horizontal, 0.5, leaf(2), leaf(3)));
+        swap_panes(&mut tree, 1, 3);
+        // structure is unchanged, but the payloads at the 1 and 3 slots traded
+        assert_eq!(ids(&tree), vec![3, 2, 1]);
+        // first_leaf follows the a-side spine, now holding the swapped-in pane 3
+        assert_eq!(first_leaf(&tree), 3);
+        // swapping an id with itself is a no-op
+        swap_panes(&mut tree, 2, 2);
+        assert_eq!(ids(&tree), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn extract_pane_hands_back_the_pane_and_collapses_the_tree() {
+        // pop pane 2 out: the remaining tree collapses like a close, but the
+        // pane comes back alive (its pty isn't killed) for the new window
+        let tree = split(Dir::Vertical, 0.5, leaf(1), split(Dir::Horizontal, 0.5, leaf(2), leaf(3)));
+        let mut popped = None;
+        let rest = extract_pane(tree, 2, &mut popped).expect("tree not empty");
+        assert_eq!(popped.map(|p| p.id), Some(2));
+        // 1 and 3 remain, 3 promoted into the collapsed right split
+        assert_eq!(ids(&rest), vec![1, 3]);
+        // popping the only pane leaves an empty tree but still yields the pane
+        let mut popped = None;
+        assert!(extract_pane(leaf(9), 9, &mut popped).is_none());
+        assert_eq!(popped.map(|p| p.id), Some(9));
+        // a missing id extracts nothing and keeps the tree
+        let mut popped = None;
+        let kept = extract_pane(leaf(9), 42, &mut popped).expect("kept");
+        assert!(popped.is_none());
+        assert_eq!(ids(&kept), vec![9]);
     }
 }

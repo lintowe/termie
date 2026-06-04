@@ -759,12 +759,22 @@ impl Grid {
     }
 
     pub fn move_up(&mut self, n: usize) {
-        self.cursor.row = self.cursor.row.saturating_sub(n).max(self.region_top);
+        // cuu stops at the top margin only when the cursor starts at or below
+        // it; from above the margin it stops at the top of the screen (xterm)
+        let floor = if self.cursor.row >= self.region_top { self.region_top } else { 0 };
+        self.cursor.row = self.cursor.row.saturating_sub(n).max(floor);
         self.cursor.wrap_pending = false;
     }
 
     pub fn move_down(&mut self, n: usize) {
-        self.cursor.row = (self.cursor.row + n).min(self.region_bottom);
+        // symmetric to move_up: cud stops at the bottom margin only when the
+        // cursor starts at or above it, else at the bottom of the screen
+        let ceil = if self.cursor.row <= self.region_bottom {
+            self.region_bottom
+        } else {
+            self.rows - 1
+        };
+        self.cursor.row = (self.cursor.row + n).min(ceil);
         self.cursor.wrap_pending = false;
     }
 
@@ -856,6 +866,18 @@ impl Grid {
         for _ in 0..n {
             self.lines[row].remove(col);
             self.lines[row].push(blank);
+        }
+    }
+
+    /// erase n chars from the cursor in place (ECH); fills with the current
+    /// sgr background so erase-with-bce matches every other erase op
+    pub fn erase_chars(&mut self, n: usize) {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let blank = self.blank_cell();
+        let end = (col + n).min(self.cols);
+        for c in col..end {
+            self.lines[row][c] = blank;
         }
     }
 
@@ -977,6 +999,41 @@ mod tests {
         g.put_char('x');
         g.erase_in_display(2);
         assert_eq!(g.lines[0][0].c, ' ');
+    }
+
+    #[test]
+    fn ech_fills_with_current_background() {
+        let mut g = Grid::new(2, 5);
+        g.cursor.bg = Color::Indexed(4);
+        g.erase_chars(3);
+        for c in 0..3 {
+            assert_eq!(g.lines[0][c].c, ' ');
+            assert_eq!(g.lines[0][c].bg, Color::Indexed(4));
+        }
+        // past the erased run keeps the default background
+        assert_eq!(g.lines[0][3].bg, Color::DefaultBg);
+    }
+
+    #[test]
+    fn cuu_cud_stop_at_screen_edge_when_outside_region() {
+        let mut g = Grid::new(10, 4);
+        g.set_scroll_region(3, 7);
+        // above the top margin: cuu must reach the top of the screen, not snap
+        // down into the region
+        g.goto(1, 0);
+        g.move_up(5);
+        assert_eq!(g.cursor.row, 0);
+        // below the bottom margin: cud must reach the bottom of the screen
+        g.goto(8, 0);
+        g.move_down(5);
+        assert_eq!(g.cursor.row, 9);
+        // inside the region the margins still bound the motion
+        g.goto(5, 0);
+        g.move_up(10);
+        assert_eq!(g.cursor.row, 3);
+        g.goto(5, 0);
+        g.move_down(10);
+        assert_eq!(g.cursor.row, 7);
     }
 
     #[test]
