@@ -483,6 +483,10 @@ pub struct Renderer {
     status_git: Option<String>,
     status_clock: String,
     status_sessions: usize,
+    /// cached status-bar strings so the per-frame paint doesn't re-format them:
+    /// (cols, rows, "W×H") and (sessions, "n")
+    status_size: (usize, usize, String),
+    status_tabs: (usize, String),
     palette_view: Option<PaletteView>,
     pane_menu_view: Option<PaneMenuView>,
     find_view: Option<FindView>,
@@ -940,6 +944,8 @@ impl Renderer {
             status_git: None,
             status_clock: String::new(),
             status_sessions: 1,
+            status_size: (usize::MAX, usize::MAX, String::new()),
+            status_tabs: (usize::MAX, String::new()),
             palette_view: None,
             pane_menu_view: None,
             find_view: None,
@@ -2476,25 +2482,35 @@ impl Renderer {
 
         let mut sx = pad;
         let gap = (14.0 * self.scale).round();
-        let git = self.status_git.clone();
-        let clock = self.status_clock.clone();
-        let sessions = self.status_sessions;
+        let scale = self.scale;
 
-        // left cluster: SIZE · ENC · GIT · TABS
-        let size_v = format!("{}\u{00d7}{}", self.cols, self.rows);
-        sx = self.seg(&mut out, sx, st_top, "SIZE", &size_v, track, wide, RULE_2, TEXT_2);
+        // rebuild the cached number strings only when they actually change, so
+        // the steady-state paint reformats nothing
+        if self.status_size.0 != self.cols || self.status_size.1 != self.rows {
+            self.status_size = (self.cols, self.rows, format!("{}\u{00d7}{}", self.cols, self.rows));
+        }
+        if self.status_tabs.0 != self.status_sessions {
+            self.status_tabs = (self.status_sessions, self.status_sessions.to_string());
+        }
+
+        // left cluster: SIZE · ENC · GIT · TABS — seg borrows only the atlas, so
+        // the status strings can be passed by reference without per-frame clones
+        sx = Self::seg(&mut self.atlas, &mut out, sx, st_top, "SIZE", &self.status_size.2, track, wide, scale, RULE_2, TEXT_2);
         sx += gap;
-        sx = self.seg(&mut out, sx, st_top, "ENC", "utf-8", track, wide, RULE_2, MUTE);
-        if let Some(b) = &git {
-            let mut b = b.clone();
-            if b.chars().count() > 24 {
-                b = b.chars().take(23).collect::<String>() + "\u{2026}";
-            }
+        sx = Self::seg(&mut self.atlas, &mut out, sx, st_top, "ENC", "utf-8", track, wide, scale, RULE_2, MUTE);
+        if let Some(branch) = &self.status_git {
+            let truncated;
+            let b: &str = if branch.chars().count() > 24 {
+                truncated = branch.chars().take(23).collect::<String>() + "\u{2026}";
+                &truncated
+            } else {
+                branch
+            };
             sx += gap;
-            sx = self.seg(&mut out, sx, st_top, "\u{f126}", &b, track, wide, RULE_2, TEXT_2);
+            sx = Self::seg(&mut self.atlas, &mut out, sx, st_top, "\u{f126}", b, track, wide, scale, RULE_2, TEXT_2);
         }
         sx += gap;
-        let _ = self.seg(&mut out, sx, st_top, "TABS", &sessions.to_string(), track, wide, RULE_2, MUTE);
+        let _ = Self::seg(&mut self.atlas, &mut out, sx, st_top, "TABS", &self.status_tabs.1, track, wide, scale, RULE_2, MUTE);
 
         // right cluster (right→left): version · READY/PANE · clock
         let ver = "termie 0.1";
@@ -2515,11 +2531,11 @@ impl Renderer {
         let _ = Self::draw_text(
             &mut self.atlas, &mut out, FontId::Chrome, rx_ready, st_top, ready, ready_col, 1.0, wide,
         );
-        if !clock.is_empty() {
-            let clk_w = self.text_w(FontId::Chrome, &clock, track);
+        if !self.status_clock.is_empty() {
+            let clk_w = self.text_w(FontId::Chrome, &self.status_clock, track);
             let rx_clk = rx_ready - (16.0 * self.scale).round() - clk_w;
             let _ = Self::draw_text(
-                &mut self.atlas, &mut out, FontId::Chrome, rx_clk, st_top, &clock, MUTE, 1.0, track,
+                &mut self.atlas, &mut out, FontId::Chrome, rx_clk, st_top, &self.status_clock, MUTE, 1.0, track,
             );
         }
 
@@ -3226,8 +3242,9 @@ impl Renderer {
 
     /// draw a `KEY value` status segment; returns the pen end-x
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn seg(
-        &mut self,
+        atlas: &mut GlyphAtlas,
         out: &mut Vec<Instance>,
         x: f32,
         y_top: f32,
@@ -3235,12 +3252,13 @@ impl Renderer {
         val: &str,
         track: f32,
         wide: f32,
+        scale: f32,
         key_c: Rgb,
         val_c: Rgb,
     ) -> f32 {
-        let mut px = Self::draw_text(&mut self.atlas, out, FontId::Chrome, x, y_top, key, key_c, 1.0, wide);
-        px += (7.0 * self.scale).round();
-        Self::draw_text(&mut self.atlas, out, FontId::Chrome, px, y_top, val, val_c, 1.0, track)
+        let mut px = Self::draw_text(atlas, out, FontId::Chrome, x, y_top, key, key_c, 1.0, wide);
+        px += (7.0 * scale).round();
+        Self::draw_text(atlas, out, FontId::Chrome, px, y_top, val, val_c, 1.0, track)
     }
 
     pub fn render(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32, bare: bool) -> Result<()> {
