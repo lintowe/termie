@@ -139,7 +139,8 @@ pub struct PaneMenuView {
     pub hovered: Option<usize>,
 }
 
-pub const PANE_MENU_ITEMS: [&str; 4] = ["split vertical", "split horizontal", "close pane", "paste"];
+pub const PANE_MENU_ITEMS: [&str; 5] =
+    ["split vertical", "split horizontal", "pop out to window", "close pane", "paste"];
 
 /// find-in-scrollback overlay display state. `matches` are on-screen rects
 /// (viewport row, col, len, is_current) for the focused pane
@@ -1967,7 +1968,7 @@ impl Renderer {
     }
 
     #[allow(non_snake_case)]
-    fn build(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32) -> Vec<Instance> {
+    fn build(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32, bare: bool) -> Vec<Instance> {
         // chrome colors come from the active theme's palette
         let INK_0 = self.palette.ink0;
         let INK_1 = self.palette.ink1;
@@ -2064,6 +2065,12 @@ impl Renderer {
             if pv.flash > 0.0 {
                 Self::stroke_rect_a(&mut out, info.3, hair * 2.0, PAPER, pv.flash);
             }
+        }
+
+        // a torn-off satellite window renders just its pane (the OS supplies the
+        // title bar / close / move), so skip all the chrome and overlays below
+        if bare {
+            return out;
         }
 
         // ---- plugin dock (Tier-1 widgets) on the right of the content area ----
@@ -2949,8 +2956,8 @@ impl Renderer {
         Self::draw_text(&mut self.atlas, out, FontId::Chrome, px, y_top, val, val_c, 1.0, track)
     }
 
-    pub fn render(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32) -> Result<()> {
-        let instances = self.build(panes, focused, maximized, focus_ease);
+    pub fn render(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32, bare: bool) -> Result<()> {
+        let instances = self.build(panes, focused, maximized, focus_ease, bare);
         self.upload_atlas();
 
         let needed = instances.len() as u64;

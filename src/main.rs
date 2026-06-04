@@ -96,6 +96,14 @@ struct Tab {
     root: Option<Node>,
 }
 
+/// a torn-off pane living in its own OS-decorated window. its pty reader still
+/// routes output by pane id, so the UserEvent handlers also search here
+struct Satellite {
+    window: Arc<Window>,
+    renderer: render::Renderer,
+    pane: Pane,
+}
+
 /// an active text selection within one pane's viewport (row, col)
 #[derive(Clone, Copy)]
 struct Sel {
@@ -473,6 +481,30 @@ fn split_pane(node: Node, id: usize, dir: Dir, new: &mut Option<Pane>) -> Node {
                 ratio,
                 a: Box::new(a2),
                 b: Box::new(b2),
+            }
+        }
+    }
+}
+
+/// remove the leaf with `id`, collapsing its parent, and hand the pane back
+/// (alive — for tearing it off into its own window) via `out`
+fn extract_pane(node: Node, id: usize, out: &mut Option<Pane>) -> Option<Node> {
+    match node {
+        Node::Leaf(p) => {
+            if p.id == id {
+                *out = Some(p);
+                None
+            } else {
+                Some(Node::Leaf(p))
+            }
+        }
+        Node::Split { dir, ratio, a, b } => {
+            let a2 = extract_pane(*a, id, out);
+            let b2 = extract_pane(*b, id, out);
+            match (a2, b2) {
+                (Some(a), Some(b)) => Some(Node::Split { dir, ratio, a: Box::new(a), b: Box::new(b) }),
+                (Some(n), None) | (None, Some(n)) => Some(n),
+                (None, None) => None,
             }
         }
     }
@@ -1029,6 +1061,8 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     tabs: Vec<Tab>,
+    /// torn-off panes, each in its own window (keyed by window id at routing)
+    satellites: Vec<Satellite>,
     active_tab: usize,
     next_id: usize,
     layout_cache: Vec<(usize, Rect)>,
@@ -1126,6 +1160,7 @@ impl App {
             window: None,
             renderer: None,
             tabs: Vec::new(),
+            satellites: Vec::new(),
             active_tab: 0,
             next_id: 0,
             layout_cache: Vec::new(),
@@ -1828,7 +1863,7 @@ impl App {
                     .unwrap_or_default(),
                 None => Vec::new(),
             };
-            if let Err(e) = r.render(&views, *focused, *maximized, focus_ease) {
+            if let Err(e) = r.render(&views, *focused, *maximized, focus_ease, false) {
                 log::error!("render error: {e:#}");
             }
         }
@@ -2618,13 +2653,14 @@ impl App {
     }
 
     /// run a pane context-menu item (index into render::PANE_MENU_ITEMS:
-    /// 0 split vertical, 1 split horizontal, 2 close pane, 3 paste)
+    /// 0 split vertical, 1 split horizontal, 2 pop out, 3 close pane, 4 paste)
     fn pane_menu_action(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         match idx {
             0 => self.split_focused(Dir::Vertical),
             1 => self.split_focused(Dir::Horizontal),
-            2 => self.close_focused_pane(event_loop),
-            3 => self.paste(),
+            2 => self.pop_out_focused(event_loop),
+            3 => self.close_focused_pane(event_loop),
+            4 => self.paste(),
             _ => {}
         }
     }
@@ -2641,6 +2677,132 @@ impl App {
         if done {
             self.relayout_all();
             self.redraw();
+        }
+    }
+
+    /// tear the focused pane off into its own OS window (multi-window)
+    fn pop_out_focused(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(fid) = self.tabs.get(self.active_tab).map(|t| t.focused) else {
+            return;
+        };
+        let count = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.root.as_ref())
+            .map(|r| {
+                let mut n = 0;
+                each_pane(r, &mut |_| n += 1);
+                n
+            })
+            .unwrap_or(0);
+        if count < 2 {
+            return; // don't strip a tab's only pane
+        }
+        let mut popped: Option<Pane> = None;
+        if let Some(tab) = self.tabs.get_mut(self.active_tab)
+            && let Some(root) = tab.root.take()
+        {
+            tab.root = extract_pane(root, fid, &mut popped);
+            if let Some(r) = tab.root.as_ref() {
+                tab.focused = first_leaf(r);
+            }
+        }
+        let Some(pane) = popped else {
+            return;
+        };
+        let attrs = Window::default_attributes()
+            .with_title("termie — pane")
+            .with_inner_size(LogicalSize::new(760.0, 480.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(_) => {
+                self.dock_loose_pane(pane);
+                return;
+            }
+        };
+        let renderer = match render::Renderer::new(window.clone(), CONTENT_PT, CHROME_PT, self.config.backend) {
+            Ok(mut r) => {
+                r.set_theme(self.persisted.theme);
+                r
+            }
+            Err(_) => {
+                self.dock_loose_pane(pane);
+                return;
+            }
+        };
+        self.satellites.push(Satellite { window, renderer, pane });
+        self.relayout_all();
+        self.sync_tabs();
+        let idx = self.satellites.len() - 1;
+        self.paint_satellite(idx);
+        self.redraw();
+    }
+
+    /// re-attach a loose pane as a new tab (used if a satellite window won't open)
+    fn dock_loose_pane(&mut self, pane: Pane) {
+        let fid = pane.id;
+        self.tabs.push(Tab { focused: fid, root: Some(Node::Leaf(pane)) });
+        self.active_tab = self.tabs.len() - 1;
+        self.relayout_all();
+        self.sync_tabs();
+        self.redraw();
+    }
+
+    /// render one satellite window: its single pane filling the client area
+    fn paint_satellite(&mut self, idx: usize) {
+        let Some(sat) = self.satellites.get_mut(idx) else {
+            return;
+        };
+        let size = sat.window.inner_size();
+        sat.renderer.resize(size.width, size.height);
+        let pad = 4.0f32;
+        let rect = (pad, pad, (size.width as f32 - pad * 2.0).max(1.0), (size.height as f32 - pad * 2.0).max(1.0));
+        let (_, _, cols, rows) = sat.renderer.pane_metrics(rect);
+        if sat.pane.term.grid.cols != cols || sat.pane.term.grid.rows != rows {
+            sat.pane.resize(rows, cols);
+        }
+        let pv = render::PaneView {
+            term: &sat.pane.term,
+            rect,
+            focused: true,
+            sel: None,
+            flash: 0.0,
+            link: None,
+        };
+        let _ = sat.renderer.render(&[pv], true, false, 1.0, true);
+    }
+
+    /// handle a window event addressed to satellite `idx`
+    fn satellite_event(&mut self, idx: usize, event: &WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                if idx < self.satellites.len() {
+                    let mut sat = self.satellites.remove(idx);
+                    sat.pane.pty.kill();
+                }
+            }
+            WindowEvent::Resized(_) | WindowEvent::RedrawRequested => self.paint_satellite(idx),
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::KeyboardInput { event: ke, .. } => {
+                if ke.state == ElementState::Pressed
+                    && let Some(sat) = self.satellites.get_mut(idx)
+                {
+                    let app_cursor = sat.pane.term.app_cursor_keys;
+                    let kbd = sat.pane.term.kbd_flags();
+                    if let Some(bytes) = input::key_to_bytes(
+                        &ke.logical_key,
+                        ke.text.as_deref(),
+                        ke.state,
+                        ke.repeat,
+                        self.mods,
+                        app_cursor,
+                        kbd,
+                    ) {
+                        sat.pane.pty.write(&bytes);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2913,6 +3075,7 @@ impl App {
                     "v" => self.split_focused(Dir::Vertical),
                     "s" => self.split_focused(Dir::Horizontal),
                     "x" => self.close_focused_pane(event_loop),
+                    "o" => self.pop_out_focused(event_loop),
                     "n" => self.new_tab(),
                     "q" => self.set_pane_mode(false),
                     _ => {}
@@ -3085,6 +3248,22 @@ impl ApplicationHandler<UserEvent> for App {
                             break;
                         }
                 }
+                if !found
+                    && let Some(idx) = self.satellites.iter().position(|s| s.pane.id == id)
+                {
+                    let sat = &mut self.satellites[idx];
+                    sat.pane.parser.advance(&mut sat.pane.term, &bytes);
+                    if !sat.pane.term.responses.is_empty() {
+                        let resp = std::mem::take(&mut sat.pane.term.responses);
+                        sat.pane.pty.write(&resp);
+                    }
+                    if let Some(text) = sat.pane.term.clipboard.take() {
+                        clip = Some(text);
+                    }
+                    sat.pane.term.bell = false;
+                    self.paint_satellite(idx);
+                    found = true;
+                }
                 // let plugins react to the bell (host -> plugin event direction)
                 if rang && !self.plugins.is_empty() {
                     self.plugins_broadcast(&plugin::HostEvent::Bell { pane: id as u64 });
@@ -3159,6 +3338,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Exited { id } => {
                 // a warm pool shell that died — drop it so warm_pool respawns
                 self.pool.retain(|p| p.id != id);
+                // a torn-off pane whose shell exited — close its satellite window
+                if let Some(idx) = self.satellites.iter().position(|s| s.pane.id == id) {
+                    let mut sat = self.satellites.remove(idx);
+                    sat.pane.pty.kill();
+                    return;
+                }
                 // find which tab holds this pane, close that pane
                 let owner = self.tabs.iter().position(|t| {
                     t.root.as_ref().map(|r| find_pane(r, id).is_some()).unwrap_or(false)
@@ -3247,7 +3432,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // events for a torn-off pane's window go to its satellite handler
+        if let Some(idx) = self.satellites.iter().position(|s| s.window.id() == id) {
+            self.satellite_event(idx, &event);
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 for tab in &mut self.tabs {
