@@ -452,6 +452,10 @@ pub struct Renderer {
     /// (previous active tab index, start) so the active-tab accent rail slides
     /// to the newly selected tab instead of teleporting
     tab_slide: Option<(usize, Instant)>,
+    /// when a centered overlay (palette/find/market/pane menu) opened, so it
+    /// blooms in instead of popping; `overlay_shown` tracks last-frame presence
+    overlay_since: Option<Instant>,
+    overlay_shown: bool,
     settings_open: bool,
     settings_p: f32,
     settings_scroll: f32,
@@ -911,6 +915,8 @@ impl Renderer {
             hovered: None,
             hover_since: None,
             tab_slide: None,
+            overlay_since: None,
+            overlay_shown: false,
             settings_open: false,
             settings_p: 0.0,
             settings_scroll: 0.0,
@@ -1324,6 +1330,16 @@ impl Renderer {
         self.tab_slide
             .map(|(_, t)| t.elapsed().as_secs_f32() < Self::TAB_SLIDE)
             .unwrap_or(false)
+    }
+
+    const OVERLAY_FADE: f32 = 0.11;
+
+    pub fn overlay_animating(&self) -> bool {
+        self.overlay_shown
+            && self
+                .overlay_since
+                .map(|t| t.elapsed().as_secs_f32() < Self::OVERLAY_FADE)
+                .unwrap_or(false)
     }
 
     pub fn set_status(&mut self, git: Option<String>, clock: String, sessions: usize) {
@@ -2502,7 +2518,18 @@ impl Renderer {
             );
         }
 
-        // ---- overlays ----
+        // ---- overlays ---- (bloom in: stamp the open, then scale the whole
+        // overlay instance range's alpha by an eased 0→1 so scrim + box + text
+        // fade together without threading the factor through each draw fn)
+        let overlay_now = self.pane_menu_view.is_some()
+            || self.palette_view.is_some()
+            || self.market_view.is_some()
+            || self.find_view.is_some();
+        if overlay_now && !self.overlay_shown {
+            self.overlay_since = Some(Instant::now());
+        }
+        self.overlay_shown = overlay_now;
+        let overlay_start = out.len();
         if self.pane_menu_view.is_some() {
             self.build_pane_menu(&mut out, track);
         }
@@ -2514,6 +2541,20 @@ impl Renderer {
         }
         if self.find_view.is_some() {
             self.build_find(&mut out, track);
+        }
+        if overlay_now {
+            let p = self
+                .overlay_since
+                .map(|t| {
+                    let e = (t.elapsed().as_secs_f32() / Self::OVERLAY_FADE).clamp(0.0, 1.0);
+                    1.0 - (1.0 - e).powi(3)
+                })
+                .unwrap_or(1.0);
+            if p < 1.0 {
+                for inst in &mut out[overlay_start..] {
+                    inst.color[3] *= p;
+                }
+            }
         }
         // the settings panel draws last so its scrollable body is the final
         // instance range (clipped via scissor in render); build_settings sets
