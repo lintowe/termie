@@ -2105,10 +2105,23 @@ impl App {
         if !self.settings_open {
             self.settings_open = true;
             self.settings_anim = Some(Instant::now());
+            self.refresh_settings_plugins();
             if let Some(r) = self.renderer.as_mut() {
                 r.reset_settings_scroll();
             }
             self.redraw();
+        }
+    }
+
+    /// push the installed-plugin list (name, enabled) into the settings panel;
+    /// the row order matches discover_plugins so a toggle can index back into it
+    fn refresh_settings_plugins(&mut self) {
+        let list: Vec<(String, bool)> = discover_plugins()
+            .into_iter()
+            .map(|d| (d.manifest.name, d.enabled))
+            .collect();
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_plugins(list);
         }
     }
 
@@ -2712,6 +2725,19 @@ impl App {
             Hot::OpenPlugins => {
                 self.close_settings();
                 self.open_market();
+            }
+            Hot::PluginToggle(i) => {
+                // flip the i-th installed plugin's enabled state in place; the
+                // settings list order matches discover_plugins (set on open)
+                let discovered = discover_plugins();
+                if let Some(d) = discovered.get(i) {
+                    let id = d.manifest.id.clone();
+                    let now = !d.enabled;
+                    self.set_plugin_enabled(&id, now);
+                    self.restart_plugins();
+                    self.refresh_settings_plugins();
+                    self.redraw();
+                }
             }
         }
         // persist whenever a setting changed

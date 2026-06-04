@@ -109,6 +109,8 @@ pub enum Hot {
     CloseActionCycle,
     BackendCycle,
     OpenPlugins,
+    /// toggle the enabled state of installed plugin at this index
+    PluginToggle(usize),
 }
 
 /// a terminal to draw at a pixel rect within the window
@@ -314,7 +316,8 @@ struct SettingsGeom {
     profile_y: f32,
     close_y: f32,
     backend_y: f32,
-    plugins_y: f32,
+    /// (name, enabled, toggle rect, row baseline) per installed plugin
+    plugin_rows: Vec<(String, bool, Rect, f32)>,
     keys_start_y: f32,
     about_start_y: f32,
     // interactive rects (absolute, scroll-adjusted)
@@ -487,6 +490,8 @@ pub struct Renderer {
     /// (cols, rows, "W×H") and (sessions, "n")
     status_size: (usize, usize, String),
     status_tabs: (usize, String),
+    /// installed plugins (display name, enabled) for the settings PLUGINS panel
+    plugins_installed: Vec<(String, bool)>,
     palette_view: Option<PaletteView>,
     pane_menu_view: Option<PaneMenuView>,
     find_view: Option<FindView>,
@@ -946,6 +951,7 @@ impl Renderer {
             status_sessions: 1,
             status_size: (usize::MAX, usize::MAX, String::new()),
             status_tabs: (usize::MAX, String::new()),
+            plugins_installed: Vec::new(),
             palette_view: None,
             pane_menu_view: None,
             find_view: None,
@@ -1157,6 +1163,11 @@ impl Renderer {
 
     pub fn set_settings(&mut self, v: SettingsView) {
         self.settings_view = v;
+    }
+
+    /// the installed plugins (display name, enabled) shown in the settings panel
+    pub fn set_plugins(&mut self, list: Vec<(String, bool)>) {
+        self.plugins_installed = list;
     }
 
     /// drive the slide-in panel: `open` = interactive, `p` = docked fraction (0..1)
@@ -1505,6 +1516,13 @@ impl Renderer {
         let chip_h = 42.0 * s;
         let key_row = 22.0 * s;
         let mut y = 0.0;
+        // PLUGINS first so the marketplace is the first thing in the gear menu
+        let sec_plugins = y;
+        y += hdr_adv;
+        let plugins_n = self.plugins_installed.len();
+        let plugin_first_l = y;
+        y += if plugins_n == 0 { row } else { row * plugins_n as f32 };
+        y += sec_gap;
         let sec_app = y;
         y += hdr_adv;
         let font_l = y;
@@ -1542,11 +1560,6 @@ impl Renderer {
         let backend_l = y;
         y += row;
         y += sec_gap;
-        let sec_plugins = y;
-        y += hdr_adv;
-        let plugins_l = y;
-        y += row;
-        y += sec_gap;
         let sec_keys = y;
         y += hdr_adv;
         let keys_start_l = y;
@@ -1575,7 +1588,18 @@ impl Renderer {
         let profile_btn = (val_x, ay(profile_l), cluster, bh);
         let close_action_btn = (val_x, ay(close_l), cluster, bh);
         let backend_btn = (val_x, ay(backend_l), cluster, bh);
-        let plugins_btn = (val_x, ay(plugins_l), cluster, bh);
+        // "browse" store button right-aligned in the PLUGINS header row
+        let plugins_btn = (content_x + content_w - cluster, ay(sec_plugins) - 4.0 * s, cluster, bh);
+        // one row per installed plugin: (name, enabled, toggle rect, row baseline)
+        let plugin_rows: Vec<(String, bool, Rect, f32)> = self
+            .plugins_installed
+            .iter()
+            .enumerate()
+            .map(|(i, (name, on))| {
+                let ry = ay(plugin_first_l + i as f32 * row);
+                (name.clone(), *on, (val_x, ry, cluster, bh), ry)
+            })
+            .collect();
 
         let chip_gap = 8.0 * s;
         let chip_w = ((content_w - chip_gap * 2.0) / 3.0).floor();
@@ -1586,7 +1610,7 @@ impl Renderer {
             (content_x + (chip_w + chip_gap) * 2.0, chip_y, chip_w, chip_h),
         ];
 
-        let controls = vec![
+        let mut controls = vec![
             (Hot::FontDec, font_dec),
             (Hot::FontInc, font_inc),
             (Hot::FontCycle, fontfam_btn),
@@ -1608,6 +1632,9 @@ impl Renderer {
             (Hot::BackendCycle, backend_btn),
             (Hot::OpenPlugins, plugins_btn),
         ];
+        for (i, (_, _, rect, _)) in plugin_rows.iter().enumerate() {
+            controls.push((Hot::PluginToggle(i), *rect));
+        }
 
         SettingsGeom {
             panel_x,
@@ -1643,7 +1670,7 @@ impl Renderer {
             profile_y: ay(profile_l),
             close_y: ay(close_l),
             backend_y: ay(backend_l),
-            plugins_y: ay(plugins_l),
+            plugin_rows,
             keys_start_y: ay(keys_start_l),
             about_start_y: ay(about_start_l),
             font_dec,
@@ -2712,6 +2739,18 @@ impl Renderer {
             [g.panel_x, g.body_top, g.panel_w, g.body_bottom - g.body_top],
         ));
 
+        // PLUGINS (top of the panel: installed list with on/off + browse store)
+        self.section_label(out, cx, g.sec_plugins_y, cw, "PLUGINS", wide, RULE_2, MUTE);
+        self.cycle_btn(out, g.plugins_btn, "browse \u{25B8}", Hot::OpenPlugins, track);
+        if g.plugin_rows.is_empty() {
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.sec_plugins_y + 32.0 * s), "no plugins installed", RULE_2, 1.0, track);
+        } else {
+            for (i, (name, on, rect, ry)) in g.plugin_rows.iter().enumerate() {
+                let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(*ry), name, MUTE, 1.0, wide);
+                self.toggle_btn(out, *rect, *on, Hot::PluginToggle(i), track);
+            }
+        }
+
         // APPEARANCE
         self.section_label(out, cx, g.sec_app_y, cw, "APPEARANCE", wide, RULE_2, MUTE);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.font_y), "FONT SIZE", MUTE, 1.0, wide);
@@ -2752,11 +2791,6 @@ impl Renderer {
         // backend can't swap live; hint that it applies next launch
         let (bbx, _, bbw, _) = g.backend_btn;
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bbx + bbw + 10.0 * s, lbl(g.backend_y), "(restart)", RULE_2, 1.0, track);
-
-        // PLUGINS
-        self.section_label(out, cx, g.sec_plugins_y, cw, "PLUGINS", wide, RULE_2, MUTE);
-        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.plugins_y), "MARKETPLACE", MUTE, 1.0, wide);
-        self.cycle_btn(out, g.plugins_btn, "browse \u{25B8}", Hot::OpenPlugins, track);
 
         // KEYBINDINGS (two sub-columns)
         self.section_label(out, cx, g.sec_keys_y, cw, "KEYBINDINGS", wide, RULE_2, MUTE);

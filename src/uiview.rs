@@ -45,6 +45,14 @@ pub fn maybe_run() -> bool {
             // restart the power-on clock so the capture lands mid-animation
             r.begin_reveal();
         }
+        "settings" => {
+            r.set_settings_panel(true, 1.0);
+            r.set_plugins(vec![
+                ("tamagotchi".into(), true),
+                ("relay".into(), false),
+                ("css-loader".into(), true),
+            ]);
+        }
         _ => {}
     }
 
