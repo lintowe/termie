@@ -26,6 +26,13 @@ if (Test-Path $InstallDir) {
     catch { Write-Warning "could not remove $InstallDir ($_) - is termie still running?" }
 }
 
+# registry: the "Open in termie" verb + App Paths entry (paired with install.ps1)
+foreach ($key in @('HKCU:\Software\Classes\Directory\shell\termie',
+                   'HKCU:\Software\Classes\Directory\Background\shell\termie',
+                   'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\termie.exe')) {
+    if (Test-Path $key) { Remove-Item $key -Recurse -Force; Write-Host "    removed $key" }
+}
+
 # PATH entry
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath) {

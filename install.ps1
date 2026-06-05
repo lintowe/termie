@@ -107,7 +107,24 @@ if (-not $NoPath) {
     }
 }
 
-# 6. refresh the shell icon cache so the new icon shows immediately (the shell
+# 6. "Open in termie" Explorer context-menu verb (right-click a folder or its
+#    background) plus an App Paths entry so Win+R / ShellExecute resolve `termie`.
+#    HKCU only, so this needs no elevation. %V is the clicked folder
+$cmd = '"' + $destExe + '" --cwd "%V"'
+foreach ($root in @('HKCU:\Software\Classes\Directory\shell\termie',
+                    'HKCU:\Software\Classes\Directory\Background\shell\termie')) {
+    New-Item -Path $root -Force | Out-Null
+    Set-ItemProperty -Path $root -Name '(default)' -Value 'Open in termie'
+    if ($icoPath) { Set-ItemProperty -Path $root -Name 'Icon' -Value $icoPath }
+    New-Item -Path "$root\command" -Force | Out-Null
+    Set-ItemProperty -Path "$root\command" -Name '(default)' -Value $cmd
+}
+$appPaths = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\termie.exe'
+New-Item -Path $appPaths -Force | Out-Null
+Set-ItemProperty -Path $appPaths -Name '(default)' -Value $destExe
+Write-Host "    registered 'Open in termie' context menu + App Paths"
+
+# 7. refresh the shell icon cache so the new icon shows immediately (the shell
 #    caches shortcut icons and would otherwise keep showing the old one)
 try { & ie4uinit.exe -ClearIconCache 2>$null; & ie4uinit.exe -show 2>$null } catch {}
 
