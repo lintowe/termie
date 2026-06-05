@@ -69,7 +69,14 @@ pub struct Pty {
 impl Pty {
     /// create the pty + child process (the slow part — safe to call off-thread).
     /// the output thread isn't started until start_reader().
-    pub fn spawn(rows: u16, cols: u16, shell: ShellKind, load_profile: bool, cwd: Option<&str>) -> Result<Pty> {
+    pub fn spawn(
+        rows: u16,
+        cols: u16,
+        shell: ShellKind,
+        load_profile: bool,
+        cwd: Option<&str>,
+        command: Option<&[String]>,
+    ) -> Result<Pty> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: rows.max(1),
@@ -78,20 +85,40 @@ impl Pty {
             pixel_height: 0,
         })?;
 
-        let shell = resolve_shell_cached(shell);
-        let mut cmd = CommandBuilder::new(&shell);
-        // suppress the banner (and the profile unless asked) for a fast prompt, and
-        // inject an OSC-7 prompt hook so termie learns the cwd for tab labels / title
-        let lower = shell.to_ascii_lowercase();
-        if lower.ends_with("pwsh.exe") || lower.ends_with("powershell.exe") {
-            cmd.arg("-NoLogo");
-            if !load_profile {
-                cmd.arg("-NoProfile");
+        // an explicit command (from the cli or a context-menu verb) runs directly
+        // instead of a login shell, so none of the shell banner/prompt-hook
+        // injection applies; otherwise launch the configured shell
+        let mut cmd = match command.filter(|a| !a.is_empty()) {
+            Some(argv) => {
+                let mut c = CommandBuilder::new(&argv[0]);
+                for a in &argv[1..] {
+                    c.arg(a.as_str());
+                }
+                c
             }
-            cmd.arg("-NoExit");
-            cmd.arg("-Command");
-            cmd.arg(PWSH_OSC7_PROMPT);
-        }
+            None => {
+                let shell = resolve_shell_cached(shell);
+                // suppress the banner (and the profile unless asked) for a fast
+                // prompt, and inject an OSC-7 hook so termie learns the cwd
+                let lower = shell.to_ascii_lowercase();
+                let mut c = CommandBuilder::new(&shell);
+                if lower.ends_with("pwsh.exe") || lower.ends_with("powershell.exe") {
+                    c.arg("-NoLogo");
+                    if !load_profile {
+                        c.arg("-NoProfile");
+                    }
+                    c.arg("-NoExit");
+                    c.arg("-Command");
+                    c.arg(PWSH_OSC7_PROMPT);
+                }
+                if lower.ends_with("wsl.exe") {
+                    // forward the terminal env into the wsl distro so colors and
+                    // the kitty-keyboard hint reach programs running inside wsl
+                    c.env("WSLENV", "TERM/u:COLORTERM/u:TERM_PROGRAM/u");
+                }
+                c
+            }
+        };
         // start in the requested directory (a new tab/split in the focused repo),
         // falling back to home if it's unset or no longer a valid directory
         if let Some(dir) = cwd.filter(|d| std::path::Path::new(*d).is_dir()) {
@@ -113,11 +140,6 @@ impl Pty {
         cmd.env("POWERSHELL_TELEMETRY_OPTOUT", "1");
         cmd.env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
         cmd.env("DOTNET_NOLOGO", "1");
-        if lower.ends_with("wsl.exe") {
-            // forward the terminal env into the WSL distro so colors and the
-            // kitty-keyboard hint reach programs running inside wsl
-            cmd.env("WSLENV", "TERM/u:COLORTERM/u:TERM_PROGRAM/u");
-        }
 
         let child = pair.slave.spawn_command(cmd)?;
         // close the slave side in the parent so EOF propagates on child exit

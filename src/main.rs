@@ -769,6 +769,46 @@ fn discover_plugins() -> Vec<Discovered> {
 
 /// build a pane (pty + child + screen) without starting its reader thread.
 /// the slow part (process spawn) — safe to run off the main thread
+/// parsed command line. always-new-window means each launch is its own process,
+/// so this is per-process; a bare launch (no cwd/command) is what session
+/// restore keys off of
+#[derive(Clone, Default)]
+struct CliArgs {
+    cwd: Option<String>,
+    command: Option<Vec<String>>,
+}
+
+impl CliArgs {
+    fn is_bare(&self) -> bool {
+        self.cwd.is_none() && self.command.is_none()
+    }
+}
+
+/// parse `termie [--cwd DIR | -d DIR | --cwd=DIR] [-- COMMAND...]`. lenient and
+/// silent: release is a windowed subsystem with no console to print help to, so
+/// unknown flags are ignored rather than erroring. `--` ends option parsing and
+/// the remainder is a command argv to run instead of the default shell
+fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
+    let mut out = CliArgs::default();
+    let mut it = args;
+    while let Some(a) = it.next() {
+        if a == "--" {
+            let rest: Vec<String> = it.by_ref().collect();
+            if !rest.is_empty() {
+                out.command = Some(rest);
+            }
+            break;
+        } else if a == "--cwd" || a == "-d" {
+            if let Some(dir) = it.next() {
+                out.cwd = Some(dir);
+            }
+        } else if let Some(dir) = a.strip_prefix("--cwd=").or_else(|| a.strip_prefix("-d=")) {
+            out.cwd = Some(dir.to_string());
+        }
+    }
+    out
+}
+
 fn build_pane(
     id: usize,
     cols: usize,
@@ -777,8 +817,9 @@ fn build_pane(
     load_profile: bool,
     scrollback: usize,
     cwd: Option<&str>,
+    command: Option<&[String]>,
 ) -> Result<Pane> {
-    let pty = Pty::spawn(rows as u16, cols as u16, shell, load_profile, cwd)?;
+    let pty = Pty::spawn(rows as u16, cols as u16, shell, load_profile, cwd, command)?;
     let mut term = Terminal::new(rows, cols);
     term.grid.set_scrollback_limit(scrollback);
     Ok(Pane {
@@ -1134,6 +1175,8 @@ fn load_persisted() -> Persisted {
 
 struct App {
     proxy: EventLoopProxy<UserEvent>,
+    /// this process's parsed command line (always-new-window: one per process)
+    cli: CliArgs,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     tabs: Vec<Tab>,
@@ -1244,6 +1287,7 @@ impl App {
         let p = load_persisted();
         App {
             proxy,
+            cli: parse_args(std::env::args().skip(1)),
             window: None,
             renderer: None,
             tabs: Vec::new(),
@@ -1368,6 +1412,18 @@ impl App {
                 log::warn!("quake hotkey unavailable (already in use by another app)");
             }
         }
+        // an explicit cwd/command (cli or a context-menu verb): spawn the first
+        // tab here at that location instead of adopting a home-dir pool shell.
+        // a bare launch leaves the fast async warm-pool path below unchanged
+        if !self.cli.is_bare() {
+            let (cols, rows) = self.content_pane_size();
+            let cwd = self.cli.cwd.clone();
+            let command = self.cli.command.clone();
+            match self.spawn_pane(cols, rows, cwd, None, command.as_deref()) {
+                Ok(pane) => self.install_first_tab(pane),
+                Err(e) => log::error!("failed to spawn the requested command: {e}"),
+            }
+        }
         // start the first shells now — the pane size is final once settings are
         // applied, so the async pwsh spawn overlaps the first paint + reveal
         // below instead of starting after them. the first pool shell becomes
@@ -1402,7 +1458,7 @@ impl App {
     }
 
     /// build a pane synchronously and start its reader (boot + split fallback)
-    fn spawn_pane(&mut self, cols: usize, rows: usize, cwd: Option<String>, shell: Option<ShellKind>) -> Result<Pane> {
+    fn spawn_pane(&mut self, cols: usize, rows: usize, cwd: Option<String>, shell: Option<ShellKind>, command: Option<&[String]>) -> Result<Pane> {
         let id = self.next_id;
         self.next_id += 1;
         let shell = shell.unwrap_or(self.config.shell);
@@ -1414,9 +1470,25 @@ impl App {
             self.config.load_profile,
             self.config.scrollback,
             cwd.as_deref(),
+            command,
         )?;
         self.start_reader(&mut pane);
         Ok(pane)
+    }
+
+    /// install a freshly-built pane (its reader already started) as the sole
+    /// tab — the boot adoption path, shared by the first async pool shell and a
+    /// synchronous cli-launched command so the two can't diverge
+    fn install_first_tab(&mut self, pane: Pane) {
+        let fid = pane.id;
+        self.tabs.push(Tab {
+            focused: fid,
+            root: Some(Node::Leaf(pane)),
+        });
+        self.active_tab = 0;
+        self.relayout_all();
+        self.sync_tabs();
+        self.redraw();
     }
 
     fn redraw(&self) {
@@ -1491,7 +1563,7 @@ impl App {
             let proxy = self.proxy.clone();
             self.pending_warm += 1;
             std::thread::spawn(move || {
-                let pane = build_pane(id, cols, rows, shell, profile, sb, None).ok().map(Box::new);
+                let pane = build_pane(id, cols, rows, shell, profile, sb, None, None).ok().map(Box::new);
                 let _ = proxy.send_event(UserEvent::PaneReady(pane));
             });
         }
@@ -2087,7 +2159,7 @@ impl App {
             // a move + relayout, no shell spawn on the critical path
             Ok(self.pool.remove(i))
         } else {
-            self.spawn_pane(cols, rows, cwd, shell)
+            self.spawn_pane(cols, rows, cwd, shell, None)
         };
         if let Ok(pane) = pane {
             let fid = pane.id;
@@ -2533,7 +2605,7 @@ impl App {
                 }
                 _ => self.content_pane_size(),
             };
-            let Ok(p) = self.spawn_pane(cols, rows, cwd, None) else {
+            let Ok(p) = self.spawn_pane(cols, rows, cwd, None, None) else {
                 return;
             };
             p
@@ -3569,15 +3641,7 @@ impl ApplicationHandler<UserEvent> for App {
                     pane.term.grid.set_scrollback_limit(self.config.scrollback);
                     if self.tabs.is_empty() {
                         // first shell of an async startup -> becomes tab one
-                        let fid = pane.id;
-                        self.tabs.push(Tab {
-                            focused: fid,
-                            root: Some(Node::Leaf(*pane)),
-                        });
-                        self.active_tab = 0;
-                        self.relayout_all();
-                        self.sync_tabs();
-                        self.redraw();
+                        self.install_first_tab(*pane);
                         timing("first shell on screen");
                     } else {
                         self.pool.push(*pane);
@@ -4428,6 +4492,24 @@ mod tests {
         assert_eq!(cwd_path(Some("file://host/C:/dev")).as_deref(), Some("C:/dev"));
         assert_eq!(cwd_path(Some("file:///C:/a%20b")).as_deref(), Some("C:/a b"));
         assert_eq!(cwd_path(None), None);
+    }
+
+    #[test]
+    fn parse_args_forms() {
+        let p = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
+        assert!(p(&[]).is_bare());
+        assert_eq!(p(&["--cwd", "C:/x"]).cwd.as_deref(), Some("C:/x"));
+        assert_eq!(p(&["-d", "C:/y"]).cwd.as_deref(), Some("C:/y"));
+        assert_eq!(p(&["--cwd=C:/z"]).cwd.as_deref(), Some("C:/z"));
+        assert!(!p(&["--cwd", "C:/x"]).is_bare());
+        let cmd = p(&["--", "vim", "a.txt"]);
+        assert_eq!(
+            cmd.command.as_deref(),
+            Some(&["vim".to_string(), "a.txt".to_string()][..])
+        );
+        assert!(!cmd.is_bare());
+        // unknown flags are ignored, not misread as a cwd or command
+        assert!(p(&["--frobnicate"]).is_bare());
     }
 
     #[test]
