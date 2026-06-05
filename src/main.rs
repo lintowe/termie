@@ -124,12 +124,6 @@ struct Tab {
 
 /// a torn-off pane living in its own OS-decorated window. its pty reader still
 /// routes output by pane id, so the UserEvent handlers also search here
-struct Satellite {
-    window: Arc<Window>,
-    renderer: render::Renderer,
-    pane: Pane,
-}
-
 /// an active text selection within one pane's viewport (row, col)
 #[derive(Clone, Copy)]
 struct Sel {
@@ -1495,8 +1489,8 @@ struct App {
     cli: CliArgs,
     /// the main window's state (window/renderer/tabs/active_tab/layout)
     pw: PaneWindow,
-    /// torn-off panes, each in its own window (keyed by window id at routing)
-    satellites: Vec<Satellite>,
+    /// torn-off windows, each a full PaneWindow (keyed by window id at routing)
+    satellites: Vec<PaneWindow>,
     next_id: usize,
     mods: ModifiersState,
     focused: bool,
@@ -1939,6 +1933,14 @@ impl App {
             p.pty.kill();
         }
         self.pool.clear();
+        // torn-off windows: kill their shells too
+        for sat in &mut self.satellites {
+            for tab in &mut sat.tabs {
+                if let Some(root) = tab.root.as_mut() {
+                    kill_all(root);
+                }
+            }
+        }
         // shutdown chokepoint (hit on every exit path) — tear down plugins too
         self.kill_plugins();
     }
@@ -3637,12 +3639,106 @@ impl App {
                 return;
             }
         };
-        self.satellites.push(Satellite { window, renderer, pane });
+        self.satellites.push(PaneWindow {
+            window: Some(window),
+            renderer: Some(renderer),
+            tabs: vec![Tab {
+                focused: pane.id,
+                root: Some(Node::Leaf(pane)),
+                zoom: None,
+                title: None,
+            }],
+            active_tab: 0,
+            layout_cache: Vec::new(),
+        });
+        // relayout + paint the new satellite via the swap-into-pw technique, then
+        // relayout + repaint the main window (which just lost a pane)
+        let idx = self.satellites.len() - 1;
+        self.with_window(idx, |app| {
+            app.relayout_all();
+            app.paint();
+        });
         self.relayout_all();
         self.sync_tabs();
-        let idx = self.satellites.len() - 1;
-        self.paint_satellite(idx);
         self.redraw();
+    }
+
+    /// run `f` with satellite `idx` swapped into `self.pw`, so every self.pw-based
+    /// method (relayout/paint/key handling) operates on that window, then swap
+    /// back. the swap-back always runs because `f` returns normally
+    fn with_window(&mut self, idx: usize, f: impl FnOnce(&mut Self)) {
+        if idx >= self.satellites.len() {
+            return;
+        }
+        std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+        f(self);
+        std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+    }
+
+    /// handle a window event for satellite `idx`. close removes just that window;
+    /// everything else is dispatched by swapping the satellite into self.pw and
+    /// reusing the main key/shortcut/paint/relayout logic, so torn-off windows
+    /// get the full tab/split behavior
+    fn satellite_event(&mut self, idx: usize, event: WindowEvent, event_loop: &ActiveEventLoop) {
+        if matches!(event, WindowEvent::CloseRequested) {
+            if idx < self.satellites.len() {
+                let mut sat = self.satellites.remove(idx);
+                for tab in sat.tabs.iter_mut() {
+                    if let Some(root) = tab.root.as_mut() {
+                        kill_all(root);
+                    }
+                }
+            }
+            return;
+        }
+        if idx >= self.satellites.len() {
+            return;
+        }
+        std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+        match event {
+            WindowEvent::RedrawRequested => self.paint(),
+            WindowEvent::Resized(_) => {
+                self.relayout_all();
+                self.paint();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(r) = self.pw.renderer.as_mut() {
+                    r.set_scale(scale_factor as f32);
+                }
+                self.relayout_all();
+                self.paint();
+            }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::KeyboardInput { event: ke, .. } => {
+                if !self.handle_shortcut(&ke, event_loop) && ke.state == ElementState::Pressed {
+                    let id = self.active_focused_id();
+                    let (app_cursor, kbd) = id
+                        .and_then(|id| {
+                            self.pw
+                                .tabs
+                                .get(self.pw.active_tab)
+                                .and_then(|t| t.root.as_ref())
+                                .and_then(|r| find_pane(r, id))
+                        })
+                        .map(|p| (p.term.app_cursor_keys, p.term.kbd_flags()))
+                        .unwrap_or((false, 0));
+                    if let Some(bytes) = input::key_to_bytes(
+                        &ke.logical_key,
+                        ke.text.as_deref(),
+                        ke.state,
+                        ke.repeat,
+                        self.mods,
+                        app_cursor,
+                        kbd,
+                    ) {
+                        self.write_to_focused(&bytes);
+                    }
+                }
+                self.paint();
+            }
+            _ => {}
+        }
+        std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
     }
 
     /// re-attach a loose pane as a new tab (used if a satellite window won't open)
@@ -3655,68 +3751,18 @@ impl App {
         self.redraw();
     }
 
-    /// render one satellite window: its single pane filling the client area
-    fn paint_satellite(&mut self, idx: usize) {
-        let Some(sat) = self.satellites.get_mut(idx) else {
-            return;
-        };
-        let size = sat.window.inner_size();
-        sat.renderer.resize(size.width, size.height);
-        let pad = 4.0f32;
-        let rect = (pad, pad, (size.width as f32 - pad * 2.0).max(1.0), (size.height as f32 - pad * 2.0).max(1.0));
-        let (_, _, cols, rows) = sat.renderer.pane_metrics(rect);
-        if sat.pane.term.grid.cols != cols || sat.pane.term.grid.rows != rows {
-            sat.pane.resize(rows, cols);
-        }
-        let pv = render::PaneView {
-            term: &sat.pane.term,
-            rect,
-            focused: true,
-            sel: None,
-            flash: 0.0,
-            link: None,
-        };
-        let _ = sat.renderer.render(&[pv], true, false, 1.0, true);
+    /// the index of the satellite owning window `id`, if any
+    fn satellite_for(&self, id: WindowId) -> Option<usize> {
+        self.satellites
+            .iter()
+            .position(|s| s.window.as_ref().map(|w| w.id()) == Some(id))
     }
 
-    /// handle a window event addressed to satellite `idx`
-    fn satellite_event(&mut self, idx: usize, event: &WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => {
-                if idx < self.satellites.len() {
-                    let mut sat = self.satellites.remove(idx);
-                    sat.pane.pty.kill();
-                }
-            }
-            WindowEvent::Resized(_) | WindowEvent::RedrawRequested => self.paint_satellite(idx),
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let Some(sat) = self.satellites.get_mut(idx) {
-                    sat.renderer.set_scale(*scale_factor as f32);
-                }
-                self.paint_satellite(idx);
-            }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::KeyboardInput { event: ke, .. } => {
-                if ke.state == ElementState::Pressed
-                    && let Some(sat) = self.satellites.get_mut(idx)
-                {
-                    let app_cursor = sat.pane.term.app_cursor_keys;
-                    let kbd = sat.pane.term.kbd_flags();
-                    if let Some(bytes) = input::key_to_bytes(
-                        &ke.logical_key,
-                        ke.text.as_deref(),
-                        ke.state,
-                        ke.repeat,
-                        self.mods,
-                        app_cursor,
-                        kbd,
-                    ) {
-                        sat.pane.pty.write(&bytes);
-                    }
-                }
-            }
-            _ => {}
-        }
+    /// the index of the satellite whose tree contains pane `pid`, if any
+    fn satellite_with_pane(&self, pid: usize) -> Option<usize> {
+        self.satellites
+            .iter()
+            .position(|s| s.tabs.iter().any(|t| t.root.as_ref().is_some_and(|r| find_pane(r, pid).is_some())))
     }
 
     /// toggle the quake drop-down: summon the window to the top of the active
@@ -4162,20 +4208,30 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                 }
                 if !found
-                    && let Some(idx) = self.satellites.iter().position(|s| s.pane.id == id)
+                    && let Some(idx) = self.satellite_with_pane(id)
                 {
-                    let sat = &mut self.satellites[idx];
-                    pump_bytes(&mut sat.pane, &bytes);
-                    if !sat.pane.term.responses.is_empty() {
-                        let resp = std::mem::take(&mut sat.pane.term.responses);
-                        sat.pane.pty.write(&resp);
-                    }
-                    if let Some(text) = sat.pane.term.clipboard.take() {
-                        clip = Some(text);
-                    }
-                    sat.pane.term.bell = false;
-                    self.paint_satellite(idx);
                     found = true;
+                    std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    for tab in self.pw.tabs.iter_mut() {
+                        if let Some(root) = tab.root.as_mut()
+                            && let Some(p) = find_pane_mut(root, id)
+                        {
+                            pump_bytes(p, &bytes);
+                            if !p.term.responses.is_empty() {
+                                let resp = std::mem::take(&mut p.term.responses);
+                                p.pty.write(&resp);
+                            }
+                            if let Some(text) = p.term.clipboard.take() {
+                                clip = Some(text);
+                            }
+                            p.term.bell = false;
+                            break;
+                        }
+                    }
+                    if let Some(w) = self.pw.window.as_ref() {
+                        w.request_redraw();
+                    }
+                    std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
                 }
                 // a pane that just became ready may need its deferred resize
                 if newly_ready {
@@ -4258,9 +4314,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // a warm pool shell that died — drop it so warm_pool respawns
                 self.pool.retain(|p| p.id != id);
                 // a torn-off pane whose shell exited — close its satellite window
-                if let Some(idx) = self.satellites.iter().position(|s| s.pane.id == id) {
+                if let Some(idx) = self.satellite_with_pane(id) {
                     let mut sat = self.satellites.remove(idx);
-                    sat.pane.pty.kill();
+                    for tab in sat.tabs.iter_mut() {
+                        if let Some(root) = tab.root.as_mut() {
+                            kill_all(root);
+                        }
+                    }
                     return;
                 }
                 // find which tab holds this pane, close that pane
@@ -4351,9 +4411,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        // events for a torn-off pane's window go to its satellite handler
-        if let Some(idx) = self.satellites.iter().position(|s| s.window.id() == id) {
-            self.satellite_event(idx, &event);
+        // events for a torn-off window go to its satellite handler
+        if self.pw.window.as_ref().map(|w| w.id()) != Some(id) {
+            if let Some(idx) = self.satellite_for(id) {
+                self.satellite_event(idx, event, event_loop);
+            }
             return;
         }
         // feed the main window's events to the accesskit adapter (focus/bounds)
