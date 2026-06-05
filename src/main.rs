@@ -182,6 +182,19 @@ struct FindState {
     current: usize,
 }
 
+/// a pending modal confirmation: the action runs on enter, esc cancels
+enum ConfirmAction {
+    /// send these bytes to a pane — a risky multiline paste held for confirm
+    PasteBytes { pane: usize, bytes: Vec<u8> },
+}
+
+/// modal yes/no overlay state; captures keys until resolved
+struct ConfirmState {
+    prompt: String,
+    hint: String,
+    action: ConfirmAction,
+}
+
 /// one row in the plugins marketplace overlay: either an installed plugin or a
 /// remote catalog entry not yet installed
 #[derive(Clone)]
@@ -1201,6 +1214,8 @@ struct App {
     git: Option<String>,
     palette: Option<PaletteState>,
     find: Option<FindState>,
+    /// a modal confirm prompt (e.g. a risky paste), when open
+    confirm: Option<ConfirmState>,
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
     cursor: PhysicalPosition<f64>,
@@ -1310,6 +1325,7 @@ impl App {
             git: None,
             palette: None,
             find: None,
+            confirm: None,
             market: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             pressed: None,
@@ -1907,19 +1923,54 @@ impl App {
         let Some(id) = self.active_focused_id() else {
             return;
         };
+        let bracketed = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.root.as_ref())
+            .and_then(|r| find_pane(r, id))
+            .map(|p| p.term.bracketed_paste)
+            .unwrap_or(false);
+        let mut bytes = Vec::new();
+        if bracketed {
+            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(normalized.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+        } else {
+            bytes.extend_from_slice(normalized.as_bytes());
+        }
+        // without bracketed paste a multiline paste runs each line as its own
+        // command the moment it lands; hold it behind a confirm so a stray paste
+        // can't fire a string of commands. bracketed-paste programs (modern
+        // shells, TUIs) buffer the whole paste safely, so they go straight
+        let multiline = normalized.trim_end_matches('\r').contains('\r');
+        if !bracketed && multiline {
+            let lines = normalized.split('\r').filter(|l| !l.is_empty()).count();
+            self.confirm = Some(ConfirmState {
+                prompt: format!("paste {lines} lines into a program with no paste protection?"),
+                hint: "enter: paste \u{b7} esc: cancel".to_string(),
+                action: ConfirmAction::PasteBytes { pane: id, bytes },
+            });
+            self.redraw();
+        } else {
+            self.send_paste_bytes(id, &bytes);
+        }
+    }
+
+    /// write already-encoded paste bytes to a pane by id
+    fn send_paste_bytes(&mut self, pane: usize, bytes: &[u8]) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab)
             && let Some(root) = tab.root.as_mut()
-                && let Some(p) = find_pane_mut(root, id) {
-                    let mut bytes = Vec::new();
-                    if p.term.bracketed_paste {
-                        bytes.extend_from_slice(b"\x1b[200~");
-                        bytes.extend_from_slice(normalized.as_bytes());
-                        bytes.extend_from_slice(b"\x1b[201~");
-                    } else {
-                        bytes.extend_from_slice(normalized.as_bytes());
-                    }
-                    p.pty.write(&bytes);
-                }
+            && let Some(p) = find_pane_mut(root, pane)
+        {
+            p.pty.write(bytes);
+        }
+    }
+
+    /// run a confirmed modal action
+    fn run_confirm(&mut self, action: ConfirmAction) {
+        match action {
+            ConfirmAction::PasteBytes { pane, bytes } => self.send_paste_bytes(pane, &bytes),
+        }
     }
 
     /// render one frame: window title + every visible pane
@@ -1978,6 +2029,10 @@ impl App {
             r.set_pane_menu(pane_menu_view);
             r.set_find(find_view);
             r.set_market(market_view);
+            r.set_confirm(self.confirm.as_ref().map(|c| render::ConfirmView {
+                prompt: c.prompt.clone(),
+                hint: c.hint.clone(),
+            }));
             r.set_settings(render::SettingsView {
                 scrollback: config.scrollback,
                 copy_on_select: config.copy_on_select,
@@ -3172,6 +3227,22 @@ impl App {
         // Esc closes an open pane context menu before anything else sees it
         if self.pane_menu.is_some() && event.logical_key == Key::Named(NamedKey::Escape) {
             self.pane_menu = None;
+            self.redraw();
+            return true;
+        }
+        // a modal confirm prompt captures every key while open: enter runs the
+        // held action, esc cancels, anything else is swallowed (no accidental
+        // dismissal and no leakage to the pane underneath)
+        if self.confirm.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(c) = self.confirm.take() {
+                        self.run_confirm(c.action);
+                    }
+                }
+                Key::Named(NamedKey::Escape) => self.confirm = None,
+                _ => {}
+            }
             self.redraw();
             return true;
         }

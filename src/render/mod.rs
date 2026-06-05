@@ -154,6 +154,13 @@ pub struct FindView {
     pub matches: Vec<(usize, usize, usize, bool)>,
 }
 
+/// a modal confirm overlay: a centered box with a prompt + a key hint, shown
+/// until the user presses enter (confirm) or esc (cancel)
+pub struct ConfirmView {
+    pub prompt: String,
+    pub hint: String,
+}
+
 /// one row in the plugins marketplace overlay
 pub struct MarketRowView {
     /// left text: plugin name + version
@@ -496,6 +503,7 @@ pub struct Renderer {
     pane_menu_view: Option<PaneMenuView>,
     find_view: Option<FindView>,
     market_view: Option<MarketView>,
+    confirm_view: Option<ConfirmView>,
     /// plugin-declared Tier-1 widgets shown in the right-side dock; when
     /// non-empty the dock carves width off content_rect so panes reflow
     dock: Vec<DockWidget>,
@@ -956,6 +964,7 @@ impl Renderer {
             pane_menu_view: None,
             find_view: None,
             market_view: None,
+            confirm_view: None,
             dock: Vec::new(),
             dock_hitboxes: Vec::new(),
             cols: 0,
@@ -1446,6 +1455,10 @@ impl Renderer {
 
     pub fn set_find(&mut self, f: Option<FindView>) {
         self.find_view = f;
+    }
+
+    pub fn set_confirm(&mut self, c: Option<ConfirmView>) {
+        self.confirm_view = c;
     }
 
     fn chrome_track(&self) -> f32 {
@@ -2614,7 +2627,8 @@ impl Renderer {
         let overlay_now = self.pane_menu_view.is_some()
             || self.palette_view.is_some()
             || self.market_view.is_some()
-            || self.find_view.is_some();
+            || self.find_view.is_some()
+            || self.confirm_view.is_some();
         if overlay_now && !self.overlay_shown {
             self.overlay_since = Some(Instant::now());
         }
@@ -2631,6 +2645,9 @@ impl Renderer {
         }
         if self.find_view.is_some() {
             self.build_find(&mut out, track);
+        }
+        if self.confirm_view.is_some() {
+            self.build_confirm(&mut out, track);
         }
         if overlay_now {
             let p = self
@@ -3053,6 +3070,40 @@ impl Renderer {
             let iw = self.text_w(FontId::Chrome, &info, track);
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + bw - pad - iw, iy, &info, MUTE, 1.0, track);
         }
+    }
+
+    /// modal confirm box: centered panel with the prompt on top and a key hint
+    /// below. blocking is enforced by the app's key-capture, not here; shared by
+    /// the paste guard and other yes/no prompts
+    fn build_confirm(&mut self, out: &mut Vec<Instance>, track: f32) {
+        let Some(cv) = self.confirm_view.as_ref() else {
+            return;
+        };
+        let prompt = cv.prompt.clone();
+        let hint = cv.hint.clone();
+        let ink0 = self.palette.ink0;
+        let ink1 = self.palette.ink1;
+        let rule2 = self.palette.rule2;
+        let paper = self.palette.paper;
+        let mute = self.palette.mute;
+        let s = self.scale;
+        let hair = s.max(1.0);
+        let w = self.config.width as f32;
+        let h = self.config.height as f32;
+        let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
+        let row_h = chrome_h + 10.0 * s;
+        let pad = 18.0 * s;
+        let bw = (520.0 * s).min(w - 80.0 * s);
+        let bh = (row_h * 2.0 + pad * 2.0).round();
+        let bx = ((w - bw) / 2.0).round();
+        let by = ((h - bh) / 2.0).round().max(self.title_bar_h + 12.0 * s);
+        Self::push_rect(out, bx - 2.0 * s, by + 6.0 * s, bw + 4.0 * s, bh, ink0, 0.5);
+        Self::push_rect(out, bx, by, bw, bh, ink1, 1.0);
+        Self::stroke_rect(out, (bx, by, bw, bh), hair, rule2);
+        let tx = bx + pad;
+        let ty = (by + pad).round();
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, tx, ty, &prompt, paper, 1.0, track);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, tx, ty + row_h, &hint, mute, 1.0, track);
     }
 
     /// plugins marketplace overlay: a centered panel listing installed + catalog
