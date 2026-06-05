@@ -1214,6 +1214,13 @@ struct App {
     /// set when a paint is deferred because a pane is mid synchronized-output
     /// (DEC 2026) frame; the safety deadline forces a paint if the frame stalls
     sync_redraw_pending: Option<Instant>,
+    /// armed on every resize event; the grid/pty reflow is held until the drag
+    /// settles (about_to_wait fires it once the deadline passes) so a live
+    /// resize doesn't rebuild all scrollback per pixel-step
+    resize_settle: Option<Instant>,
+    /// pty output arrived this loop turn; about_to_wait paints once so a flood
+    /// of chunks collapses to a single frame
+    pty_dirty: bool,
     /// running plugin processes (out-of-process, supervised); spawned deferred
     /// after the window is shown so disabled/no plugins cost nothing at boot
     plugins: Vec<plugin::Plugin>,
@@ -1283,6 +1290,8 @@ impl App {
             warm_fails: 0,
             warm_backoff_until: None,
             sync_redraw_pending: None,
+            resize_settle: None,
+            pty_dirty: false,
             plugins: Vec::new(),
             plugins_started: false,
             plugin_ids: Vec::new(),
@@ -3510,8 +3519,10 @@ impl ApplicationHandler<UserEvent> for App {
                             self.sync_redraw_pending = Some(Instant::now());
                         }
                     } else {
+                        // mark dirty and let about_to_wait paint once per loop
+                        // turn, so a flood of pty chunks collapses to one frame
                         self.sync_redraw_pending = None;
-                        self.redraw();
+                        self.pty_dirty = true;
                     }
                 }
             }
@@ -4069,7 +4080,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width, size.height);
                 }
-                self.relayout_all();
+                // keep the surface crisp now, but defer the grid/pty reflow until
+                // the drag settles so a live resize doesn't rebuild all scrollback
+                // per pixel-step; about_to_wait fires relayout once it stops
+                self.resize_settle = Some(Instant::now());
                 self.redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -4211,6 +4225,25 @@ impl ApplicationHandler<UserEvent> for App {
                 self.redraw();
             } else {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(t + Duration::from_millis(100)));
+                return;
+            }
+        }
+        // coalesced pty-output paint: one redraw per loop turn no matter how many
+        // pty chunks arrived since the last frame
+        if self.pty_dirty {
+            self.pty_dirty = false;
+            self.redraw();
+        }
+        // a resize drag is in flight: hold the grid/pty reflow until it settles
+        // (~90ms of quiet), then reflow once instead of per pixel-step. this
+        // branch also guarantees the loop wakes after the drag's last event
+        if let Some(t) = self.resize_settle {
+            if t.elapsed() >= Duration::from_millis(90) {
+                self.resize_settle = None;
+                self.relayout_all();
+                self.redraw();
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(t + Duration::from_millis(90)));
                 return;
             }
         }
