@@ -33,6 +33,9 @@ pub struct Cell {
     pub attrs: Attrs,
     /// OSC 8 hyperlink id into Grid::links; 0 = no link
     pub link: u16,
+    /// grapheme-cluster id into Grid::clusters (combining marks / ZWJ / VS);
+    /// 0 = the cell is just its base char `c`
+    pub cluster: u32,
 }
 
 impl Default for Cell {
@@ -43,6 +46,7 @@ impl Default for Cell {
             bg: Color::DefaultBg,
             attrs: Attrs::default(),
             link: 0,
+            cluster: 0,
         }
     }
 }
@@ -137,6 +141,9 @@ pub struct Grid {
     /// OSC 8 hyperlink targets; a cell's link id indexes here, 0 = none and
     /// links[0] is the empty sentinel
     pub links: Vec<String>,
+    /// grapheme clusters; a cell's cluster id indexes here, 0 = none and
+    /// clusters[0] is the empty sentinel
+    clusters: Vec<String>,
 }
 
 fn blank_line(cols: usize) -> Line {
@@ -187,6 +194,7 @@ impl Grid {
             scrollback: VecDeque::new(),
             scrollback_limit: 10_000,
             links: vec![String::new()],
+            clusters: vec![String::new()],
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             region_top: 0,
@@ -394,11 +402,14 @@ impl Grid {
             let len = line.len();
             let from = (if row == a.0 { a.1 } else { 0 }).min(len);
             let to = (if row == b.0 { (b.1 + 1).min(self.cols) } else { self.cols }).min(len);
-            let mut s: String = line[from..to.max(from)]
-                .iter()
-                .map(|c| c.c)
-                .filter(|c| *c != '\0')
-                .collect();
+            let mut s = String::new();
+            for cell in &line[from..to.max(from)] {
+                if cell.cluster != 0 {
+                    s.push_str(self.cluster_str(cell.cluster));
+                } else if cell.c != '\0' {
+                    s.push(cell.c);
+                }
+            }
             while s.ends_with(' ') {
                 s.pop();
             }
@@ -660,8 +671,10 @@ impl Grid {
     pub fn put_char(&mut self, c: char) {
         self.view_offset = 0; // snap to bottom on new output
         let w = char_width(c);
-        // zero-width (combining marks, ZWJ, variation selectors): drop for now
+        // zero-width (combining marks, ZWJ, variation selectors): fold into the
+        // previous cell's grapheme cluster instead of dropping
         if w == 0 {
+            self.append_combining(c);
             return;
         }
         if self.cursor.wrap_pending {
@@ -682,15 +695,15 @@ impl Grid {
         // reconcile a wide pair we're partially overwriting so no orphan lead or
         // continuation cell is left behind to render as a phantom gap
         if col + 1 < self.cols && self.lines[row][col + 1].c == '\0' {
-            self.lines[row][col + 1] = Cell { c: ' ', fg, bg, attrs, link };
+            self.lines[row][col + 1] = Cell { c: ' ', fg, bg, attrs, link, cluster: 0 };
         }
         if col > 0 && self.lines[row][col].c == '\0' {
-            self.lines[row][col - 1] = Cell { c: ' ', fg, bg, attrs, link };
+            self.lines[row][col - 1] = Cell { c: ' ', fg, bg, attrs, link, cluster: 0 };
         }
-        self.lines[row][col] = Cell { c, fg, bg, attrs, link };
+        self.lines[row][col] = Cell { c, fg, bg, attrs, link, cluster: 0 };
         if w == 2 && col + 1 < self.cols {
             // continuation cell marks the second half of a wide glyph
-            self.lines[row][col + 1] = Cell { c: '\0', fg, bg, attrs, link };
+            self.lines[row][col + 1] = Cell { c: '\0', fg, bg, attrs, link, cluster: 0 };
         }
         if col + w >= self.cols {
             self.cursor.col = self.cols - 1;
@@ -943,6 +956,7 @@ impl Grid {
             bg: self.cursor.bg,
             attrs: Attrs::default(),
             link: 0,
+            cluster: 0,
         }
     }
 
@@ -964,6 +978,58 @@ impl Grid {
         }
         self.links.push(uri.to_string());
         (self.links.len() - 1) as u16
+    }
+
+    fn intern_cluster(&mut self, s: &str) -> u32 {
+        if let Some(i) = self.clusters.iter().position(|c| c == s) {
+            return i as u32;
+        }
+        if self.clusters.len() >= (u32::MAX as usize) {
+            return 0;
+        }
+        self.clusters.push(s.to_string());
+        (self.clusters.len() - 1) as u32
+    }
+
+    /// the grapheme string for a cluster id (empty for 0 or out of range)
+    pub fn cluster_str(&self, id: u32) -> &str {
+        if id == 0 {
+            return "";
+        }
+        self.clusters.get(id as usize).map(String::as_str).unwrap_or("")
+    }
+
+    /// attach a zero-width char (combining mark / ZWJ / variation selector) to
+    /// the grapheme cluster of the most recently written cell, preserving it for
+    /// copy and (Part B) composition. a leading combiner with no base is dropped
+    fn append_combining(&mut self, c: char) {
+        let row = self.cursor.row;
+        let col = if self.cursor.wrap_pending {
+            self.cursor.col
+        } else if self.cursor.col == 0 {
+            return;
+        } else {
+            let prev = self.cursor.col - 1;
+            // step back onto the lead cell of a wide pair
+            if prev > 0 && self.lines[row].get(prev).map(|x| x.c) == Some('\0') {
+                prev - 1
+            } else {
+                prev
+            }
+        };
+        let Some(cell) = self.lines.get(row).and_then(|l| l.get(col)).copied() else {
+            return;
+        };
+        let mut s = self.cluster_str(cell.cluster).to_string();
+        if s.is_empty() {
+            s.push(cell.c);
+        }
+        // cap so a flood of combiners can't grow one cluster unbounded
+        if s.chars().count() < 16 {
+            s.push(c);
+            let id = self.intern_cluster(&s);
+            self.lines[row][col].cluster = id;
+        }
     }
 
     /// the URI a cell's link id points at, if any
@@ -1077,6 +1143,24 @@ mod tests {
         g.set_origin_mode(false);
         g.goto_addressed(0, 0);
         assert_eq!(g.cursor.row, 0); // absolute addressing again
+    }
+
+    #[test]
+    fn combining_mark_attaches_to_base_cell_cluster() {
+        let mut g = Grid::new(2, 8);
+        g.put_char('e');
+        g.put_char('\u{0301}'); // combining acute accent
+        // base cell still shows 'e'; its cluster carries the full grapheme
+        assert_eq!(g.lines[0][0].c, 'e');
+        assert_eq!(g.cluster_str(g.lines[0][0].cluster), "e\u{0301}");
+        // the combiner did not advance into a new cell
+        assert_eq!(g.cursor.col, 1);
+        // copy returns the whole grapheme, not just the base char
+        assert_eq!(g.selected_text((0, 0), (0, 0)), "e\u{0301}");
+        // a leading combiner with no base is dropped (no panic, no cluster)
+        let mut g2 = Grid::new(2, 8);
+        g2.put_char('\u{0301}');
+        assert_eq!(g2.lines[0][0].cluster, 0);
     }
 
     #[test]
