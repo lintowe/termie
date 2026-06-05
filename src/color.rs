@@ -134,6 +134,20 @@ impl Palette {
         }
     }
 
+    /// bold text in a basic ansi color (0-7) maps to its bright variant (8-15)
+    /// when enabled — the common xterm "bold = bright" behavior
+    pub fn bold_bright(fg: Color, bold: bool, enabled: bool) -> Color {
+        if enabled
+            && bold
+            && let Color::Indexed(i) = fg
+            && i < 8
+        {
+            Color::Indexed(i + 8)
+        } else {
+            fg
+        }
+    }
+
     pub fn ansi_color(&self, i: u8) -> Rgb {
         self.ansi[i as usize]
     }

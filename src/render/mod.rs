@@ -493,6 +493,7 @@ pub struct Renderer {
     panel_clip: Option<(u32, [f32; 4])>,
     cursor_style: CursorShape,
     cursor_blink: bool,
+    bold_as_bright: bool,
     pane_pad_px: f32,
     content_font: Option<&'static str>,
     fonts: Vec<&'static str>,
@@ -1152,6 +1153,7 @@ impl Renderer {
             panel_clip: None,
             cursor_style: CursorShape::Block,
             cursor_blink: true,
+            bold_as_bright: true,
             pane_pad_px: 6.0,
             content_font: None,
             backend_label: "wgpu",
@@ -1478,6 +1480,14 @@ impl Renderer {
 
     pub fn set_cursor_blink(&mut self, on: bool) {
         self.cursor_blink = on;
+    }
+
+    pub fn set_bold_as_bright(&mut self, on: bool) {
+        self.bold_as_bright = on;
+    }
+
+    pub fn bold_as_bright(&self) -> bool {
+        self.bold_as_bright
     }
 
     pub fn set_cursor_style(&mut self, s: CursorShape) {
@@ -2297,6 +2307,7 @@ impl Renderer {
         sel: Option<((usize, usize), (usize, usize))>,
         link: Option<(usize, usize, usize)>,
         matches: &[(usize, usize, usize, bool)],
+        bold_as_bright: bool,
     ) {
         let sel_col = palette.sel;
         let m = atlas.metrics(FontId::Content);
@@ -2331,6 +2342,7 @@ impl Renderer {
                 if cell.attrs.inverse {
                     std::mem::swap(&mut fg_c, &mut bg_c);
                 }
+                let fg_c = Palette::bold_bright(fg_c, cell.attrs.bold, bold_as_bright);
                 let mut fg = palette.resolve_fg(fg_c);
                 let bg = palette.resolve_bg(bg_c);
                 if cell.attrs.dim {
@@ -2547,6 +2559,7 @@ impl Renderer {
 
         // ---- terminal content (one grid per pane) ----
         let cursor_style = self.cursor_style;
+        let bold_as_bright = self.bold_as_bright;
         {
             let palette = &self.palette;
             let atlas = &mut self.atlas;
@@ -2571,6 +2584,7 @@ impl Renderer {
                     pv.sel,
                     pv.link,
                     fmatches,
+                    bold_as_bright,
                 );
             }
         }
