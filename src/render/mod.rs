@@ -463,6 +463,7 @@ pub struct Renderer {
     scale: f32,
     pad: f32,
     content_pt: f32,
+    content_line_height: f32,
     chrome_pt: f32,
     pub title_bar_h: f32,
     pub status_bar_h: f32,
@@ -842,7 +843,7 @@ impl Renderer {
         // build the bundled-font glyph atlas on a worker thread so its font load
         // overlaps the gpu adapter/device request below (mostly driver wait)
         // instead of running sequentially after it — shaves startup latency
-        let atlas_handle = std::thread::spawn(move || GlyphAtlas::new(content_pt, chrome_pt, scale, None));
+        let atlas_handle = std::thread::spawn(move || GlyphAtlas::new(content_pt, chrome_pt, scale, None, 1.32));
 
         // build instance+surface+adapter for a backend set; DX12 is the Windows
         // default (Vulkan is slow under injected overlay layers — OBS/Overwolf)
@@ -1134,6 +1135,7 @@ impl Renderer {
             scale,
             pad,
             content_pt,
+            content_line_height: 1.32,
             chrome_pt,
             title_bar_h,
             status_bar_h,
@@ -1423,7 +1425,7 @@ impl Renderer {
         // at exactly this size. still recompute the grid (cols/rows start at 0)
         if pt != self.content_pt {
             self.content_pt = pt;
-            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font);
+            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height);
         }
         self.recompute_grid_size();
         (self.cols, self.rows)
@@ -1438,7 +1440,7 @@ impl Renderer {
         }
         self.scale = scale;
         // re-raster glyphs at the new device scale (clears + repacks the atlas)
-        self.atlas.reconfigure(self.content_pt, self.chrome_pt, scale, self.content_font);
+        self.atlas.reconfigure(self.content_pt, self.chrome_pt, scale, self.content_font, self.content_line_height);
         // pad + bar heights are all scale-derived; recompute from the new metrics
         self.pad = (10.0 * scale).round();
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
@@ -1488,6 +1490,22 @@ impl Renderer {
 
     pub fn bold_as_bright(&self) -> bool {
         self.bold_as_bright
+    }
+
+    /// set the content line-height multiplier; re-rasters the atlas and recomputes
+    /// the grid since cell height (and thus the row count) changes
+    pub fn set_line_height(&mut self, lh: f32) {
+        let lh = lh.clamp(0.8, 3.0);
+        if (lh - self.content_line_height).abs() < f32::EPSILON {
+            return;
+        }
+        self.content_line_height = lh;
+        self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, lh);
+        self.recompute_grid_size();
+    }
+
+    pub fn line_height(&self) -> f32 {
+        self.content_line_height
     }
 
     pub fn set_cursor_style(&mut self, s: CursorShape) {
@@ -1562,7 +1580,7 @@ impl Renderer {
             && i != self.font_idx {
                 self.font_idx = i;
                 self.content_font = if i == 0 { None } else { Some(self.fonts[i]) };
-                self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font);
+                self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height);
                 self.recompute_grid_size();
             }
         (self.cols, self.rows)
@@ -1574,7 +1592,7 @@ impl Renderer {
             self.font_idx = (self.font_idx + 1) % self.fonts.len();
             // index 0 is the bundled default (use None so the atlas picks it)
             self.content_font = if self.font_idx == 0 { None } else { Some(self.fonts[self.font_idx]) };
-            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font);
+            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height);
             self.recompute_grid_size();
         }
         (self.cols, self.rows)
@@ -3829,7 +3847,7 @@ impl Renderer {
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
         };
-        let atlas = GlyphAtlas::new(content_pt, chrome_pt, scale, None);
+        let atlas = GlyphAtlas::new(content_pt, chrome_pt, scale, None, 1.32);
         let mut r = Self::from_parts(device, queue, None, format, config, atlas, scale, content_pt, chrome_pt, false);
 
         // offscreen target (COPY_SRC for readback) + a row-aligned readback buffer

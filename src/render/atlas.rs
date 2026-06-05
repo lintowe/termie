@@ -77,7 +77,7 @@ pub struct GlyphAtlas {
 const PAD: u32 = 1;
 
 impl GlyphAtlas {
-    pub fn new(content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>) -> Self {
+    pub fn new(content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>, line_height: f32) -> Self {
         // start from an EMPTY db (no system-font scan) so startup is fast; only
         // the bundled fonts are loaded now. system fonts are scanned lazily via
         // load_system_fonts() once the window is up and the user needs them.
@@ -96,7 +96,7 @@ impl GlyphAtlas {
 
         let content_px = (content_pt * scale).round().max(6.0);
         let chrome_px = (chrome_pt * scale).round().max(6.0);
-        let content_lh = (content_px * 1.32).round();
+        let content_lh = (content_px * line_height.clamp(0.8, 3.0)).round();
         let chrome_lh = (chrome_px * 1.4).round();
 
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(content_px, content_lh));
@@ -200,10 +200,10 @@ impl GlyphAtlas {
 
     /// re-measure for new sizes/family and reset the glyph cache, REUSING the
     /// existing FontSystem (avoids re-scanning all system fonts on every change)
-    pub fn reconfigure(&mut self, content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>) {
+    pub fn reconfigure(&mut self, content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>, line_height: f32) {
         let content_px = (content_pt * scale).round().max(6.0);
         let chrome_px = (chrome_pt * scale).round().max(6.0);
-        let content_lh = (content_px * 1.32).round();
+        let content_lh = (content_px * line_height.clamp(0.8, 3.0)).round();
         let chrome_lh = (chrome_px * 1.4).round();
         let content_family = match content_override {
             Some(name) if family_present(&self.font_system, name) => name,
@@ -548,7 +548,7 @@ mod tests {
     // glyph isn't color and there is nothing to assert — the test still passes
     #[test]
     fn color_emoji_routes_to_rgba_atlas() {
-        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None);
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
         atlas.load_system_fonts();
         let Some(g) = atlas.get(GlyphKey {
             font: FontId::Content,
@@ -581,7 +581,7 @@ mod tests {
     // index out of bounds the moment dim bumps to 2048
     #[test]
     fn repack_at_reallocates_on_grow() {
-        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None);
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
         assert_eq!(atlas.dim, 1024);
         atlas.repack_at(2048);
         assert_eq!(atlas.dim, 2048);
@@ -597,7 +597,7 @@ mod tests {
     // actually having them (font-poor CI never trips the grow and still passes)
     #[test]
     fn atlas_grows_instead_of_blanking() {
-        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None);
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
         atlas.load_system_fonts();
         // a wide CJK sweep so distinct glyphs pile up fast on a host with the fonts
         for cp in 0x4E00u32..0x4E00 + 6000 {

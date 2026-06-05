@@ -16,7 +16,7 @@ pub fn render_png(
     path: &str,
 ) -> std::io::Result<(usize, usize)> {
     let pal = Palette::from_theme(theme);
-    let mut atlas = GlyphAtlas::new(content_pt, content_pt, scale, None);
+    let mut atlas = GlyphAtlas::new(content_pt, content_pt, scale, None, 1.32);
     // mirror the app's lazy fallback: with system fonts loaded, cosmic-text can
     // shape CJK/emoji the bundled font lacks instead of rendering tofu
     if system_fonts {

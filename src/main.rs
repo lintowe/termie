@@ -1109,6 +1109,7 @@ struct Persisted {
     cursor: grid::CursorShape,
     cursor_blink: bool,
     bold_as_bright: bool,
+    line_height: f32,
     theme: color::ThemeId,
     font: Option<String>,
     opacity: i32,
@@ -1132,6 +1133,7 @@ impl Default for Persisted {
             cursor: grid::CursorShape::Block,
             cursor_blink: true,
             bold_as_bright: true,
+            line_height: 1.32,
             theme: color::ThemeId::Instrument,
             font: None,
             opacity: 85,
@@ -1382,6 +1384,11 @@ fn load_persisted() -> Persisted {
             "cursor" => p.cursor = cursor_from_name(v),
             "cursor_blink" => p.cursor_blink = v != "false",
             "bold_as_bright" => p.bold_as_bright = v != "false",
+            "line_height" => {
+                if let Ok(x) = v.parse::<f32>() {
+                    p.line_height = x;
+                }
+            }
             "theme" => p.theme = color::ThemeId::from_name(v),
             "font" => {
                 if !v.is_empty() {
@@ -1631,6 +1638,7 @@ impl App {
                 r.set_cursor_style(p.cursor);
                 r.set_cursor_blink(p.cursor_blink);
                 r.set_bold_as_bright(p.bold_as_bright);
+                r.set_line_height(p.line_height);
                 r.set_pane_pad_px(p.padding);
                 r.set_opacity_pct(p.opacity);
                 if let Some(f) = p.font.as_deref() {
@@ -3263,6 +3271,7 @@ impl App {
         let _ = writeln!(s, "cursor={}", r.cursor_style_name());
         let _ = writeln!(s, "cursor_blink={}", r.cursor_blink());
         let _ = writeln!(s, "bold_as_bright={}", r.bold_as_bright());
+        let _ = writeln!(s, "line_height={}", r.line_height());
         let _ = writeln!(s, "theme={}", r.theme().name());
         let _ = writeln!(s, "font={}", r.font_name());
         if let Some(d) = &self.persisted.wsl_distro {
