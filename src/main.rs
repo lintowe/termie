@@ -102,6 +102,9 @@ enum Node {
 struct Tab {
     focused: usize, // pane id
     root: Option<Node>,
+    /// when set, that leaf pane fills the whole content area (tmux-style zoom),
+    /// hiding its siblings until toggled off. transient — not persisted
+    zoom: Option<usize>,
 }
 
 /// a torn-off pane living in its own OS-decorated window. its pty reader still
@@ -148,6 +151,7 @@ enum PaletteAction {
     Copy,
     Paste,
     CloseFocusedPane,
+    ToggleZoom,
     /// prompt-jump passes through to the program when there are no OSC-133 marks
     JumpPromptPrev,
     JumpPromptNext,
@@ -168,6 +172,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("close tab", PaletteAction::CloseTab),
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
+    ("zoom pane", PaletteAction::ToggleZoom),
     ("quake drop-down", PaletteAction::Quake),
     ("cycle theme", PaletteAction::Theme),
     ("plugins", PaletteAction::Plugins),
@@ -1666,6 +1671,7 @@ impl App {
         self.tabs.push(Tab {
             focused: fid,
             root: Some(Node::Leaf(pane)),
+            zoom: None,
         });
         self.active_tab = 0;
         self.relayout_all();
@@ -2289,11 +2295,21 @@ impl App {
             }
         }
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
+            // a zoomed leaf fills the whole content area; drop a stale zoom whose
+            // pane no longer exists (validated before the mutable root borrow)
+            let zoom = tab
+                .zoom
+                .filter(|&zid| tab.root.as_ref().map(|r| find_pane(r, zid).is_some()).unwrap_or(false));
+            tab.zoom = zoom;
             let Some(root) = tab.root.as_mut() else {
                 continue;
             };
             let mut rects = Vec::new();
-            layout(root, content, &mut rects);
+            if let Some(zid) = zoom {
+                rects.push((zid, content));
+            } else {
+                layout(root, content, &mut rects);
+            }
             for (id, rect) in &rects {
                 let (_, _, cols, rows) = r.pane_metrics(*rect);
                 if let Some(p) = find_pane_mut(root, *id) {
@@ -2309,6 +2325,16 @@ impl App {
                 self.layout_cache = rects;
             }
         }
+    }
+
+    /// toggle tmux-style zoom on the focused pane: it fills the whole content
+    /// area, hiding its siblings, until toggled off (no-op with a single pane)
+    fn toggle_zoom(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.zoom = if tab.zoom.is_some() { None } else { Some(tab.focused) };
+        }
+        self.relayout_all();
+        self.redraw();
     }
 
     fn sync_tabs(&mut self) {
@@ -2391,6 +2417,7 @@ impl App {
             self.tabs.push(Tab {
                 focused: fid,
                 root: Some(Node::Leaf(pane)),
+                zoom: None,
             });
             self.active_tab = self.tabs.len() - 1;
             self.relayout_all();
@@ -2576,6 +2603,7 @@ impl App {
             PaletteAction::Copy => self.copy_selection(),
             PaletteAction::Paste => self.paste(),
             PaletteAction::CloseFocusedPane => self.close_focused_pane(event_loop),
+            PaletteAction::ToggleZoom => self.toggle_zoom(),
             PaletteAction::SelectTab(n) => {
                 let n = n as usize;
                 if n < self.tabs.len() && n != self.active_tab {
@@ -3230,7 +3258,7 @@ impl App {
                 .copied()
                 .or_else(|| leaf_ids.first().copied())
                 .unwrap_or(0);
-            self.tabs.push(Tab { focused, root: Some(root) });
+            self.tabs.push(Tab { focused, root: Some(root), zoom: None });
         }
         if self.tabs.is_empty() {
             return;
@@ -3337,7 +3365,7 @@ impl App {
     /// re-attach a loose pane as a new tab (used if a satellite window won't open)
     fn dock_loose_pane(&mut self, pane: Pane) {
         let fid = pane.id;
-        self.tabs.push(Tab { focused: fid, root: Some(Node::Leaf(pane)) });
+        self.tabs.push(Tab { focused: fid, root: Some(Node::Leaf(pane)), zoom: None });
         self.active_tab = self.tabs.len() - 1;
         self.relayout_all();
         self.sync_tabs();
@@ -3726,6 +3754,7 @@ impl App {
                     "s" => self.split_focused(Dir::Horizontal),
                     "x" => self.close_focused_pane(event_loop),
                     "o" => self.pop_out_focused(event_loop),
+                    "z" => self.toggle_zoom(),
                     "n" => self.new_tab(),
                     "q" => self.set_pane_mode(false),
                     _ => {}
