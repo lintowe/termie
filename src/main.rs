@@ -7,6 +7,7 @@ mod input;
 mod plugin;
 mod pty;
 mod render;
+mod session;
 mod term;
 mod win;
 #[cfg(debug_assertions)]
@@ -66,6 +67,9 @@ struct Pane {
     term: Terminal,
     parser: Parser,
     pty: Pty,
+    /// the shell this pane was spawned with, kept so session restore can respawn
+    /// the same shell in the same directory
+    shell: ShellKind,
     /// true once the shell has produced output (prompt up) — safe to resize
     ready: bool,
     /// set when the shell rang the bell (BEL); drives a brief border flash
@@ -822,6 +826,26 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
     out
 }
 
+/// snapshot a pane tree into the serializable session form, recording the
+/// in-order leaf pane ids so the focused pane can be re-keyed after restore
+fn node_to_snap(node: &Node, leaf_ids: &mut Vec<usize>) -> session::NodeSnap {
+    match node {
+        Node::Leaf(p) => {
+            leaf_ids.push(p.id);
+            session::NodeSnap::Leaf {
+                cwd: cwd_path(p.term.cwd.as_deref()),
+                shell: p.shell.label().to_string(),
+            }
+        }
+        Node::Split { dir, ratio, a, b } => session::NodeSnap::Split {
+            vertical: *dir == Dir::Vertical,
+            ratio: *ratio,
+            a: Box::new(node_to_snap(a, leaf_ids)),
+            b: Box::new(node_to_snap(b, leaf_ids)),
+        },
+    }
+}
+
 fn build_pane(
     id: usize,
     cols: usize,
@@ -840,6 +864,7 @@ fn build_pane(
         term,
         parser: Parser::new(),
         pty,
+        shell,
         ready: false,
         flash: None,
     })
@@ -882,6 +907,8 @@ struct Config {
     load_profile: bool,
     close_action: CloseAction,
     backend: render::BackendChoice,
+    /// restore the saved tab/split layout on a bare launch
+    restore_on_launch: bool,
     // global quake hotkey as (win32 modifiers, virtual-key); None disables it
     quake_key: Option<(u32, u32)>,
 }
@@ -895,6 +922,7 @@ impl Default for Config {
             load_profile: false,
             close_action: CloseAction::Quit,
             backend: render::BackendChoice::Auto,
+            restore_on_launch: true,
             quake_key: None,
         }
     }
@@ -908,6 +936,7 @@ struct Persisted {
     load_profile: bool,
     close_action: CloseAction,
     backend: render::BackendChoice,
+    restore_on_launch: bool,
     font_size: f32,
     padding: f32,
     cursor: grid::CursorShape,
@@ -927,6 +956,7 @@ impl Default for Persisted {
             load_profile: false,
             close_action: CloseAction::Quit,
             backend: render::BackendChoice::Auto,
+            restore_on_launch: true,
             font_size: CONTENT_PT,
             padding: 6.0,
             cursor: grid::CursorShape::Block,
@@ -975,6 +1005,11 @@ fn is_settings_hot(h: Hot) -> bool {
 fn config_path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")?;
     Some(std::path::PathBuf::from(base).join("termie").join("config"))
+}
+
+fn session_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    Some(std::path::PathBuf::from(base).join("termie").join("session.json"))
 }
 
 /// %APPDATA%\termie\plugins — one subdirectory per installed plugin
@@ -1156,6 +1191,7 @@ fn load_persisted() -> Persisted {
             "load_profile" => p.load_profile = v == "true",
             "close_action" => p.close_action = CloseAction::from_label(v),
             "backend" => p.backend = render::BackendChoice::from_label(v),
+            "restore_on_launch" => p.restore_on_launch = v != "false",
             "font_size" => {
                 if let Ok(n) = v.parse() {
                     p.font_size = n;
@@ -1279,6 +1315,11 @@ struct App {
     /// pty output arrived this loop turn; about_to_wait paints once so a flood
     /// of chunks collapses to a single frame
     pty_dirty: bool,
+    /// the tab/split layout changed since the last session write
+    session_dirty: bool,
+    /// debounce deadline for the session write; re-armed on every layout change
+    /// so a burst (e.g. a divider drag) collapses to one write after it settles
+    session_flush_at: Option<Instant>,
     /// running plugin processes (out-of-process, supervised); spawned deferred
     /// after the window is shown so disabled/no plugins cost nothing at boot
     plugins: Vec<plugin::Plugin>,
@@ -1337,6 +1378,7 @@ impl App {
                 load_profile: p.load_profile,
                 close_action: p.close_action,
                 backend: p.backend,
+                restore_on_launch: p.restore_on_launch,
                 quake_key: p.quake_key,
             },
             persisted: p,
@@ -1352,6 +1394,8 @@ impl App {
             sync_redraw_pending: None,
             resize_settle: None,
             pty_dirty: false,
+            session_dirty: false,
+            session_flush_at: None,
             plugins: Vec::new(),
             plugins_started: false,
             plugin_ids: Vec::new(),
@@ -1439,6 +1483,15 @@ impl App {
                 Ok(pane) => self.install_first_tab(pane),
                 Err(e) => log::error!("failed to spawn the requested command: {e}"),
             }
+        } else if self.config.restore_on_launch
+            && let Some(sf) = session_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|t| session::SessionFile::parse(&t))
+        {
+            // bare launch: rebuild the saved tab/split layout with fresh shells in
+            // the saved dirs. if nothing restores, the warm pool below installs a
+            // single shell as the fallback
+            self.restore_session(sf);
         }
         // start the first shells now — the pane size is final once settings are
         // applied, so the async pwsh spawn overlaps the first paint + reveal
@@ -2171,6 +2224,9 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_tabs(labels, active);
         }
+        // sync_tabs runs after every structural / focus / cwd change (never per
+        // frame), so it's the chokepoint to schedule a debounced session write
+        self.mark_session_dirty();
     }
 
     fn active_focused_id(&self) -> Option<usize> {
@@ -2366,6 +2422,7 @@ impl App {
                         kill_all(root);
                     }
                 }
+                self.flush_session_now();
                 self.kill_pool();
                 event_loop.exit();
             }
@@ -2766,6 +2823,7 @@ impl App {
                             kill_all(root);
                         }
                     }
+                    self.flush_session_now();
                     self.kill_pool();
                     event_loop.exit();
                 }
@@ -2903,6 +2961,7 @@ impl App {
         let _ = writeln!(s, "load_profile={}", self.config.load_profile);
         let _ = writeln!(s, "close_action={}", self.config.close_action.label());
         let _ = writeln!(s, "backend={}", self.config.backend.label());
+        let _ = writeln!(s, "restore_on_launch={}", self.config.restore_on_launch);
         let _ = writeln!(s, "font_size={}", r.content_pt() as i32);
         let _ = writeln!(s, "padding={}", r.pane_pad_px() as i32);
         let _ = writeln!(s, "opacity={}", r.opacity_pct());
@@ -2911,6 +2970,111 @@ impl App {
         let _ = writeln!(s, "theme={}", r.theme().name());
         let _ = writeln!(s, "font={}", r.font_name());
         let _ = std::fs::write(&path, s);
+    }
+
+    /// build a snapshot of the current window's tabs + split tree for persistence
+    fn session_snapshot(&self) -> session::SessionFile {
+        let mut tabs = Vec::new();
+        for tab in &self.tabs {
+            let Some(root) = tab.root.as_ref() else {
+                continue;
+            };
+            let mut leaf_ids = Vec::new();
+            let root = node_to_snap(root, &mut leaf_ids);
+            let focused_leaf = leaf_ids.iter().position(|&id| id == tab.focused).unwrap_or(0);
+            tabs.push(session::TabSnap { focused_leaf, root });
+        }
+        session::SessionFile { active_tab: self.active_tab, tabs }
+    }
+
+    /// mark the layout changed and (re)arm the debounced session write so a burst
+    /// of mutations collapses to one write ~750ms after the last change
+    fn mark_session_dirty(&mut self) {
+        self.session_dirty = true;
+        self.session_flush_at = Some(Instant::now() + Duration::from_millis(750));
+    }
+
+    /// write the session atomically (temp + rename) so a reader never sees a
+    /// half-written file; never clobber a good session with an empty one
+    fn write_session(&self) {
+        let snap = self.session_snapshot();
+        if snap.tabs.is_empty() {
+            return;
+        }
+        let Some(path) = session_path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let text = snap.to_json_string();
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, &text).is_ok() {
+            // rename-over-existing is atomic enough on windows; on the rare
+            // failure (target briefly open) fall back to a direct write
+            if std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::write(&path, &text);
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+
+    /// flush the current session now (clean-exit path) so the latest layout —
+    /// even an unmutated fresh one — is saved for next launch
+    fn flush_session_now(&mut self) {
+        self.session_dirty = false;
+        self.session_flush_at = None;
+        self.write_session();
+    }
+
+    /// rebuild a saved pane tree by spawning fresh shells; pushes each leaf's new
+    /// pane id into leaf_ids in order. None if a shell fails to spawn
+    fn rebuild_node(
+        &mut self,
+        snap: &session::NodeSnap,
+        cols: usize,
+        rows: usize,
+        leaf_ids: &mut Vec<usize>,
+    ) -> Option<Node> {
+        match snap {
+            session::NodeSnap::Leaf { cwd, shell } => {
+                let kind = ShellKind::from_label(shell);
+                let pane = self.spawn_pane(cols, rows, cwd.clone(), Some(kind), None).ok()?;
+                leaf_ids.push(pane.id);
+                Some(Node::Leaf(pane))
+            }
+            session::NodeSnap::Split { vertical, ratio, a, b } => {
+                let dir = if *vertical { Dir::Vertical } else { Dir::Horizontal };
+                let a = Box::new(self.rebuild_node(a, cols, rows, leaf_ids)?);
+                let b = Box::new(self.rebuild_node(b, cols, rows, leaf_ids)?);
+                Some(Node::Split { dir, ratio: *ratio, a, b })
+            }
+        }
+    }
+
+    /// restore tabs from a saved session by spawning fresh shells in the saved
+    /// directories. leaves self.tabs empty on total failure so the caller falls
+    /// back to a single shell
+    fn restore_session(&mut self, sf: session::SessionFile) {
+        let (cols, rows) = self.content_pane_size();
+        for tab in &sf.tabs {
+            let mut leaf_ids = Vec::new();
+            let Some(root) = self.rebuild_node(&tab.root, cols, rows, &mut leaf_ids) else {
+                continue;
+            };
+            let focused = leaf_ids
+                .get(tab.focused_leaf)
+                .copied()
+                .or_else(|| leaf_ids.first().copied())
+                .unwrap_or(0);
+            self.tabs.push(Tab { focused, root: Some(root) });
+        }
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active_tab = sf.active_tab.min(self.tabs.len() - 1);
+        self.relayout_all();
+        self.sync_tabs();
     }
 
     fn set_pane_mode(&mut self, on: bool) {
@@ -3781,6 +3945,7 @@ impl ApplicationHandler<UserEvent> for App {
                         kill_all(root);
                     }
                 }
+                self.flush_session_now();
                 self.kill_pool();
                 event_loop.exit();
             }
@@ -4373,6 +4538,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
         // a synchronized-output frame is open: hold the paint until it closes,
         // but force one if it stalls (~100ms) so a crash mid-frame can't freeze us
+        // flush the debounced session write once its deadline passes, so a crash
+        // leaves session.json close to the live layout (clean exits flush directly)
+        if let Some(t) = self.session_flush_at
+            && Instant::now() >= t
+        {
+            self.session_flush_at = None;
+            if self.session_dirty {
+                self.session_dirty = false;
+                self.write_session();
+            }
+        }
         if let Some(t) = self.sync_redraw_pending {
             if t.elapsed() >= Duration::from_millis(100) {
                 self.sync_redraw_pending = None;
@@ -4631,6 +4807,7 @@ mod tests {
             term: Terminal::new(24, 80),
             parser: Parser::new(),
             pty: pty::Pty::null(),
+            shell: ShellKind::Auto,
             ready: true,
             flash: None,
         }

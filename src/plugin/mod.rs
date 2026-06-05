@@ -7,7 +7,7 @@
 //! a plugin runs with the user's rights; trust is managed by a curated store +
 //! the install-time permission display, not by this boundary
 
-mod json;
+pub mod json;
 mod manifest;
 pub mod market;
 mod proto;
