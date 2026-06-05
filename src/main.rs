@@ -3590,13 +3590,17 @@ impl App {
         let Some((col, row)) = self.renderer.as_ref().map(|r| r.cell_at(rect, cx, cy)) else {
             return false;
         };
+        // xterm modifier bitfield (shift 4, alt 8, ctrl 16) for the mouse report
+        let mmods = (if self.mods.shift_key() { 4u8 } else { 0 })
+            | (if self.mods.alt_key() { 8 } else { 0 })
+            | (if self.mods.control_key() { 16 } else { 0 });
         let Some(root) = self.tabs.get_mut(self.active_tab).and_then(|t| t.root.as_mut()) else {
             return false;
         };
         let Some(p) = find_pane_mut(root, id) else {
             return false;
         };
-        if let Some(bytes) = p.term.encode_mouse(btn, pressed, motion, col, row) {
+        if let Some(bytes) = p.term.encode_mouse(btn, pressed, motion, col, row, mmods) {
             p.pty.write(&bytes);
             true
         } else {

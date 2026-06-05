@@ -191,18 +191,21 @@ impl Terminal {
 
     /// encode a mouse event for the active protocol; None if mouse mode is off.
     /// `btn`: 0=left 1=middle 2=right, 64=wheel-up 65=wheel-down; col/row 0-based
-    pub fn encode_mouse(&self, btn: u8, pressed: bool, motion: bool, col: usize, row: usize) -> Option<Vec<u8>> {
+    /// modifiers is the xterm modifier bitfield (shift 4, alt 8, ctrl 16) OR'd
+    /// into the button code; pass 0 for plain button-only reporting
+    pub fn encode_mouse(&self, btn: u8, pressed: bool, motion: bool, col: usize, row: usize, modifiers: u8) -> Option<Vec<u8>> {
         if self.mouse_proto == MouseProto::Off {
             return None;
         }
         let (c, r) = (col + 1, row + 1);
+        let md = modifiers as u32;
         if self.mouse_sgr {
-            let cb = btn as u32 + if motion { 32 } else { 0 };
+            let cb = btn as u32 + md + if motion { 32 } else { 0 };
             let m = if pressed { 'M' } else { 'm' };
             Some(format!("\x1b[<{cb};{c};{r}{m}").into_bytes())
         } else {
             // legacy X10: release is button 3; values offset by 32, clamped
-            let cb = if pressed { btn as u32 + if motion { 32 } else { 0 } } else { 3 };
+            let cb = if pressed { btn as u32 + md + if motion { 32 } else { 0 } } else { 3 + md };
             let enc = |v: u32| -> u8 { (v + 32).min(255) as u8 };
             Some(vec![0x1b, b'[', b'M', enc(cb), enc(c as u32), enc(r as u32)])
         }
@@ -807,6 +810,23 @@ mod tests {
         let mut t2 = Terminal::new(4, 10);
         feed(&mut t2, b"\x1b(0\x1b[!pq");
         assert_eq!(t2.grid.lines[0][0].c, 'q'); // literal, not a box char
+    }
+
+    #[test]
+    fn mouse_modifiers_or_into_button() {
+        let mut t = Terminal::new(4, 10);
+        t.mouse_proto = MouseProto::Normal;
+        t.mouse_sgr = true;
+        // shift(4) | ctrl(16) OR into button 0 -> 20
+        assert_eq!(
+            t.encode_mouse(0, true, false, 0, 0, 4 | 16).unwrap(),
+            b"\x1b[<20;1;1M".to_vec()
+        );
+        // no modifiers -> plain button-only report (unchanged behavior)
+        assert_eq!(
+            t.encode_mouse(0, true, false, 0, 0, 0).unwrap(),
+            b"\x1b[<0;1;1M".to_vec()
+        );
     }
 
     #[test]
