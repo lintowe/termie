@@ -1210,6 +1210,24 @@ impl Renderer {
         (self.cols, self.rows)
     }
 
+    /// re-raster the atlas and recompute chrome/grid metrics for a new device
+    /// scale (per-monitor dpi change), so a window dragged between monitors of
+    /// different dpi stays crisp; mirrors the scale-derived geometry in from_parts
+    pub fn set_scale(&mut self, scale: f32) {
+        if (scale - self.scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale = scale;
+        // re-raster glyphs at the new device scale (clears + repacks the atlas)
+        self.atlas.reconfigure(self.content_pt, self.chrome_pt, scale, self.content_font);
+        // pad + bar heights are all scale-derived; recompute from the new metrics
+        self.pad = (10.0 * scale).round();
+        let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
+        self.title_bar_h = (chrome_h + (14.0 * scale)).round();
+        self.status_bar_h = (chrome_h + (8.0 * scale)).round();
+        self.recompute_grid_size();
+    }
+
     pub fn pane_pad_px(&self) -> f32 {
         self.pane_pad_px
     }

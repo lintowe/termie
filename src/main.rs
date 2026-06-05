@@ -2924,6 +2924,12 @@ impl App {
                 }
             }
             WindowEvent::Resized(_) | WindowEvent::RedrawRequested => self.paint_satellite(idx),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(sat) = self.satellites.get_mut(idx) {
+                    sat.renderer.set_scale(*scale_factor as f32);
+                }
+                self.paint_satellite(idx);
+            }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event: ke, .. } => {
                 if ke.state == ElementState::Pressed
@@ -4084,6 +4090,16 @@ impl ApplicationHandler<UserEvent> for App {
                 // the drag settles so a live resize doesn't rebuild all scrollback
                 // per pixel-step; about_to_wait fires relayout once it stops
                 self.resize_settle = Some(Instant::now());
+                self.redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // monitor/dpi change: re-raster the atlas at the new scale so text
+                // stays crisp. winit applies the os-suggested size and a Resized
+                // follows (which arms the resize-settle reflow at the new size)
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_scale(scale_factor as f32);
+                }
+                self.relayout_all();
                 self.redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
