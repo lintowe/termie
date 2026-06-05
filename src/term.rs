@@ -145,6 +145,7 @@ impl Terminal {
         self.bracketed_paste = false;
         self.apply_sgr(&[vec![0]]);
         self.grid.set_scroll_region(0, self.grid.rows - 1);
+        self.grid.origin_mode = false;
         self.grid.cursor.shape_set = false;
     }
 
@@ -244,6 +245,7 @@ impl Terminal {
         if private {
             match mode {
                 1 => self.app_cursor_keys = enable,
+                6 => self.grid.set_origin_mode(enable),
                 25 => self.grid.cursor.visible = enable,
                 2026 => self.sync_output = enable,
                 1000 => self.mouse_proto = if enable { MouseProto::Normal } else { MouseProto::Off },
@@ -529,12 +531,12 @@ impl Perform for Terminal {
             'd' => {
                 let row = param_at(params, 0, 1) as usize - 1;
                 let col = self.grid.cursor.col;
-                self.grid.goto(row, col);
+                self.grid.goto_addressed(row, col);
             }
             'H' | 'f' => {
                 let row = param_at(params, 0, 1) as usize - 1;
                 let col = param_at(params, 1, 1) as usize - 1;
-                self.grid.goto(row, col);
+                self.grid.goto_addressed(row, col);
             }
             'J' => self.grid.erase_in_display(param_at(params, 0, 0)),
             'K' => self.grid.erase_in_line(param_at(params, 0, 0)),
@@ -827,6 +829,16 @@ mod tests {
             t.encode_mouse(0, true, false, 0, 0, 0).unwrap(),
             b"\x1b[<0;1;1M".to_vec()
         );
+    }
+
+    #[test]
+    fn decom_makes_cup_region_relative() {
+        let mut t = Terminal::new(10, 5);
+        feed(&mut t, b"\x1b[4;8r"); // scroll region rows 4..8 (0-based 3..7)
+        feed(&mut t, b"\x1b[?6h"); // DECOM on -> cursor homes to the region top
+        assert_eq!(t.grid.cursor.row, 3);
+        feed(&mut t, b"\x1b[2;1HY"); // CUP row 2 region-relative -> absolute row 4
+        assert_eq!(t.grid.lines[4][0].c, 'Y');
     }
 
     #[test]

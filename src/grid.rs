@@ -122,6 +122,10 @@ pub struct Grid {
     /// scroll region, 0-based inclusive [top, bottom]
     pub region_top: usize,
     pub region_bottom: usize,
+    /// DECOM origin mode: CUP/VPA address relative to the scroll region top
+    pub origin_mode: bool,
+    /// origin mode saved by DECSC, restored by DECRC
+    saved_origin: bool,
     /// scrollback view offset (lines scrolled up from the live bottom)
     pub view_offset: usize,
     /// total lines ever pushed into scrollback (monotonic); lets prompt marks
@@ -187,6 +191,8 @@ impl Grid {
             saved_cursor: Cursor::default(),
             region_top: 0,
             region_bottom: rows - 1,
+            origin_mode: false,
+            saved_origin: false,
             view_offset: 0,
             total_scrolled: 0,
             prompts: Vec::new(),
@@ -641,10 +647,12 @@ impl Grid {
 
     pub fn save_cursor(&mut self) {
         self.saved_cursor = self.cursor;
+        self.saved_origin = self.origin_mode;
     }
 
     pub fn restore_cursor(&mut self) {
         self.cursor = self.saved_cursor;
+        self.origin_mode = self.saved_origin;
         self.cursor.row = self.cursor.row.min(self.rows - 1);
         self.cursor.col = self.cursor.col.min(self.cols - 1);
     }
@@ -755,6 +763,26 @@ impl Grid {
     pub fn goto(&mut self, row: usize, col: usize) {
         self.cursor.row = row.min(self.rows - 1);
         self.cursor.col = col.min(self.cols - 1);
+        self.cursor.wrap_pending = false;
+    }
+
+    /// cursor addressing (CUP / HVP / VPA) honoring DECOM: in origin mode the
+    /// row is relative to the scroll region top and clamped within it
+    pub fn goto_addressed(&mut self, row: usize, col: usize) {
+        self.cursor.row = if self.origin_mode {
+            (self.region_top + row).min(self.region_bottom)
+        } else {
+            row.min(self.rows - 1)
+        };
+        self.cursor.col = col.min(self.cols - 1);
+        self.cursor.wrap_pending = false;
+    }
+
+    /// DECOM toggle; per spec it homes the cursor to the addressable area's top
+    pub fn set_origin_mode(&mut self, on: bool) {
+        self.origin_mode = on;
+        self.cursor.row = if on { self.region_top } else { 0 };
+        self.cursor.col = 0;
         self.cursor.wrap_pending = false;
     }
 
@@ -1034,6 +1062,21 @@ mod tests {
         g.goto(5, 0);
         g.move_down(10);
         assert_eq!(g.cursor.row, 7);
+    }
+
+    #[test]
+    fn origin_mode_addresses_relative_to_region() {
+        let mut g = Grid::new(10, 5);
+        g.set_scroll_region(3, 7);
+        g.set_origin_mode(true);
+        assert_eq!(g.cursor.row, 3); // homed to the region top
+        g.goto_addressed(0, 0);
+        assert_eq!(g.cursor.row, 3); // row 1 -> region top
+        g.goto_addressed(100, 0);
+        assert_eq!(g.cursor.row, 7); // clamped to the bottom margin
+        g.set_origin_mode(false);
+        g.goto_addressed(0, 0);
+        assert_eq!(g.cursor.row, 0); // absolute addressing again
     }
 
     #[test]
