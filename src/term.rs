@@ -88,6 +88,13 @@ pub struct Terminal {
     pub clipboard: Option<String>,
     /// pending OSC 4/10/11/12 color queries, answered by the app from the palette
     pub color_queries: Vec<ColorReq>,
+    /// g0/g1 charset designations + active locking shift (SO/SI) for the DEC
+    /// special-graphics line-drawing set
+    g0: Charset,
+    g1: Charset,
+    gl: u8,
+    /// last printed char, for REP (CSI Ps b)
+    last_print: Option<char>,
 }
 
 impl Terminal {
@@ -112,7 +119,33 @@ impl Terminal {
             kbd_stack: vec![0],
             clipboard: None,
             color_queries: Vec::new(),
+            g0: Charset::Ascii,
+            g1: Charset::Ascii,
+            gl: 0,
+            last_print: None,
         }
+    }
+
+    fn map_charset(&self, c: char) -> char {
+        let active = if self.gl == 0 { self.g0 } else { self.g1 };
+        if active == Charset::DecGraphics {
+            dec_special_graphics(c)
+        } else {
+            c
+        }
+    }
+
+    /// DECSTR soft reset: restore charset, common modes, the SGR pen, the scroll
+    /// region and the cursor-shape default without rebuilding the grid
+    fn soft_reset(&mut self) {
+        self.g0 = Charset::Ascii;
+        self.g1 = Charset::Ascii;
+        self.gl = 0;
+        self.app_cursor_keys = false;
+        self.bracketed_paste = false;
+        self.apply_sgr(&[vec![0]]);
+        self.grid.set_scroll_region(0, self.grid.rows - 1);
+        self.grid.cursor.shape_set = false;
     }
 
     /// active kitty keyboard protocol flags (top of the stack)
@@ -403,9 +436,56 @@ fn param_at(params: &Params, idx: usize, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Charset {
+    Ascii,
+    DecGraphics,
+}
+
+/// the DEC special-graphics set (ESC ( 0): maps ASCII into the box-drawing /
+/// line glyphs legacy curses apps draw with via SO/SI
+fn dec_special_graphics(c: char) -> char {
+    match c {
+        '`' => '\u{25c6}',
+        'a' => '\u{2592}',
+        'b' => '\u{2409}',
+        'c' => '\u{240c}',
+        'd' => '\u{240d}',
+        'e' => '\u{240a}',
+        'f' => '\u{00b0}',
+        'g' => '\u{00b1}',
+        'h' => '\u{2424}',
+        'i' => '\u{240b}',
+        'j' => '\u{2518}',
+        'k' => '\u{2510}',
+        'l' => '\u{250c}',
+        'm' => '\u{2514}',
+        'n' => '\u{253c}',
+        'o' => '\u{23ba}',
+        'p' => '\u{23bb}',
+        'q' => '\u{2500}',
+        'r' => '\u{23bc}',
+        's' => '\u{23bd}',
+        't' => '\u{251c}',
+        'u' => '\u{2524}',
+        'v' => '\u{2534}',
+        'w' => '\u{252c}',
+        'x' => '\u{2502}',
+        'y' => '\u{2264}',
+        'z' => '\u{2265}',
+        '{' => '\u{03c0}',
+        '|' => '\u{2260}',
+        '}' => '\u{00a3}',
+        '~' => '\u{00b7}',
+        _ => c,
+    }
+}
+
 impl Perform for Terminal {
     fn print(&mut self, c: char) {
-        self.grid.put_char(c);
+        let mapped = self.map_charset(c);
+        self.grid.put_char(mapped);
+        self.last_print = Some(c);
         self.dirty = true;
     }
 
@@ -416,6 +496,8 @@ impl Perform for Terminal {
             0x09 => self.grid.tab(),
             0x0a..=0x0c => self.grid.linefeed(),
             0x0d => self.grid.carriage_return(),
+            0x0e => self.gl = 1, // SO -> invoke g1
+            0x0f => self.gl = 0, // SI -> invoke g0
             _ => {}
         }
         self.dirty = true;
@@ -458,6 +540,16 @@ impl Perform for Terminal {
             '@' => self.grid.insert_chars(param_at(params, 0, 1) as usize),
             'P' => self.grid.delete_chars(param_at(params, 0, 1) as usize),
             'X' => self.grid.erase_chars(param_at(params, 0, 1) as usize),
+            'b' => {
+                // REP: repeat the last printed glyph N times
+                if let Some(c) = self.last_print {
+                    let mapped = self.map_charset(c);
+                    let n = (param_at(params, 0, 1) as usize).min(self.grid.cols * self.grid.rows);
+                    for _ in 0..n {
+                        self.grid.put_char(mapped);
+                    }
+                }
+            }
             'S' => self.grid.scroll_up(param_at(params, 0, 1) as usize),
             'T' => self.grid.scroll_down(param_at(params, 0, 1) as usize),
             'm' => {
@@ -483,7 +575,10 @@ impl Perform for Terminal {
                 }
             }
             'c' => {
-                if !private {
+                if intermediates.first() == Some(&b'>') {
+                    // DA2 secondary device attributes: a VT220-class id, version 0
+                    self.responses.extend_from_slice(b"\x1b[>41;0;0c");
+                } else if !private {
                     self.responses.extend_from_slice(b"\x1b[?6c");
                 }
             }
@@ -525,12 +620,28 @@ impl Perform for Terminal {
                 // plain CSI u: SCO restore cursor
                 _ => self.grid.restore_cursor(),
             },
+            // DECSTR soft reset (CSI ! p)
+            'p' if intermediates.first() == Some(&b'!') => self.soft_reset(),
             _ => {}
         }
         self.dirty = true;
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // charset designation: ESC ( Fc -> g0, ESC ) Fc -> g1 (0 = DEC special
+        // graphics, anything else treated as ascii)
+        if let Some(&i) = intermediates.first()
+            && (i == b'(' || i == b')')
+        {
+            let cs = if byte == b'0' { Charset::DecGraphics } else { Charset::Ascii };
+            if i == b'(' {
+                self.g0 = cs;
+            } else {
+                self.g1 = cs;
+            }
+            self.dirty = true;
+            return;
+        }
         match byte {
             b'M' => self.grid.reverse_index(),
             b'D' => self.grid.linefeed(),
@@ -549,6 +660,10 @@ impl Perform for Terminal {
                 self.app_cursor_keys = false;
                 self.bracketed_paste = false;
                 self.kbd_stack = vec![0];
+                self.g0 = Charset::Ascii;
+                self.g1 = Charset::Ascii;
+                self.gl = 0;
+                self.last_print = None;
             }
             _ => {}
         }
@@ -660,6 +775,38 @@ mod tests {
     fn feed(t: &mut Terminal, bytes: &[u8]) {
         let mut p = Parser::new();
         p.advance(t, bytes);
+    }
+
+    #[test]
+    fn dec_graphics_charset_and_so_si() {
+        // ESC ( 0 designates DEC special graphics into g0; 'q' -> horizontal line
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, b"\x1b(0q");
+        assert_eq!(t.grid.lines[0][0].c, '\u{2500}');
+        // SO/SI switch the active set: g1 = graphics, SO invokes g1, SI back to g0
+        let mut t2 = Terminal::new(4, 10);
+        feed(&mut t2, b"\x1b)0\x0ex\x0fx");
+        assert_eq!(t2.grid.lines[0][0].c, '\u{2502}'); // g1 graphics: x -> │
+        assert_eq!(t2.grid.lines[0][1].c, 'x'); // g0 ascii: literal x
+    }
+
+    #[test]
+    fn rep_repeats_last_glyph() {
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, b"A\x1b[3b");
+        let row: String = t.grid.lines[0].iter().take(4).map(|c| c.c).collect();
+        assert_eq!(row, "AAAA");
+    }
+
+    #[test]
+    fn da2_response_and_decstr_resets_charset() {
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, b"\x1b[>c");
+        assert_eq!(t.responses, b"\x1b[>41;0;0c");
+        // DECSTR (CSI ! p) restores g0 to ascii after a graphics designation
+        let mut t2 = Terminal::new(4, 10);
+        feed(&mut t2, b"\x1b(0\x1b[!pq");
+        assert_eq!(t2.grid.lines[0][0].c, 'q'); // literal, not a box char
     }
 
     #[test]
