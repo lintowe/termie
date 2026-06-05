@@ -76,6 +76,7 @@ impl Pty {
         load_profile: bool,
         cwd: Option<&str>,
         command: Option<&[String]>,
+        wsl_distro: Option<&str>,
     ) -> Result<Pty> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
@@ -112,8 +113,13 @@ impl Pty {
                     c.arg(PWSH_OSC7_PROMPT);
                 }
                 if lower.ends_with("wsl.exe") {
-                    // forward the terminal env into the wsl distro so colors and
+                    // launch a specific distro when one is configured (else the
+                    // wsl default), and forward the terminal env in so colors and
                     // the kitty-keyboard hint reach programs running inside wsl
+                    if let Some(d) = wsl_distro {
+                        c.arg("-d");
+                        c.arg(d);
+                    }
                     c.env("WSLENV", "TERM/u:COLORTERM/u:TERM_PROGRAM/u");
                 }
                 c

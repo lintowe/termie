@@ -953,8 +953,9 @@ fn build_pane(
     scrollback: usize,
     cwd: Option<&str>,
     command: Option<&[String]>,
+    wsl_distro: Option<&str>,
 ) -> Result<Pane> {
-    let pty = Pty::spawn(rows as u16, cols as u16, shell, load_profile, cwd, command)?;
+    let pty = Pty::spawn(rows as u16, cols as u16, shell, load_profile, cwd, command, wsl_distro)?;
     let mut term = Terminal::new(rows, cols);
     term.grid.set_scrollback_limit(scrollback);
     Ok(Pane {
@@ -1043,6 +1044,8 @@ struct Persisted {
     font: Option<String>,
     opacity: i32,
     quake_key: Option<(u32, u32)>,
+    /// the WSL distribution `new tab: wsl` launches (None = wsl.exe default)
+    wsl_distro: Option<String>,
 }
 
 impl Default for Persisted {
@@ -1063,6 +1066,7 @@ impl Default for Persisted {
             font: None,
             opacity: 85,
             quake_key: None,
+            wsl_distro: None,
         }
     }
 }
@@ -1314,6 +1318,11 @@ fn load_persisted() -> Persisted {
                 }
             }
             "quake_key" => p.quake_key = parse_quake_key(v),
+            "wsl_distro" => {
+                if !v.is_empty() {
+                    p.wsl_distro = Some(v.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -1573,6 +1582,11 @@ impl App {
         // an explicit cwd/command (cli or a context-menu verb): spawn the first
         // tab here at that location instead of adopting a home-dir pool shell.
         // a bare launch leaves the fast async warm-pool path below unchanged
+        // surface installed WSL distros so the user knows valid wsl_distro values
+        let distros = win::wsl_distros();
+        if !distros.is_empty() {
+            log::info!("wsl distros available: {}", distros.join(", "));
+        }
         if !self.cli.is_bare() {
             let (cols, rows) = self.content_pane_size();
             let cwd = self.cli.cwd.clone();
@@ -1638,6 +1652,7 @@ impl App {
             self.config.scrollback,
             cwd.as_deref(),
             command,
+            self.persisted.wsl_distro.as_deref(),
         )?;
         self.start_reader(&mut pane);
         Ok(pane)
@@ -1728,9 +1743,10 @@ impl App {
             let id = self.next_id;
             self.next_id += 1;
             let proxy = self.proxy.clone();
+            let wsl = self.persisted.wsl_distro.clone();
             self.pending_warm += 1;
             std::thread::spawn(move || {
-                let pane = build_pane(id, cols, rows, shell, profile, sb, None, None).ok().map(Box::new);
+                let pane = build_pane(id, cols, rows, shell, profile, sb, None, None, wsl.as_deref()).ok().map(Box::new);
                 let _ = proxy.send_event(UserEvent::PaneReady(pane));
             });
         }
@@ -3113,6 +3129,9 @@ impl App {
         let _ = writeln!(s, "cursor_blink={}", r.cursor_blink());
         let _ = writeln!(s, "theme={}", r.theme().name());
         let _ = writeln!(s, "font={}", r.font_name());
+        if let Some(d) = &self.persisted.wsl_distro {
+            let _ = writeln!(s, "wsl_distro={d}");
+        }
         let _ = std::fs::write(&path, s);
     }
 

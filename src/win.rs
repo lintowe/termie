@@ -92,6 +92,82 @@ pub fn open_url(url: &str) {
 #[cfg(not(windows))]
 pub fn open_url(_url: &str) {}
 
+/// the installed WSL distribution friendly-names, read from the registry
+/// (HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss), the same source
+/// Windows Terminal uses. empty on any failure or when WSL isn't installed —
+/// every step is fallible and the whole thing never panics
+#[cfg(windows)]
+pub fn wsl_distros() -> Vec<String> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+        RegQueryValueExW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let lxss_path = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Lxss");
+    let dist_value = wide("DistributionName");
+    unsafe {
+        let mut lxss = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(lxss_path.as_ptr()), Some(0), KEY_READ, &mut lxss)
+            != ERROR_SUCCESS
+        {
+            return out; // no WSL installed
+        }
+        let mut idx = 0u32;
+        loop {
+            // each subkey is a distro guid; its DistributionName value is the name
+            let mut name = [0u16; 256];
+            let mut name_len = name.len() as u32;
+            let r = RegEnumKeyExW(lxss, idx, Some(PWSTR(name.as_mut_ptr())), &mut name_len, None, None, None, None);
+            if r != ERROR_SUCCESS {
+                break; // ERROR_NO_MORE_ITEMS or any error ends the scan
+            }
+            idx += 1;
+            let mut guid: Vec<u16> = name[..(name_len as usize).min(name.len())].to_vec();
+            guid.push(0);
+            let mut dkey = HKEY::default();
+            if RegOpenKeyExW(lxss, PCWSTR(guid.as_ptr()), Some(0), KEY_READ, &mut dkey) != ERROR_SUCCESS {
+                continue;
+            }
+            let mut buf = [0u16; 256];
+            let mut bytes = (buf.len() * 2) as u32;
+            let mut ty = REG_SZ;
+            let q = RegQueryValueExW(
+                dkey,
+                PCWSTR(dist_value.as_ptr()),
+                None,
+                Some(&mut ty),
+                Some(buf.as_mut_ptr() as *mut u8),
+                Some(&mut bytes),
+            );
+            let _ = RegCloseKey(dkey);
+            if q == ERROR_SUCCESS && ty == REG_SZ {
+                let chars = (bytes as usize / 2).min(buf.len());
+                let s = String::from_utf16_lossy(&buf[..chars]);
+                let s = s.trim_end_matches('\0').trim().to_string();
+                if !s.is_empty() {
+                    out.push(s);
+                }
+            }
+        }
+        let _ = RegCloseKey(lxss);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(not(windows))]
+pub fn wsl_distros() -> Vec<String> {
+    Vec::new()
+}
+
 /// show a blocking error dialog. used only on the fatal boot path (gpu init
 /// failed and we are about to exit) so the user sees why rather than a window
 /// that silently never appears. never call this per-frame
