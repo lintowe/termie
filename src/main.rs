@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod a11y;
+mod apc;
 mod color;
 mod grid;
 mod input;
@@ -83,6 +84,8 @@ struct Pane {
     ready: bool,
     /// set when the shell rang the bell (BEL); drives a brief border flash
     flash: Option<Instant>,
+    /// kitty-graphics APC scanner state, buffering image sequences across reads
+    apc: apc::ApcScanner,
 }
 
 impl Pane {
@@ -1021,6 +1024,29 @@ fn node_to_snap(node: &Node, leaf_ids: &mut Vec<usize>) -> session::NodeSnap {
     }
 }
 
+/// feed pty output through the kitty-graphics scanner, then the vte parser. the
+/// scanner pulls kitty APC image sequences out of the stream (vte has no APC
+/// callback) and the remaining bytes flow to the terminal unchanged
+fn pump_bytes(pane: &mut Pane, bytes: &[u8]) {
+    let (pass, imgs) = pane.apc.feed(bytes);
+    pane.parser.advance(&mut pane.term, &pass);
+    for img in &imgs {
+        if let Some(cmd) = apc::KittyCmd::parse(img) {
+            log::debug!(
+                "kitty graphics: a={} f={} {}x{} id={} more={} q={} {}B",
+                cmd.action as char,
+                cmd.format,
+                cmd.width,
+                cmd.height,
+                cmd.id,
+                cmd.more,
+                cmd.quiet,
+                cmd.payload.len()
+            );
+        }
+    }
+}
+
 fn build_pane(
     id: usize,
     cols: usize,
@@ -1043,6 +1069,7 @@ fn build_pane(
         shell,
         ready: false,
         flash: None,
+        apc: apc::ApcScanner::default(),
     })
 }
 
@@ -4055,7 +4082,7 @@ impl ApplicationHandler<UserEvent> for App {
                 for tab in &mut self.tabs {
                     if let Some(root) = tab.root.as_mut()
                         && let Some(p) = find_pane_mut(root, id) {
-                            p.parser.advance(&mut p.term, &bytes);
+                            pump_bytes(p, &bytes);
                             // first output means the shell has settled past its
                             // PSReadLine startup, so it's now safe to resize
                             if !p.ready {
@@ -4089,7 +4116,7 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(idx) = self.satellites.iter().position(|s| s.pane.id == id)
                 {
                     let sat = &mut self.satellites[idx];
-                    sat.pane.parser.advance(&mut sat.pane.term, &bytes);
+                    pump_bytes(&mut sat.pane, &bytes);
                     if !sat.pane.term.responses.is_empty() {
                         let resp = std::mem::take(&mut sat.pane.term.responses);
                         sat.pane.pty.write(&resp);
@@ -4114,7 +4141,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // so it's now safe to size it to a full content pane
                     let (ccols, crows) = self.content_pane_size();
                     if let Some(sp) = self.pool.iter_mut().find(|sp| sp.id == id) {
-                        sp.parser.advance(&mut sp.term, &bytes);
+                        pump_bytes(sp, &bytes);
                         sp.ready = true;
                         if sp.term.grid.cols != ccols || sp.term.grid.rows != crows {
                             sp.resize(crows, ccols);
@@ -5213,6 +5240,7 @@ mod tests {
             shell: ShellKind::Auto,
             ready: true,
             flash: None,
+            apc: apc::ApcScanner::default(),
         }
     }
     fn leaf(id: usize) -> Node {

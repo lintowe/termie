@@ -422,8 +422,9 @@ fn parse_ext_color_slice(s: &[u16]) -> Option<Color> {
 }
 
 /// minimal base64 decode for OSC 52 clipboard payloads (skips padding and
-/// whitespace, returns None on an invalid character)
-fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
+/// whitespace, returns None on an invalid character); also reused by the kitty
+/// graphics scanner for image payloads
+pub(crate) fn base64_decode(input: &[u8]) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
