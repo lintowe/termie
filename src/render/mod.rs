@@ -690,6 +690,137 @@ fn backend_label(b: wgpu::Backend) -> &'static str {
     }
 }
 
+/// the complete set of device-owned gpu handles. bundled so the windowed init
+/// (from_parts) and a device-loss recreate rebuild exactly the same set with
+/// nothing left dangling
+struct GpuResources {
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: u64,
+    atlas_texture: wgpu::Texture,
+    color_texture: wgpu::Texture,
+    atlas_bind_group: wgpu::BindGroup,
+    icon_texture: wgpu::Texture,
+    sampler: wgpu::Sampler,
+    icon_view: wgpu::TextureView,
+    icon_sampler: wgpu::Sampler,
+    color_sampler: wgpu::Sampler,
+}
+
+/// build every device-owned gpu handle from a device + queue. atlas/color
+/// textures are sized to `atlas_dim`; the cpu glyph bitmaps upload separately
+/// via upload_atlas (the caller flags the atlas dirty after a rebuild)
+fn build_gpu_resources(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    atlas_dim: u32,
+    format: wgpu::TextureFormat,
+) -> GpuResources {
+    let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("uniforms"),
+        size: std::mem::size_of::<Uniforms>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let uniform_bgl = build_uniform_bgl(device);
+    let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("uniform-bg"),
+        layout: &uniform_bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buffer.as_entire_binding(),
+        }],
+    });
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("atlas-sampler"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+
+    // the app icon (">_<" master, pre-decoded to 128x128 RGBA) lives in a small
+    // color texture drawn as a title-bar badge; a full mip chain keeps the ~20px
+    // downscale crisp (a single level sampled 6x down looks fuzzy/aliased)
+    const ICON_DIM: u32 = 128;
+    let icon_rgba: &[u8] = include_bytes!("../../assets/icon_128.rgba");
+    let icon_mips = build_mips(icon_rgba, ICON_DIM);
+    let icon_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("app-icon"),
+        size: wgpu::Extent3d { width: ICON_DIM, height: ICON_DIM, depth_or_array_layers: 1 },
+        mip_level_count: icon_mips.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    for (level, (dim, data)) in icon_mips.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &icon_texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(dim * 4),
+                rows_per_image: Some(*dim),
+            },
+            wgpu::Extent3d { width: *dim, height: *dim, depth_or_array_layers: 1 },
+        );
+    }
+    let icon_view = icon_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("icon-sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
+    });
+
+    let color_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("color-atlas-sampler"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    let (atlas_texture, color_texture, atlas_bind_group) =
+        make_atlas_bind_group(device, atlas_dim, &sampler, &icon_view, &icon_sampler, &color_sampler);
+
+    let atlas_bgl = build_atlas_bgl(device);
+    let pipeline = build_cell_pipeline(device, &uniform_bgl, &atlas_bgl, format);
+
+    let instance_capacity = 8192u64;
+    let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("instances"),
+        size: instance_capacity * std::mem::size_of::<Instance>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    GpuResources {
+        uniform_buffer,
+        uniform_bind_group,
+        pipeline,
+        instance_buffer,
+        instance_capacity,
+        atlas_texture,
+        color_texture,
+        atlas_bind_group,
+        icon_texture,
+        sampler,
+        icon_view,
+        icon_sampler,
+        color_sampler,
+    }
+}
+
 impl Renderer {
     pub fn new(window: Arc<Window>, content_pt: f32, chrome_pt: f32, backend: BackendChoice) -> Result<Renderer> {
         let size = window.inner_size();
@@ -814,153 +945,22 @@ impl Renderer {
         // system (initially just the bundled one — system fonts load lazily)
         let fonts = Self::detect_fonts(&atlas);
 
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_bgl = build_uniform_bgl(&device);
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("uniform-bg"),
-            layout: &uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph-atlas"),
-            size: wgpu::Extent3d {
-                width: atlas.dim,
-                height: atlas.dim,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("atlas-sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        // the app icon (">_<" master, pre-decoded to 128x128 RGBA) lives in a
-        // small color texture so it can be drawn as a badge in the title bar.
-        // it carries a full mip chain so downscaling to ~20px stays crisp
-        // (a single level sampled 6x down looks fuzzy/aliased)
-        const ICON_DIM: u32 = 128;
-        let icon_rgba: &[u8] = include_bytes!("../../assets/icon_128.rgba");
-        let icon_mips = build_mips(icon_rgba, ICON_DIM);
-        let icon_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("app-icon"),
-            size: wgpu::Extent3d { width: ICON_DIM, height: ICON_DIM, depth_or_array_layers: 1 },
-            mip_level_count: icon_mips.len() as u32,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        for (level, (dim, data)) in icon_mips.iter().enumerate() {
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &icon_texture,
-                    mip_level: level as u32,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(dim * 4),
-                    rows_per_image: Some(*dim),
-                },
-                wgpu::Extent3d { width: *dim, height: *dim, depth_or_array_layers: 1 },
-            );
-        }
-        let icon_view = icon_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("icon-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
-
-        // RGBA atlas for color (emoji) glyphs; srgb so the gpu linearizes on
-        // sample, matching the icon path
-        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("color-glyph-atlas"),
-            size: wgpu::Extent3d {
-                width: atlas.dim,
-                height: atlas.dim,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let color_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("color-atlas-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let atlas_bgl = build_atlas_bgl(&device);
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas-bg"),
-            layout: &atlas_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&icon_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&icon_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&color_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(&color_sampler),
-                },
-            ],
-        });
-
-        let pipeline = build_cell_pipeline(&device, &uniform_bgl, &atlas_bgl, format);
-        crate::timing("  gpu: pipeline built");
-
-        let instance_capacity = 8192u64;
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("instances"),
-            size: instance_capacity * std::mem::size_of::<Instance>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let GpuResources {
+            uniform_buffer,
+            uniform_bind_group,
+            pipeline,
+            instance_buffer,
+            instance_capacity,
+            atlas_texture,
+            color_texture,
+            atlas_bind_group,
+            icon_texture,
+            sampler,
+            icon_view,
+            icon_sampler,
+            color_sampler,
+        } = build_gpu_resources(&device, &queue, atlas.dim, format);
+        crate::timing("  gpu: resources built");
 
         let pad = (10.0 * scale).round();
         let chrome_h = atlas.metrics(FontId::Chrome).cell_h;
