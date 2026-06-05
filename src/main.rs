@@ -212,6 +212,8 @@ struct FindState {
 enum ConfirmAction {
     /// send these bytes to a pane — a risky multiline paste held for confirm
     PasteBytes { pane: usize, bytes: Vec<u8> },
+    /// close a tab that holds more than one pane
+    CloseTab { tab: usize },
 }
 
 /// modal yes/no overlay state; captures keys until resolved
@@ -817,6 +819,13 @@ fn each_pane_mut(node: &mut Node, f: &mut impl FnMut(&mut Pane)) {
             each_pane_mut(b, f);
         }
     }
+}
+
+/// number of leaf panes in a tree
+fn pane_count(node: &Node) -> usize {
+    let mut n = 0;
+    each_pane(node, &mut |_| n += 1);
+    n
 }
 
 fn each_pane(node: &Node, f: &mut impl FnMut(&Pane)) {
@@ -2140,9 +2149,10 @@ impl App {
     }
 
     /// run a confirmed modal action
-    fn run_confirm(&mut self, action: ConfirmAction) {
+    fn run_confirm(&mut self, action: ConfirmAction, event_loop: &ActiveEventLoop) {
         match action {
             ConfirmAction::PasteBytes { pane, bytes } => self.send_paste_bytes(pane, &bytes),
+            ConfirmAction::CloseTab { tab } => self.do_close_tab(tab, event_loop),
         }
     }
 
@@ -2839,7 +2849,29 @@ impl App {
         true
     }
 
+    /// request closing a tab; one holding several panes confirms first so a
+    /// stray Ctrl+W / middle-click can't drop multiple shells at once (session
+    /// restore can't undo it — the closed tab leaves the saved layout)
     fn close_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
+        let panes = self
+            .tabs
+            .get(idx)
+            .and_then(|t| t.root.as_ref())
+            .map(pane_count)
+            .unwrap_or(0);
+        if panes > 1 {
+            self.confirm = Some(ConfirmState {
+                prompt: format!("close this tab? it has {panes} panes"),
+                hint: "enter: close \u{b7} esc: cancel".to_string(),
+                action: ConfirmAction::CloseTab { tab: idx },
+            });
+            self.redraw();
+        } else {
+            self.do_close_tab(idx, event_loop);
+        }
+    }
+
+    fn do_close_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         if idx >= self.tabs.len() {
             return;
         }
@@ -3592,7 +3624,7 @@ impl App {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
                     if let Some(c) = self.confirm.take() {
-                        self.run_confirm(c.action);
+                        self.run_confirm(c.action, event_loop);
                     }
                 }
                 Key::Named(NamedKey::Escape) => self.confirm = None,
