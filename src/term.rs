@@ -149,6 +149,25 @@ impl Terminal {
         self.grid.cursor.shape_set = false;
     }
 
+    /// DECRQM mode-state reply value: 1 = set, 2 = reset, 0 = not recognized
+    fn dec_mode_state(&self, mode: u16) -> u16 {
+        let on = match mode {
+            1 => self.app_cursor_keys,
+            6 => self.grid.origin_mode,
+            25 => self.grid.cursor.visible,
+            1000 => self.mouse_proto == MouseProto::Normal,
+            1002 => self.mouse_proto == MouseProto::Button,
+            1003 => self.mouse_proto == MouseProto::Any,
+            1004 => self.focus_events,
+            1006 => self.mouse_sgr,
+            2004 => self.bracketed_paste,
+            2026 => self.sync_output,
+            47 | 1047 | 1049 => self.using_alt,
+            _ => return 0,
+        };
+        if on { 1 } else { 2 }
+    }
+
     /// active kitty keyboard protocol flags (top of the stack)
     pub fn kbd_flags(&self) -> u8 {
         *self.kbd_stack.last().unwrap_or(&0)
@@ -627,6 +646,13 @@ impl Perform for Terminal {
             },
             // DECSTR soft reset (CSI ! p)
             'p' if intermediates.first() == Some(&b'!') => self.soft_reset(),
+            // DECRQM mode query (CSI ? Ps $ p) -> DECRPM report
+            'p' if private && intermediates.get(1) == Some(&b'$') => {
+                let m = param_at(params, 0, 0);
+                let state = self.dec_mode_state(m);
+                self.responses
+                    .extend_from_slice(format!("\x1b[?{};{}$y", m, state).as_bytes());
+            }
             _ => {}
         }
         self.dirty = true;
@@ -829,6 +855,22 @@ mod tests {
             t.encode_mouse(0, true, false, 0, 0, 0).unwrap(),
             b"\x1b[<0;1;1M".to_vec()
         );
+    }
+
+    #[test]
+    fn decrqm_reports_mode_state() {
+        let mut t = Terminal::new(4, 10);
+        // origin mode starts reset -> 2
+        feed(&mut t, b"\x1b[?6$p");
+        assert_eq!(t.responses, b"\x1b[?6;2$y");
+        t.responses.clear();
+        // set it, then query -> 1
+        feed(&mut t, b"\x1b[?6h\x1b[?6$p");
+        assert_eq!(t.responses, b"\x1b[?6;1$y");
+        t.responses.clear();
+        // unrecognized mode -> 0
+        feed(&mut t, b"\x1b[?9999$p");
+        assert_eq!(t.responses, b"\x1b[?9999;0$y");
     }
 
     #[test]
