@@ -1274,6 +1274,19 @@ impl Renderer {
     }
 
     /// given a pane's pixel rect, the grid origin + cols/rows that fit inside it
+    /// physical-pixel rect (x, y, w, h) of a cell within a pane, for parking the
+    /// IME candidate window at the cursor
+    pub fn cell_screen_rect(&self, rect: (f32, f32, f32, f32), row: usize, col: usize) -> (f64, f64, f64, f64) {
+        let (ox, oy, _, _) = self.pane_metrics(rect);
+        let m = self.atlas.metrics(FontId::Content);
+        (
+            (ox + col as f32 * m.cell_w) as f64,
+            (oy + row as f32 * m.cell_h) as f64,
+            m.cell_w as f64,
+            m.cell_h as f64,
+        )
+    }
+
     pub fn pane_metrics(&self, rect: (f32, f32, f32, f32)) -> (f32, f32, usize, usize) {
         let m = self.atlas.metrics(FontId::Content);
         let p = self.pane_pad();

@@ -22,7 +22,7 @@ use anyhow::Result;
 use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -1439,6 +1439,9 @@ struct App {
     confirm: Option<ConfirmState>,
     /// the tab-rename text field, when open
     rename: Option<RenameState>,
+    /// true while the user is composing via the IME; raw keystrokes are then
+    /// ignored and the OS candidate window is parked at the cursor
+    ime_composing: bool,
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
     cursor: PhysicalPosition<f64>,
@@ -1555,6 +1558,7 @@ impl App {
             find: None,
             confirm: None,
             rename: None,
+            ime_composing: false,
             market: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             pressed: None,
@@ -1626,6 +1630,7 @@ impl App {
 
         let renderer = Renderer::new(window.clone(), CONTENT_PT, CHROME_PT, self.config.backend)?;
         timing("renderer ready (gpu init)");
+        window.set_ime_allowed(true);
         self.window = Some(window.clone());
         self.renderer = Some(renderer);
 
@@ -2456,6 +2461,47 @@ impl App {
 
     fn active_focused_id(&self) -> Option<usize> {
         self.tabs.get(self.active_tab).map(|t| t.focused)
+    }
+
+    /// write bytes to the focused pane, or every pane in broadcast mode — the
+    /// shared sink for keyboard input and committed IME text (no esc/alt prefix)
+    fn write_to_focused(&mut self, bytes: &[u8]) {
+        let Some(id) = self.active_focused_id() else {
+            return;
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active_tab)
+            && let Some(root) = tab.root.as_mut()
+        {
+            if self.broadcast {
+                each_pane_mut(root, &mut |p| p.pty.write(bytes));
+            } else if let Some(p) = find_pane_mut(root, id) {
+                p.pty.write(bytes);
+            }
+        }
+    }
+
+    /// park the OS IME candidate window at the focused pane's cursor cell
+    fn apply_ime_area(&mut self) {
+        let Some(id) = self.active_focused_id() else {
+            return;
+        };
+        let rect = self.layout_cache.iter().find(|(pid, _)| *pid == id).map(|(_, r)| *r);
+        let cursor = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|t| t.root.as_ref())
+            .and_then(|r| find_pane(r, id))
+            .map(|p| (p.term.grid.cursor.row, p.term.grid.cursor.col));
+        let area = match (rect, cursor, self.renderer.as_ref()) {
+            (Some(rect), Some((row, col)), Some(r)) => Some(r.cell_screen_rect(rect, row, col)),
+            _ => None,
+        };
+        if let (Some((x, y, cw, ch)), Some(w)) = (area, self.window.as_ref()) {
+            w.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(x, y),
+                winit::dpi::PhysicalSize::new(cw, ch),
+            );
+        }
     }
 
     /// the focused pane's working directory (from OSC 7), as a filesystem path
@@ -4651,7 +4697,29 @@ impl ApplicationHandler<UserEvent> for App {
                 self.relayout_all();
                 self.redraw();
             }
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Enabled => {}
+                Ime::Preedit(text, _cursor) => {
+                    self.ime_composing = !text.is_empty();
+                    self.apply_ime_area();
+                    self.redraw();
+                }
+                Ime::Commit(text) => {
+                    self.ime_composing = false;
+                    self.write_to_focused(text.as_bytes());
+                    self.redraw();
+                }
+                Ime::Disabled => {
+                    self.ime_composing = false;
+                    self.redraw();
+                }
+            },
             WindowEvent::KeyboardInput { event, .. } => {
+                // while composing, the IME owns keystrokes; ignore raw keys so a
+                // committed glyph isn't also typed as its latin keys
+                if self.ime_composing {
+                    return;
+                }
                 if self.handle_shortcut(&event, event_loop) {
                     return;
                 }
@@ -4676,15 +4744,7 @@ impl ApplicationHandler<UserEvent> for App {
                     kbd_flags,
                 ) {
                     self.selection = None; // typing clears the selection
-                    if let Some(tab) = self.tabs.get_mut(self.active_tab)
-                        && let Some(root) = tab.root.as_mut() {
-                            if self.broadcast {
-                                // send to every pane in the tab (cockpit mode)
-                                each_pane_mut(root, &mut |p| p.pty.write(&bytes));
-                            } else if let Some(p) = find_pane_mut(root, id) {
-                                p.pty.write(&bytes);
-                            }
-                        }
+                    self.write_to_focused(&bytes);
                 }
             }
             WindowEvent::DroppedFile(path) => {
