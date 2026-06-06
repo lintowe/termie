@@ -1482,6 +1482,11 @@ struct PaneWindow {
     tabs: Vec<Tab>,
     active_tab: usize,
     layout_cache: Vec<(usize, Rect)>,
+    // per-window ui state: these belong to one window, so the swap-dispatch
+    // (self.pw <-> a satellite) keeps them from leaking across windows
+    maximized: bool,
+    pane_mode: bool,
+    settings_open: bool,
 }
 
 struct App {
@@ -1498,8 +1503,6 @@ struct App {
     next_id: usize,
     mods: ModifiersState,
     focused: bool,
-    maximized: bool,
-    pane_mode: bool,
     /// open right-click pane context menu (None = closed)
     pane_menu: Option<PaneMenu>,
     shown: bool,
@@ -1530,7 +1533,6 @@ struct App {
     /// user keybindings (combo -> palette action) loaded from disk; checked
     /// before the built-in shortcuts, empty when there is no config file
     keybindings: Vec<(ModifiersState, Key, PaletteAction)>,
-    settings_open: bool,
     settings_anim: Option<Instant>,
     /// set when the focused pane changes, so its accent border eases in instead
     /// of snapping; cleared once the ease settles
@@ -1619,6 +1621,9 @@ impl App {
                 tabs: Vec::new(),
                 active_tab: 0,
                 layout_cache: Vec::new(),
+                maximized: false,
+                pane_mode: false,
+                settings_open: false,
             },
             satellites: Vec::new(),
             cur_sat: None,
@@ -1626,8 +1631,6 @@ impl App {
             mods: ModifiersState::empty(),
             keybindings: load_keybindings(),
             focused: true,
-            maximized: false,
-            pane_mode: false,
             pane_menu: None,
             shown: false,
             pool: Vec::new(),
@@ -1677,7 +1680,6 @@ impl App {
             plugin_granted: Vec::new(),
             plugin_widgets: Vec::new(),
             plugin_subs: Vec::new(),
-            settings_open: false,
             settings_anim: None,
             focus_anim: None,
             #[cfg(debug_assertions)]
@@ -2370,7 +2372,7 @@ impl App {
             status: m.status.clone(),
         });
         let config = self.config;
-        let settings_open = self.settings_open;
+        let settings_open = self.pw.settings_open;
         let settings_p = self.settings_p();
         let pane_menu_view = self.pane_menu.as_ref().map(|m| render::PaneMenuView {
             x: m.x,
@@ -2414,7 +2416,6 @@ impl App {
         let App {
             pw,
             focused,
-            maximized,
             selection,
             link,
             ..
@@ -2424,6 +2425,7 @@ impl App {
             tabs,
             active_tab,
             layout_cache,
+            maximized,
             ..
         } = pw;
         if let Some(r) = renderer.as_mut() {
@@ -2694,8 +2696,8 @@ impl App {
     /// open (or focus) the settings tab
     /// open the slide-in settings panel (resets scroll to the top)
     fn open_settings(&mut self) {
-        if !self.settings_open {
-            self.settings_open = true;
+        if !self.pw.settings_open {
+            self.pw.settings_open = true;
             self.settings_anim = Some(Instant::now());
             self.refresh_settings_plugins();
             if let Some(r) = self.pw.renderer.as_mut() {
@@ -2718,15 +2720,15 @@ impl App {
     }
 
     fn close_settings(&mut self) {
-        if self.settings_open {
-            self.settings_open = false;
+        if self.pw.settings_open {
+            self.pw.settings_open = false;
             self.settings_anim = Some(Instant::now());
             self.redraw();
         }
     }
 
     fn toggle_settings(&mut self) {
-        if self.settings_open {
+        if self.pw.settings_open {
             self.close_settings();
         } else {
             self.open_settings();
@@ -2738,7 +2740,7 @@ impl App {
         const DUR: f32 = 0.14;
         match self.settings_anim {
             None => {
-                if self.settings_open {
+                if self.pw.settings_open {
                     1.0
                 } else {
                     0.0
@@ -2748,7 +2750,7 @@ impl App {
                 let e = (t.elapsed().as_secs_f32() / DUR).clamp(0.0, 1.0);
                 // ease-out cubic
                 let eased = 1.0_f32 - (1.0_f32 - e).powi(3);
-                if self.settings_open {
+                if self.pw.settings_open {
                     eased
                 } else {
                     1.0 - eased
@@ -3288,9 +3290,9 @@ impl App {
                 }
             }
             Hot::Maximize => {
-                self.maximized = !self.maximized;
+                self.pw.maximized = !self.pw.maximized;
                 if let Some(w) = &self.pw.window {
-                    w.set_maximized(self.maximized);
+                    w.set_maximized(self.pw.maximized);
                 }
             }
             Hot::Close => {
@@ -3329,7 +3331,7 @@ impl App {
             }
             Hot::SplitV => self.split_focused(Dir::Vertical),
             Hot::SplitH => self.split_focused(Dir::Horizontal),
-            Hot::PaneMode => self.set_pane_mode(!self.pane_mode),
+            Hot::PaneMode => self.set_pane_mode(!self.pw.pane_mode),
             Hot::NewTab => self.new_tab(),
             Hot::Tab(i) => self.switch_tab(i),
             Hot::TabClose(i) => self.close_tab(i, event_loop),
@@ -3578,7 +3580,7 @@ impl App {
     }
 
     fn set_pane_mode(&mut self, on: bool) {
-        self.pane_mode = on;
+        self.pw.pane_mode = on;
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_pane_mode(on);
         }
@@ -3674,6 +3676,9 @@ impl App {
             }],
             active_tab: 0,
             layout_cache: Vec::new(),
+            maximized: false,
+            pane_mode: false,
+            settings_open: false,
         });
         // relayout + paint the new satellite via the swap-into-pw technique, then
         // relayout + repaint the main window (which just lost a pane)
@@ -3937,7 +3942,7 @@ impl App {
             return;
         }
         // mouse-tracking motion (1002 drag / 1003 any-motion)
-        if self.drag_divider.is_none() && !self.settings_open && !self.mods.shift_key() {
+        if self.drag_divider.is_none() && !self.pw.settings_open && !self.mods.shift_key() {
             if let Some((btn, id)) = self.mouse_down {
                 // a forwarded press is held: lock motion to the press-pane
                 // (even off its rect) and don't fall through to selection
@@ -3985,7 +3990,7 @@ impl App {
                 }
             }
             // ctrl-hover a url: underline it and show a hand (click opens)
-            let new_link = if self.mods.control_key() && !self.settings_open {
+            let new_link = if self.mods.control_key() && !self.pw.settings_open {
                 self.focused_url_at(px, py).map(|(r, a, b, _)| (r, a, b))
             } else {
                 None
@@ -3998,7 +4003,7 @@ impl App {
                 CursorIcon::Pointer
             } else {
                 // otherwise show a resize pointer over a split divider
-                let dir = if self.settings_open || self.mods.shift_key() {
+                let dir = if self.pw.settings_open || self.mods.shift_key() {
                     None
                 } else if let (Some(content), Some(root)) = (
                     self.pw.renderer.as_ref().map(|r| r.content_rect()),
@@ -4023,7 +4028,7 @@ impl App {
         use winit::event::MouseScrollDelta;
         let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
         // the open settings panel grabs the wheel when hovered
-        if self.settings_open {
+        if self.pw.settings_open {
             let over = self.pw.renderer.as_ref().map(|r| r.in_settings_panel(cx, cy)).unwrap_or(false);
             if over {
                 let amt = match delta {
@@ -4109,7 +4114,7 @@ impl App {
                     }
                 // while the settings panel is open, a press outside it dismisses it
                 // (and is consumed); presses inside fall through to its controls
-                if self.settings_open && state == ElementState::Pressed {
+                if self.pw.settings_open && state == ElementState::Pressed {
                     let in_panel = self
                         .pw.renderer
                         .as_ref()
@@ -4126,7 +4131,7 @@ impl App {
                 }
                 // pane mode: drag a divider to resize, or drag a pane onto another
                 // to swap them (instead of selecting text)
-                if self.pane_mode && !matches!(hit, Some(Hit::Button(_)) | Some(Hit::TitleBar) | Some(Hit::Resize(_))) {
+                if self.pw.pane_mode && !matches!(hit, Some(Hit::Button(_)) | Some(Hit::TitleBar) | Some(Hit::Resize(_))) {
                     match state {
                         ElementState::Pressed => {
                             let found = if let (Some(content), Some(root)) = (
@@ -4446,8 +4451,8 @@ impl App {
             && self.market.is_none()
             && self.find.is_none()
             && self.palette.is_none()
-            && !self.settings_open
-            && !self.pane_mode
+            && !self.pw.settings_open
+            && !self.pw.pane_mode
         {
             let mods = self.mods;
             let act = self
@@ -4568,11 +4573,11 @@ impl App {
             && self.mods.shift_key()
             && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("p"))
         {
-            self.set_pane_mode(!self.pane_mode);
+            self.set_pane_mode(!self.pw.pane_mode);
             return true;
         }
         // pane control mode captures every key until exited
-        if self.pane_mode {
+        if self.pw.pane_mode {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => self.set_pane_mode(false),
                 // shift+arrows resize the focused pane; plain arrows move focus
@@ -4604,7 +4609,7 @@ impl App {
         }
 
         // the settings panel captures keys while open (Esc or Ctrl+, closes it)
-        if self.settings_open {
+        if self.pw.settings_open {
             let esc = event.logical_key == Key::Named(NamedKey::Escape);
             let ctrl_comma = self.mods.control_key()
                 && matches!(&event.logical_key, Key::Character(c) if c.as_str() == ",");
