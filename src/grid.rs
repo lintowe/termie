@@ -1297,6 +1297,35 @@ mod tests {
     }
 
     #[test]
+    fn placements_anchor_remove_and_clear() {
+        let mut g = Grid::new(4, 8);
+        g.put_char('x'); // cursor advances to col 1
+        g.place_image(7);
+        let p = g.placements();
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].image_id, p[0].abs_line, p[0].col), (7, 0, 1));
+        // on-screen line (no scroll, no view offset): signed row == abs_line
+        assert_eq!(g.screen_row_signed(0), 0);
+        // id-scoped removal keeps the others
+        g.place_image(9);
+        g.remove_placements(7);
+        assert_eq!(g.placements().iter().map(|p| p.image_id).collect::<Vec<_>>(), vec![9]);
+        // clear-all empties them
+        g.clear_placements();
+        assert!(g.placements().is_empty());
+    }
+
+    #[test]
+    fn reflow_clears_stale_placements() {
+        let mut g = Grid::new(4, 8);
+        g.put_char('x');
+        g.place_image(1);
+        assert_eq!(g.placements().len(), 1);
+        g.resize(4, 12); // width change reflows -> placement anchors are now stale
+        assert!(g.placements().is_empty());
+    }
+
+    #[test]
     fn wide_char_writes_continuation_and_advances_two() {
         let mut g = Grid::new(2, 6);
         g.put_char('世');

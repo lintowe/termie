@@ -5735,4 +5735,36 @@ mod tests {
             assert!(*ratio >= 0.1, "ratio {ratio} below floor");
         }
     }
+
+    #[test]
+    fn handle_kitty_transmit_display_and_delete_all() {
+        let mut term = term::Terminal::new(4, 8);
+        // a=T transmits + displays a 1x1 RGBA image and (quiet 0) queues an OK ack
+        let cmd = apc::KittyCmd {
+            action: b'T',
+            format: 32,
+            width: 1,
+            height: 1,
+            id: 5,
+            more: false,
+            quiet: 0,
+            payload: vec![1, 2, 3, 4],
+        };
+        handle_kitty(&mut term, &cmd);
+        assert_eq!(term.grid.placements().len(), 1);
+        assert!(!term.responses.is_empty(), "OK ack should be queued");
+        // bare a=d (no id) deletes all placements
+        let del = apc::KittyCmd {
+            action: b'd',
+            format: 0,
+            width: 0,
+            height: 0,
+            id: 0,
+            more: false,
+            quiet: 0,
+            payload: vec![],
+        };
+        handle_kitty(&mut term, &del);
+        assert!(term.grid.placements().is_empty());
+    }
 }
