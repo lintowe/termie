@@ -3767,6 +3767,13 @@ impl App {
                 }
                 self.paint();
             }
+            WindowEvent::Focused(f) => {
+                self.focused = f;
+                if !f {
+                    self.ime_composing = false;
+                }
+                self.paint();
+            }
             _ => {}
         }
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
