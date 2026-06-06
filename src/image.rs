@@ -206,4 +206,27 @@ mod tests {
         s.clear();
         assert!(s.get(1).is_none() && s.get(2).is_none());
     }
+
+    // an anonymous (i=0) chunked transfer continues into ONE image, not a fresh
+    // id per chunk
+    #[test]
+    fn anon_chunked_continuation_uses_one_id() {
+        let mut s = ImageStore::default();
+        // a 1x2 RGBA image (8 bytes) split across two anonymous chunks
+        assert!(s.transmit(0, 32, 1, 2, true, &[1, 2, 3, 4]).is_none()); // more=true
+        let id = s.transmit(0, 0, 0, 0, false, &[5, 6, 7, 8]).expect("completes");
+        assert_eq!(s.get(id).unwrap().rgba, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    // the store keeps at most MAX_IMAGES, evicting oldest-first by insertion order
+    #[test]
+    fn lru_evicts_oldest_first() {
+        let mut s = ImageStore::default();
+        let n = MAX_IMAGES as u32 + 1;
+        for i in 1..=n {
+            s.transmit(i, 32, 1, 1, false, &[i as u8, 0, 0, 255]);
+        }
+        assert!(s.get(1).is_none(), "the oldest image is evicted");
+        assert!(s.get(n).is_some(), "the newest image is kept");
+    }
 }

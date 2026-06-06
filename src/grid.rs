@@ -1228,6 +1228,34 @@ mod tests {
         assert_eq!(g2.lines[0][0].cluster, 0);
     }
 
+    // a variation selector (VS16) folds into the base cell's cluster like a mark
+    #[test]
+    fn variation_selector_folds_into_cluster() {
+        let mut g = Grid::new(2, 8);
+        g.put_char('#');
+        g.put_char('\u{FE0F}'); // VS16 (emoji presentation)
+        assert_eq!(g.lines[0][0].c, '#');
+        assert_eq!(g.cluster_str(g.lines[0][0].cluster), "#\u{FE0F}");
+        assert_eq!(g.cursor.col, 1); // did not advance into a new cell
+    }
+
+    // interning is capped: past 16384 distinct clusters a cell falls back to its
+    // base char (cluster 0), and the O(1) index agrees with the table
+    #[test]
+    fn intern_cluster_caps_and_indexes() {
+        let mut g = Grid::new(2, 8);
+        // distinct clusters get distinct rising ids, and a repeat returns the same
+        let a = g.intern_cluster("a\u{0301}");
+        let b = g.intern_cluster("b\u{0301}");
+        assert_ne!(a, b);
+        assert_eq!(a, g.intern_cluster("a\u{0301}")); // index hit, same id
+        // fill to the cap; further distinct clusters fall back to 0
+        for i in 0..16384u32 {
+            g.intern_cluster(&format!("z{i}"));
+        }
+        assert_eq!(g.intern_cluster("definitely-new-after-cap"), 0);
+    }
+
     #[test]
     fn wide_char_writes_continuation_and_advances_two() {
         let mut g = Grid::new(2, 6);

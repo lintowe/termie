@@ -332,3 +332,21 @@ fn fill_ansi(base16: [Rgb; 16]) -> [Rgb; 256] {
     }
     ansi
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bold_bright_promotes_indexed_0_7_only_when_enabled() {
+        // bold + enabled: the 8 base ansi colors promote to their bright pair (+8)
+        assert_eq!(Palette::bold_bright(Color::Indexed(1), true, true), Color::Indexed(9));
+        assert_eq!(Palette::bold_bright(Color::Indexed(7), true, true), Color::Indexed(15));
+        // already-bright (>=8) is left alone
+        assert_eq!(Palette::bold_bright(Color::Indexed(9), true, true), Color::Indexed(9));
+        // not bold, disabled, or non-indexed: unchanged
+        assert_eq!(Palette::bold_bright(Color::Indexed(1), false, true), Color::Indexed(1));
+        assert_eq!(Palette::bold_bright(Color::Indexed(1), true, false), Color::Indexed(1));
+        assert_eq!(Palette::bold_bright(Color::Default, true, true), Color::Default);
+    }
+}
