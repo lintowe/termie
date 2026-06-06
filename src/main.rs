@@ -1502,6 +1502,12 @@ struct PaneWindow {
     // this window's focused-pane git branch + the cwd it was computed for
     git: Option<String>,
     last_git_cwd: Option<String>,
+    // last pointer position within this window (mouse events carry no window id)
+    cursor: PhysicalPosition<f64>,
+    // modal overlays carrying this window's own tab index, so a confirm/rename
+    // raised here can only be resolved here (never targets another window's tab)
+    confirm: Option<ConfirmState>,
+    rename: Option<RenameState>,
 }
 
 struct App {
@@ -1526,15 +1532,10 @@ struct App {
     click_seq: u32,
     palette: Option<PaletteState>,
     find: Option<FindState>,
-    /// a modal confirm prompt (e.g. a risky paste), when open
-    confirm: Option<ConfirmState>,
-    /// the tab-rename text field, when open
-    rename: Option<RenameState>,
     /// accesskit adapter for the main window (screen-reader tree); None until boot
     a11y: Option<accesskit_winit::Adapter>,
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
-    cursor: PhysicalPosition<f64>,
     pressed: Option<Hot>,
     last_title: String,
     config: Config,
@@ -1635,6 +1636,9 @@ impl App {
                 pane_menu: None,
                 git: None,
                 last_git_cwd: None,
+                cursor: PhysicalPosition::new(0.0, 0.0),
+                confirm: None,
+                rename: None,
             },
             satellites: Vec::new(),
             cur_sat: None,
@@ -1649,11 +1653,8 @@ impl App {
             click_seq: 0,
             palette: None,
             find: None,
-            confirm: None,
-            rename: None,
             a11y: None,
             market: None,
-            cursor: PhysicalPosition::new(0.0, 0.0),
             pressed: None,
             last_title: String::new(),
             config: Config {
@@ -2306,7 +2307,7 @@ impl App {
         let multiline = normalized.trim_end_matches('\r').contains('\r');
         if !bracketed && multiline {
             let lines = normalized.split('\r').filter(|l| !l.is_empty()).count();
-            self.confirm = Some(ConfirmState {
+            self.pw.confirm = Some(ConfirmState {
                 prompt: format!("paste {lines} lines into a program with no paste protection?"),
                 hint: "enter: paste \u{b7} esc: cancel".to_string(),
                 action: ConfirmAction::PasteBytes { pane: id, bytes },
@@ -2391,11 +2392,11 @@ impl App {
             r.set_pane_menu(pane_menu_view);
             r.set_find(find_view);
             r.set_market(market_view);
-            r.set_confirm(self.confirm.as_ref().map(|c| render::ConfirmView {
+            r.set_confirm(self.pw.confirm.as_ref().map(|c| render::ConfirmView {
                 prompt: c.prompt.clone(),
                 hint: c.hint.clone(),
             }));
-            r.set_rename(self.rename.as_ref().map(|rs| render::RenameView { buf: rs.buf.clone() }));
+            r.set_rename(self.pw.rename.as_ref().map(|rs| render::RenameView { buf: rs.buf.clone() }));
             r.set_settings(render::SettingsView {
                 scrollback: config.scrollback,
                 copy_on_select: config.copy_on_select,
@@ -2874,7 +2875,7 @@ impl App {
             PaletteAction::RenameTab => {
                 if let Some(tab) = self.pw.tabs.get(self.pw.active_tab) {
                     let buf = tab.title.clone().unwrap_or_default();
-                    self.rename = Some(RenameState { tab: self.pw.active_tab, buf });
+                    self.pw.rename = Some(RenameState { tab: self.pw.active_tab, buf });
                     self.redraw();
                 }
             }
@@ -3124,7 +3125,7 @@ impl App {
             .map(pane_count)
             .unwrap_or(0);
         if panes > 1 {
-            self.confirm = Some(ConfirmState {
+            self.pw.confirm = Some(ConfirmState {
                 prompt: format!("close this tab? it has {panes} panes"),
                 hint: "enter: close \u{b7} esc: cancel".to_string(),
                 action: ConfirmAction::CloseTab { tab: idx },
@@ -3690,6 +3691,9 @@ impl App {
             pane_menu: None,
             git: None,
             last_git_cwd: None,
+            cursor: PhysicalPosition::new(0.0, 0.0),
+            confirm: None,
+            rename: None,
         });
         // relayout + paint the new satellite via the swap-into-pw technique, then
         // relayout + repaint the main window (which just lost a pane)
@@ -3710,11 +3714,14 @@ impl App {
         if idx >= self.satellites.len() {
             return;
         }
+        // save + restore cur_sat so a pop-out triggered from inside a torn-off
+        // window (already swapped in) leaves cur_sat consistent on return
+        let prev = self.cur_sat;
         self.cur_sat = Some(idx);
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
         f(self);
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
-        self.cur_sat = None;
+        self.cur_sat = prev;
     }
 
     /// the main window's PaneWindow, even while a satellite is swapped into pw —
@@ -3877,7 +3884,7 @@ impl App {
     /// report a mouse event to the pane under the cursor if it has mouse mode on;
     /// returns true if forwarded (caller should skip local selection/scroll)
     fn mouse_report(&mut self, btn: u8, pressed: bool, motion: bool) -> bool {
-        let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
         let Some(id) = self.pane_at(cx, cy) else {
             return false;
         };
@@ -3887,7 +3894,7 @@ impl App {
     /// report a mouse event to a specific pane (coords clamped to its rect);
     /// used to keep a drag locked to the pane that received the press
     fn report_to_pane(&mut self, id: usize, btn: u8, pressed: bool, motion: bool) -> bool {
-        let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
         let Some(rect) = self.pw.layout_cache.iter().find(|(i, _)| *i == id).map(|(_, r)| *r) else {
             return false;
         };
@@ -3914,7 +3921,7 @@ impl App {
 
     /// does the pane under the cursor want motion events right now?
     fn pane_wants_motion(&self) -> bool {
-        let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
         let Some(id) = self.pane_at(cx, cy) else {
             return false;
         };
@@ -3939,7 +3946,7 @@ impl App {
     /// motion, divider drag. operates on self.pw so the swap reuses it for any
     /// window
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
-        self.cursor = position;
+        self.pw.cursor = position;
         let (px, py) = (position.x as f32, position.y as f32);
         // while the pane menu is open, only track which item is hovered
         if self.pw.pane_menu.is_some() {
@@ -4037,7 +4044,7 @@ impl App {
     /// wheel: settings-panel scroll, mouse-report wheel buttons, or local scrollback
     fn on_mouse_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
         use winit::event::MouseScrollDelta;
-        let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
         // the open settings panel grabs the wheel when hovered
         if self.pw.settings_open {
             let over = self.pw.renderer.as_ref().map(|r| r.in_settings_panel(cx, cy)).unwrap_or(false);
@@ -4085,7 +4092,7 @@ impl App {
                 // right-click on a pane opens the pane context menu (split / close
                 // / paste) at the cursor; focus the pane under it first so the
                 // actions target it
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
                 let on_content =
                     matches!(self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy)), Some(Hit::Content));
                 if on_content {
@@ -4095,7 +4102,7 @@ impl App {
                 }
             }
             MouseButton::Middle if state == ElementState::Pressed => {
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
                 if let Some(Hit::Button(Hot::Tab(i) | Hot::TabClose(i))) =
                     self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy))
                 {
@@ -4103,7 +4110,7 @@ impl App {
                 }
             }
             MouseButton::Left => {
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
                 let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
                 // a left-press while the pane menu is open runs the clicked item
                 // (or dismisses it when the click lands elsewhere)
@@ -4408,14 +4415,14 @@ impl App {
         // a modal confirm prompt captures every key while open: enter runs the
         // held action, esc cancels, anything else is swallowed (no accidental
         // dismissal and no leakage to the pane underneath)
-        if self.confirm.is_some() {
+        if self.pw.confirm.is_some() {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
-                    if let Some(c) = self.confirm.take() {
+                    if let Some(c) = self.pw.confirm.take() {
                         self.run_confirm(c.action, event_loop);
                     }
                 }
-                Key::Named(NamedKey::Escape) => self.confirm = None,
+                Key::Named(NamedKey::Escape) => self.pw.confirm = None,
                 _ => {}
             }
             self.redraw();
@@ -4423,10 +4430,10 @@ impl App {
         }
         // tab rename text field: enter commits (an empty name clears back to the
         // cwd label), esc cancels, the rest edits the buffer
-        if self.rename.is_some() {
+        if self.pw.rename.is_some() {
             match &event.logical_key {
                 Key::Named(NamedKey::Enter) => {
-                    if let Some(rs) = self.rename.take() {
+                    if let Some(rs) = self.pw.rename.take() {
                         let name = rs.buf.trim().to_string();
                         if let Some(tab) = self.pw.tabs.get_mut(rs.tab) {
                             tab.title = (!name.is_empty()).then_some(name);
@@ -4434,9 +4441,9 @@ impl App {
                         self.sync_tabs();
                     }
                 }
-                Key::Named(NamedKey::Escape) => self.rename = None,
+                Key::Named(NamedKey::Escape) => self.pw.rename = None,
                 Key::Named(NamedKey::Backspace) => {
-                    if let Some(rs) = self.rename.as_mut() {
+                    if let Some(rs) = self.pw.rename.as_mut() {
                         rs.buf.pop();
                     }
                 }
@@ -4447,7 +4454,7 @@ impl App {
                         && !t.chars().any(|c| c.is_control())
                     {
                         let t = t.to_string();
-                        if let Some(rs) = self.rename.as_mut() {
+                        if let Some(rs) = self.pw.rename.as_mut() {
                             rs.buf.push_str(&t);
                         }
                     }
