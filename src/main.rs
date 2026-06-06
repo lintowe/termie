@@ -1061,8 +1061,10 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
         }
         b'd' => {
             // bare a=d (no i=) means delete-all: the d= sub-target key isn't
-            // parsed, so cmd.id stays 0 and an id-scoped removal would be a no-op
+            // parsed, so cmd.id stays 0 and an id-scoped removal would be a no-op.
+            // also free the decoded pixels (delete-all means images + placements)
             if cmd.id == 0 {
+                term.images.clear();
                 term.grid.clear_placements();
             } else {
                 term.images.delete(cmd.id);
@@ -2485,10 +2487,15 @@ impl App {
         let content = r.content_rect();
         let (_, _, pool_cols, pool_rows) = r.pane_metrics(content);
         // keep ready pool shells sized to a full content pane; resizing a shell
-        // mid-PSReadLine-startup wedges it, so only touch ready ones
-        for sp in &mut self.pool {
-            if sp.ready && (sp.term.grid.cols != pool_cols || sp.term.grid.rows != pool_rows) {
-                sp.resize(pool_rows, pool_cols);
+        // mid-PSReadLine-startup wedges it, so only touch ready ones. only the
+        // MAIN window draws from the shared pool, so don't resize it to a
+        // torn-off window's size while a satellite is swapped into self.pw
+        // (that would ping-pong the pool and lose the warm-open size match)
+        if self.cur_sat.is_none() {
+            for sp in &mut self.pool {
+                if sp.ready && (sp.term.grid.cols != pool_cols || sp.term.grid.rows != pool_rows) {
+                    sp.resize(pool_rows, pool_cols);
+                }
             }
         }
         for (ti, tab) in self.pw.tabs.iter_mut().enumerate() {

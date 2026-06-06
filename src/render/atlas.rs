@@ -72,7 +72,11 @@ pub struct GlyphAtlas {
     system_loaded: bool,
 
     cache: HashMap<GlyphKey, Option<AtlasGlyph>>,
-    cluster_cache: HashMap<(String, bool, bool), Option<AtlasGlyph>>,
+    /// composited grapheme-cluster glyphs, keyed by a string whose first char
+    /// encodes bold/italic so the lookup borrows `&str` (no per-hit allocation)
+    cluster_cache: HashMap<String, Option<AtlasGlyph>>,
+    /// reused scratch for the cluster lookup key (style prefix + cluster text)
+    cluster_key: String,
     /// kitty images packed into the color atlas, keyed by global image key
     image_cache: HashMap<u64, Option<AtlasGlyph>>,
 }
@@ -139,6 +143,7 @@ impl GlyphAtlas {
             system_loaded: false,
             cache: HashMap::new(),
             cluster_cache: HashMap::new(),
+            cluster_key: String::new(),
             image_cache: HashMap::new(),
         };
         atlas.data = vec![0u8; (atlas.dim * atlas.dim) as usize];
@@ -414,24 +419,33 @@ impl GlyphAtlas {
     /// combining marks). returns None for color/emoji clusters so the caller
     /// falls back to drawing the base char from the per-char path
     pub fn get_cluster(&mut self, text: &str, bold: bool, italic: bool) -> Option<AtlasGlyph> {
-        if let Some(g) = self.cluster_cache.get(&(text.to_string(), bold, italic)) {
+        // build the lookup key in a reused buffer so a cache hit allocates
+        // nothing: a leading char folds in bold/italic, then the cluster text.
+        // String: Borrow<str> lets get() probe by &str without an owned key
+        self.cluster_key.clear();
+        self.cluster_key.push((b'0' + (bold as u8) + ((italic as u8) << 1)) as char);
+        self.cluster_key.push_str(text);
+        if let Some(g) = self.cluster_cache.get(self.cluster_key.as_str()) {
             return *g;
         }
-        let key = (text.to_string(), bold, italic);
         match self.rasterize_cluster(text, bold, italic) {
             RasterOutcome::Glyph(g) => {
+                let key = self.cluster_key.clone();
                 self.cluster_cache.insert(key, Some(g));
                 Some(g)
             }
             RasterOutcome::Empty => {
+                let key = self.cluster_key.clone();
                 self.cluster_cache.insert(key, None);
                 None
             }
             RasterOutcome::NoSpace => {
                 const MAX_DIM: u32 = 2048;
                 self.repack_at(MAX_DIM);
+                // repack cleared cluster_cache but left cluster_key intact
                 match self.rasterize_cluster(text, bold, italic) {
                     RasterOutcome::Glyph(g) => {
+                        let key = self.cluster_key.clone();
                         self.cluster_cache.insert(key, Some(g));
                         Some(g)
                     }

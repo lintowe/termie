@@ -2494,21 +2494,31 @@ impl Renderer {
         // kitty image placements: each visible image drawn as a color-atlas quad
         // on top of the cells it overlaps, anchored to its absolute line so it
         // scrolls with the text
+        let content_h = grid.rows as f32 * cell_h;
         for p in grid.placements() {
-            let Some(srow) = grid.screen_row(p.abs_line) else {
-                continue;
-            };
             let Some(img) = term.images.get(p.image_id) else {
                 continue;
             };
             let Some(g) = atlas.get_image(img.key, &img.rgba, img.width, img.height) else {
                 continue;
             };
+            // crop the quad to the pane's visible rows so an image taller than the
+            // remaining space doesn't bleed into a sibling pane or the status bar,
+            // and a placement scrolled partly above the top shows its lower rows
+            let top_y = grid.screen_row_signed(p.abs_line) as f32 * cell_h;
+            let vis_top = top_y.max(0.0);
+            let vis_bot = (top_y + g.height).min(content_h);
+            if vis_bot <= vis_top {
+                continue;
+            }
+            let uspan = g.uv_max[1] - g.uv_min[1];
+            let umin = g.uv_min[1] + uspan * (vis_top - top_y) / g.height;
+            let umax = g.uv_min[1] + uspan * (vis_bot - top_y) / g.height;
             out.push(Instance {
-                pos: [ox + p.col as f32 * cell_w, oy + srow as f32 * cell_h],
-                size: [g.width, g.height],
-                uv_min: g.uv_min,
-                uv_max: g.uv_max,
+                pos: [ox + p.col as f32 * cell_w, oy + vis_top],
+                size: [g.width, vis_bot - vis_top],
+                uv_min: [g.uv_min[0], umin],
+                uv_max: [g.uv_max[0], umax],
                 color: [0.0, 0.0, 0.0, 1.0],
                 kind: 3,
                 _pad: [0; 3],

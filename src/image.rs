@@ -120,6 +120,15 @@ impl ImageStore {
         self.order.retain(|&i| i != id);
         self.pending.remove(&id);
     }
+
+    /// drop every decoded image + any in-flight chunked transfer (kitty bare a=d
+    /// delete-all), reclaiming the decoded pixel memory
+    pub fn clear(&mut self) {
+        self.images.clear();
+        self.order.clear();
+        self.pending.clear();
+        self.anon = None;
+    }
 }
 
 /// decode raw RGB/RGBA into RGBA8; None on an unsupported format or short data
@@ -186,5 +195,15 @@ mod tests {
         assert!(s.get(5).is_some());
         s.delete(5);
         assert!(s.get(5).is_none());
+    }
+
+    #[test]
+    fn clear_forgets_every_image() {
+        let mut s = ImageStore::default();
+        s.transmit(1, 32, 1, 1, false, &[1, 1, 1, 1]);
+        s.transmit(2, 32, 1, 1, false, &[2, 2, 2, 2]);
+        assert!(s.get(1).is_some() && s.get(2).is_some());
+        s.clear();
+        assert!(s.get(1).is_none() && s.get(2).is_none());
     }
 }

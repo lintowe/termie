@@ -1106,11 +1106,11 @@ impl Grid {
         &self.placements
     }
 
-    /// the on-screen row (0..rows) for an absolute line if currently visible,
-    /// accounting for the scrollback view offset
-    pub fn screen_row(&self, abs_line: u64) -> Option<usize> {
-        let r = abs_line as i64 - self.total_scrolled as i64 + self.view_offset as i64;
-        (r >= 0 && (r as usize) < self.rows).then_some(r as usize)
+    /// the on-screen row of an absolute line as a signed offset (negative =
+    /// above the viewport top, >= rows = below the bottom). lets the image
+    /// renderer crop a placement that straddles a viewport edge
+    pub fn screen_row_signed(&self, abs_line: u64) -> i64 {
+        abs_line as i64 - self.total_scrolled as i64 + self.view_offset as i64
     }
 }
 
