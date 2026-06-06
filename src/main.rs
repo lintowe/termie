@@ -1087,6 +1087,8 @@ fn kitty_ok(term: &mut Terminal, id: u32) {
         .extend_from_slice(format!("\x1b_Gi={id};OK\x1b\\").as_bytes());
 }
 
+// the spawn parameters are all distinct; a struct would only relocate them
+#[allow(clippy::too_many_arguments)]
 fn build_pane(
     id: usize,
     cols: usize,
