@@ -4255,27 +4255,81 @@ impl ApplicationHandler<UserEvent> for App {
                     && let Some(idx) = self.satellite_with_pane(id)
                 {
                     found = true;
+                    // run the full pump path against the torn-off window: same
+                    // color-query answering, cwd relabel, deferred-resize and bell
+                    // handling the main window gets — just scoped to this window's
+                    // own renderer/palette/tabs via the swap
+                    self.cur_sat = Some(idx);
                     std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    let mut sat_responses: Option<Vec<u8>> = None;
+                    let mut sat_color: Vec<term::ColorReq> = Vec::new();
+                    let mut sat_ready = false;
+                    let mut sat_cwd = false;
+                    let mut sat_rang = false;
                     for tab in self.pw.tabs.iter_mut() {
                         if let Some(root) = tab.root.as_mut()
                             && let Some(p) = find_pane_mut(root, id)
                         {
                             pump_bytes(p, &bytes);
+                            if !p.ready {
+                                p.ready = true;
+                                sat_ready = true;
+                            }
+                            if p.term.cwd_dirty {
+                                p.term.cwd_dirty = false;
+                                sat_cwd = true;
+                            }
                             if !p.term.responses.is_empty() {
-                                let resp = std::mem::take(&mut p.term.responses);
-                                p.pty.write(&resp);
+                                sat_responses = Some(std::mem::take(&mut p.term.responses));
                             }
                             if let Some(text) = p.term.clipboard.take() {
                                 clip = Some(text);
                             }
-                            p.term.bell = false;
+                            if !p.term.color_queries.is_empty() {
+                                sat_color = std::mem::take(&mut p.term.color_queries);
+                            }
+                            if p.term.bell {
+                                p.term.bell = false;
+                                p.flash = Some(Instant::now());
+                                sat_rang = true;
+                            }
                             break;
                         }
+                    }
+                    if !sat_color.is_empty()
+                        && let Some(rend) = self.pw.renderer.as_ref()
+                    {
+                        let pal = rend.palette();
+                        let mut buf = sat_responses.take().unwrap_or_default();
+                        for q in &sat_color {
+                            buf.extend_from_slice(&term::format_color_reply(*q, pal));
+                        }
+                        sat_responses = Some(buf);
+                    }
+                    if let Some(r) = sat_responses {
+                        for tab in self.pw.tabs.iter_mut() {
+                            if let Some(root) = tab.root.as_mut()
+                                && let Some(p) = find_pane_mut(root, id)
+                            {
+                                p.pty.write(&r);
+                                break;
+                            }
+                        }
+                    }
+                    if sat_ready {
+                        self.relayout_all();
+                    }
+                    if sat_cwd {
+                        self.sync_tabs();
                     }
                     if let Some(w) = self.pw.window.as_ref() {
                         w.request_redraw();
                     }
                     std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    self.cur_sat = None;
+                    if sat_rang && !self.plugins.is_empty() {
+                        self.plugins_broadcast(&plugin::HostEvent::Bell { pane: id as u64 });
+                    }
                 }
                 // a pane that just became ready may need its deferred resize
                 if newly_ready {
