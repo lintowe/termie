@@ -1492,6 +1492,9 @@ struct App {
     pw: PaneWindow,
     /// torn-off windows, each a full PaneWindow (keyed by window id at routing)
     satellites: Vec<PaneWindow>,
+    /// while a satellite is swapped into self.pw for handling, the index it came
+    /// from (and where the main window is parked); None means self.pw is the main
+    cur_sat: Option<usize>,
     next_id: usize,
     mods: ModifiersState,
     focused: bool,
@@ -1618,6 +1621,7 @@ impl App {
                 layout_cache: Vec::new(),
             },
             satellites: Vec::new(),
+            cur_sat: None,
             next_id: 0,
             mods: ModifiersState::empty(),
             keybindings: load_keybindings(),
@@ -3132,7 +3136,12 @@ impl App {
             kill_all(root);
         }
         if self.pw.tabs.is_empty() {
-            event_loop.exit();
+            // emptying the MAIN window exits the app; emptying a torn-off window
+            // (cur_sat set) just closes that window — satellite_event removes it
+            // after the swap-back
+            if self.cur_sat.is_none() {
+                event_loop.exit();
+            }
             return;
         }
         if self.pw.active_tab > idx {
@@ -3416,8 +3425,9 @@ impl App {
     fn save_config(&self) {
         use std::fmt::Write as _;
         // never persist a partial file: renderer-owned keys would be dropped and
-        // fall back to defaults on the next load
-        let Some(r) = self.pw.renderer.as_ref() else {
+        // fall back to defaults on the next load. always read the MAIN window's
+        // renderer (a satellite may be swapped into self.pw when this is called)
+        let Some(r) = self.main_pw().renderer.as_ref() else {
             return;
         };
         let Some(path) = config_path() else {
@@ -3451,8 +3461,11 @@ impl App {
 
     /// build a snapshot of the current window's tabs + split tree for persistence
     fn session_snapshot(&self) -> session::SessionFile {
+        // always snapshot the MAIN window (a satellite may be swapped into self.pw
+        // when a quit/close is triggered from a torn-off window)
+        let main = self.main_pw();
         let mut tabs = Vec::new();
-        for tab in &self.pw.tabs {
+        for tab in &main.tabs {
             let Some(root) = tab.root.as_ref() else {
                 continue;
             };
@@ -3461,7 +3474,7 @@ impl App {
             let focused_leaf = leaf_ids.iter().position(|&id| id == tab.focused).unwrap_or(0);
             tabs.push(session::TabSnap { focused_leaf, root, title: tab.title.clone() });
         }
-        session::SessionFile { active_tab: self.pw.active_tab, tabs }
+        session::SessionFile { active_tab: main.active_tab, tabs }
     }
 
     /// mark the layout changed and (re)arm the debounced session write so a burst
@@ -3671,9 +3684,20 @@ impl App {
         if idx >= self.satellites.len() {
             return;
         }
+        self.cur_sat = Some(idx);
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
         f(self);
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+        self.cur_sat = None;
+    }
+
+    /// the main window's PaneWindow, even while a satellite is swapped into pw —
+    /// session/config persistence and the quit/close logic must always target it
+    fn main_pw(&self) -> &PaneWindow {
+        match self.cur_sat {
+            Some(i) => &self.satellites[i],
+            None => &self.pw,
+        }
     }
 
     /// handle a window event for satellite `idx`. close removes just that window;
@@ -3695,10 +3719,16 @@ impl App {
         if idx >= self.satellites.len() {
             return;
         }
+        self.cur_sat = Some(idx);
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
         match event {
             WindowEvent::RedrawRequested => self.paint(),
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(size) => {
+                // reconfigure the satellite's GPU surface before relayout — this is
+                // the only place config.width/height + surface.configure() update
+                if let Some(r) = self.pw.renderer.as_mut() {
+                    r.resize(size.width, size.height);
+                }
                 self.relayout_all();
                 self.paint();
             }
@@ -3740,6 +3770,12 @@ impl App {
             _ => {}
         }
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+        self.cur_sat = None;
+        // a pane-mode close ('x') that emptied this satellite closes its window
+        // (do_close_tab declined to exit the app because cur_sat was set)
+        if self.satellites.get(idx).is_some_and(|s| s.tabs.is_empty()) {
+            self.satellites.remove(idx);
+        }
     }
 
     /// re-attach a loose pane as a new tab (used if a satellite window won't open)
@@ -4316,11 +4352,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.pool.retain(|p| p.id != id);
                 // a torn-off pane whose shell exited — close its satellite window
                 if let Some(idx) = self.satellite_with_pane(id) {
-                    let mut sat = self.satellites.remove(idx);
-                    for tab in sat.tabs.iter_mut() {
-                        if let Some(root) = tab.root.as_mut() {
-                            kill_all(root);
-                        }
+                    // close only the exited pane (collapse the split / close its
+                    // tab), not the whole torn-off window; remove the window only
+                    // when it ends up empty
+                    self.cur_sat = Some(idx);
+                    std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    self.close_focused_pane_by_id(id, event_loop);
+                    std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    self.cur_sat = None;
+                    if self.satellites.get(idx).is_some_and(|s| s.tabs.is_empty()) {
+                        self.satellites.remove(idx);
                     }
                     return;
                 }
@@ -4436,6 +4477,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(f) => {
                 self.focused = f;
+                // losing focus mid-composition must clear the IME flag, or a
+                // missing Disabled/Commit (a real winit-on-Windows gap) would
+                // leave every keystroke swallowed with no in-app recovery
+                if !f {
+                    self.ime_composing = false;
+                }
                 // a held drag can't survive losing focus: release it so the TUI
                 // doesn't see a stuck button
                 if !f
@@ -4908,9 +4955,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             },
             WindowEvent::KeyboardInput { event, .. } => {
-                // while composing, the IME owns keystrokes; ignore raw keys so a
-                // committed glyph isn't also typed as its latin keys
-                if self.ime_composing {
+                // while composing, the IME owns text input; swallow only key
+                // presses (releases must pass so kitty release-reporting + held
+                // modifiers don't get stuck)
+                if self.ime_composing && event.state == ElementState::Pressed {
                     return;
                 }
                 if self.handle_shortcut(&event, event_loop) {
