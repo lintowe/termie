@@ -1667,6 +1667,14 @@ impl Renderer {
         self.palette_view = p;
     }
 
+    /// mark the overlay as already shown so the next build skips the bloom-in and
+    /// renders it at full opacity — used by the headless capture harness so an
+    /// overlay scene isn't caught mid-fade
+    #[cfg(debug_assertions)]
+    pub fn settle_overlay(&mut self) {
+        self.overlay_shown = true;
+    }
+
     pub fn set_pane_menu(&mut self, m: Option<PaneMenuView>) {
         self.pane_menu_view = m;
     }
@@ -3424,7 +3432,10 @@ impl Renderer {
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let row_h = chrome_h + 10.0 * s;
         let pad = 18.0 * s;
-        let bw = (520.0 * s).min(w - 80.0 * s);
+        // size the box to its content (snug, centered) instead of a fixed wide
+        // panel that strands a short prompt in the corner
+        let cw = self.text_w(FontId::Chrome, &prompt, track).max(self.text_w(FontId::Chrome, &hint, track));
+        let bw = (cw + pad * 2.0).clamp(260.0 * s, (520.0 * s).min(w - 80.0 * s));
         let bh = (row_h * 2.0 + pad * 2.0).round();
         let bx = ((w - bw) / 2.0).round();
         let by = ((h - bh) / 2.0).round().max(self.title_bar_h + 12.0 * s);
@@ -3457,7 +3468,10 @@ impl Renderer {
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let row_h = chrome_h + 10.0 * s;
         let pad = 18.0 * s;
-        let bw = (520.0 * s).min(w - 80.0 * s);
+        // content-sized box, matching build_confirm, so a short name isn't lost in
+        // a wide panel (grows with the typed name up to the cap)
+        let cw = self.text_w(FontId::Chrome, &label, track).max(self.text_w(FontId::Chrome, &hint, track));
+        let bw = (cw + pad * 2.0).clamp(260.0 * s, (520.0 * s).min(w - 80.0 * s));
         let bh = (row_h * 2.0 + pad * 2.0).round();
         let bx = ((w - bw) / 2.0).round();
         let by = ((h - bh) / 2.0).round().max(self.title_bar_h + 12.0 * s);

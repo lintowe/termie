@@ -6,7 +6,7 @@
 
 use vte::Parser;
 
-use crate::render::{self, Hot, PaneMenuView, PaneView};
+use crate::render::{self, ConfirmView, FindView, Hot, PaletteView, PaneMenuView, PaneView, RenameView};
 use crate::term::Terminal;
 
 /// returns true if `--uiview` was requested and handled (caller should exit)
@@ -52,6 +52,36 @@ pub fn maybe_run() -> bool {
                 ("relay".into(), false),
                 ("css-loader".into(), true),
             ]);
+        }
+        "palette" => {
+            r.set_palette(Some(PaletteView {
+                query: "spl".into(),
+                items: vec![
+                    "split vertical".into(),
+                    "split horizontal".into(),
+                    "toggle pane mode".into(),
+                    "close pane".into(),
+                    "new tab".into(),
+                    "toggle broadcast".into(),
+                ],
+                selected: 1,
+            }));
+            r.settle_overlay();
+        }
+        "find" => {
+            r.set_find(Some(FindView { query: "parser".into(), count: 3, current: 1, matches: vec![] }));
+            r.settle_overlay();
+        }
+        "confirm" => {
+            r.set_confirm(Some(ConfirmView {
+                prompt: "close tab with 2 panes?".into(),
+                hint: "enter confirm   esc cancel".into(),
+            }));
+            r.settle_overlay();
+        }
+        "rename" => {
+            r.set_rename(Some(RenameView { buf: "backend".into() }));
+            r.settle_overlay();
         }
         _ => {}
     }
