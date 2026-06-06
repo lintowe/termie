@@ -20,57 +20,80 @@ enum State {
 pub struct ApcScanner {
     state: State,
     apc: Vec<u8>,
+    // reused across feeds so the hot pty path never allocates per chunk
+    pass: Vec<u8>,
+    kitty: Vec<Vec<u8>>,
 }
 
 impl ApcScanner {
     /// split a chunk into (bytes for vte, completed kitty payloads). a kitty
     /// payload is the bytes between `ESC _` and `ESC \`, including the leading
-    /// `G`. spans split across calls are buffered until complete
-    pub fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
-        let mut pass = Vec::with_capacity(chunk.len());
-        let mut kitty = Vec::new();
-        for &b in chunk {
+    /// `G`. spans split across calls are buffered until complete. the returned
+    /// slices borrow reused internal buffers — consume them before the next feed.
+    /// runs between escapes are bulk-copied, so a no-graphics chunk costs one
+    /// scan for ESC plus one extend (no per-byte work, no allocation)
+    pub fn feed(&mut self, chunk: &[u8]) -> (&[u8], &[Vec<u8>]) {
+        self.pass.clear();
+        self.kitty.clear();
+        let mut i = 0;
+        while i < chunk.len() {
             match self.state {
-                State::Normal => {
-                    if b == 0x1b {
+                State::Normal => match chunk[i..].iter().position(|&b| b == 0x1b) {
+                    Some(off) => {
+                        self.pass.extend_from_slice(&chunk[i..i + off]);
                         self.state = State::Esc;
-                    } else {
-                        pass.push(b);
+                        i += off + 1;
                     }
-                }
+                    None => {
+                        self.pass.extend_from_slice(&chunk[i..]);
+                        break;
+                    }
+                },
                 State::Esc => {
+                    let b = chunk[i];
+                    i += 1;
                     if b == 0x5f {
                         // ESC _ : APC start
                         self.state = State::Apc;
                         self.apc.clear();
                     } else {
                         // not APC: replay the ESC and resume (ESC ESC stays armed)
-                        pass.push(0x1b);
+                        self.pass.push(0x1b);
                         if b == 0x1b {
                             self.state = State::Esc;
                         } else {
-                            pass.push(b);
+                            self.pass.push(b);
                             self.state = State::Normal;
                         }
                     }
                 }
-                State::Apc => {
-                    if b == 0x1b {
+                State::Apc => match chunk[i..].iter().position(|&b| b == 0x1b) {
+                    Some(off) => {
+                        self.apc.extend_from_slice(&chunk[i..i + off]);
                         self.state = State::ApcEsc;
-                    } else {
-                        self.apc.push(b);
+                        i += off + 1;
                         if self.apc.len() > MAX_APC {
                             self.apc.clear();
                             self.state = State::Normal;
                         }
                     }
-                }
+                    None => {
+                        self.apc.extend_from_slice(&chunk[i..]);
+                        if self.apc.len() > MAX_APC {
+                            self.apc.clear();
+                            self.state = State::Normal;
+                        }
+                        break;
+                    }
+                },
                 State::ApcEsc => {
+                    let b = chunk[i];
+                    i += 1;
                     if b == 0x5c {
                         // ESC \ : string terminator — emit if this is kitty (G…)
                         let payload = std::mem::take(&mut self.apc);
                         if payload.first() == Some(&b'G') {
-                            kitty.push(payload);
+                            self.kitty.push(payload);
                         }
                         self.state = State::Normal;
                     } else if b == 0x1b {
@@ -84,7 +107,7 @@ impl ApcScanner {
                 }
             }
         }
-        (pass, kitty)
+        (&self.pass, &self.kitty)
     }
 }
 

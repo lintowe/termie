@@ -1024,10 +1024,12 @@ fn node_to_snap(node: &Node, leaf_ids: &mut Vec<usize>) -> session::NodeSnap {
 /// callback) and the remaining bytes flow to the terminal unchanged
 fn pump_bytes(pane: &mut Pane, bytes: &[u8]) {
     let (pass, imgs) = pane.apc.feed(bytes);
-    pane.parser.advance(&mut pane.term, &pass);
-    for raw in &imgs {
-        if let Some(cmd) = apc::KittyCmd::parse(raw) {
-            handle_kitty(&mut pane.term, &cmd);
+    pane.parser.advance(&mut pane.term, pass);
+    // images are rare; only walk the list when the scanner actually split one out
+    if !imgs.is_empty() {
+        let cmds: Vec<apc::KittyCmd> = imgs.iter().filter_map(|raw| apc::KittyCmd::parse(raw)).collect();
+        for cmd in &cmds {
+            handle_kitty(&mut pane.term, cmd);
         }
     }
 }
