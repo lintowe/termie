@@ -176,6 +176,11 @@ fn blank_line(cols: usize) -> Line {
 /// (East-Asian wide / fullwidth / emoji). a compact built-in table (no deps)
 fn char_width(c: char) -> usize {
     let cp = c as u32;
+    // fast path: printable ASCII is width 1 and dominates shell output — return
+    // before the ~38 combining/wide range checks below
+    if (0x20..0x7f).contains(&cp) {
+        return 1;
+    }
     if cp == 0 {
         return 0;
     }
