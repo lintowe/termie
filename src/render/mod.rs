@@ -2754,8 +2754,12 @@ impl Renderer {
             }
             Self::push_rect(&mut out, tx, hair, hair, self.title_bar_h - hair * 2.0, RULE, 1.0);
 
-            // truncate the label to the space before the close icon
-            let avail = (close.0 - (tx + 10.0 * self.scale)).max(0.0);
+            // the close icon shows only on the active or hovered tab, so an idle
+            // tab gives its whole width to the label — legible names instead of the
+            // one-char truncation a busy title bar / hidpi otherwise forces
+            let show_close = *active || *hov;
+            let label_end = if show_close { close.0 } else { tx + tw - 8.0 * self.scale };
+            let avail = (label_end - (tx + 10.0 * self.scale)).max(0.0);
             let maxc = (avail / cw_c).floor().max(0.0) as usize;
             // borrow the already-owned snapshot label; only allocate when the
             // label actually needs truncating (the common case fits as-is)
@@ -2770,14 +2774,17 @@ impl Renderer {
             let _ = Self::draw_text(
                 &mut self.atlas, &mut out, FontId::Chrome, tx + 10.0 * self.scale, text_top, lab, lc, 1.0, track,
             );
-            // close icon (nerd-font times), easing brighter on hover
-            let (cx, cy, ccw, _cch) = *close;
-            let cbase = if *active { MUTE } else { RULE_2 };
-            let cc = if *close_hov { cbase.lerp(PAPER, he) } else { cbase };
-            let cgx = (cx + (ccw - cw_c) / 2.0).round();
-            let _ = Self::draw_text(
-                &mut self.atlas, &mut out, FontId::Chrome, cgx, cy.round(), "\u{f00d}", cc, 1.0, track,
-            );
+            // close icon (nerd-font times), easing brighter on hover; only on the
+            // active or hovered tab so idle tabs keep their label space
+            if show_close {
+                let (cx, cy, ccw, _cch) = *close;
+                let cbase = if *active { MUTE } else { RULE_2 };
+                let cc = if *close_hov { cbase.lerp(PAPER, he) } else { cbase };
+                let cgx = (cx + (ccw - cw_c) / 2.0).round();
+                let _ = Self::draw_text(
+                    &mut self.atlas, &mut out, FontId::Chrome, cgx, cy.round(), "\u{f00d}", cc, 1.0, track,
+                );
+            }
         }
 
         // active-tab accent rail: slides from the old tab to the new on a switch,
