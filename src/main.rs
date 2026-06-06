@@ -1870,6 +1870,24 @@ impl App {
         }
     }
 
+    /// request a redraw on every torn-off window whose renderer is mid-animation
+    /// (reveal / hover / tab-slide / overlay bloom). about_to_wait only drives the
+    /// main window, so without this a satellite animation would stall until the
+    /// next incidental event. returns true if any satellite is still animating, so
+    /// the caller keeps the ~60fps tick alive until they settle
+    fn pump_satellite_redraws(&self) -> bool {
+        let mut any = false;
+        for s in &self.satellites {
+            if let (Some(w), Some(r)) = (s.window.as_ref(), s.renderer.as_ref())
+                && (r.startup_fading() || r.hover_animating() || r.tab_animating() || r.overlay_animating())
+            {
+                w.request_redraw();
+                any = true;
+            }
+        }
+        any
+    }
+
     /// is there a visible, blinking cursor on the focused pane that needs the
     /// periodic blink tick? (false when blink is off, cursor hidden, or scrolled)
     fn blinking_cursor_on_screen(&self) -> bool {
@@ -3708,6 +3726,11 @@ impl App {
         // relayout + repaint the main window (which just lost a pane)
         let idx = self.satellites.len() - 1;
         self.with_window(idx, |app| {
+            // arm the quiet-settle reveal at the moment of first paint, mirroring
+            // the main window's boot so a torn-off window eases in too
+            if let Some(r) = app.pw.renderer.as_mut() {
+                r.begin_reveal();
+            }
             app.relayout_all();
             app.paint();
         });
@@ -5262,6 +5285,12 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
+        // keep torn-off windows' animations (reveal/hover/tab-slide/overlay)
+        // ticking — about_to_wait only drives self.pw, so a satellite animation
+        // would otherwise stall until the next incidental event. their redraws
+        // are requested here; the deadline is folded in at the idle block below
+        // so the soonest of (main, satellite) wins even when the main is idle
+        let sat_anim = !self.satellites.is_empty() && self.pump_satellite_redraws();
         // startup reveal fade: drive it at ~60fps until it settles
         if self.pw.renderer.as_ref().map(|r| r.startup_fading()).unwrap_or(false) {
             self.redraw();
@@ -5322,17 +5351,14 @@ impl ApplicationHandler<UserEvent> for App {
         // only tick (~2 redraws/sec) when a blinking cursor is actually on screen;
         // otherwise stay event-driven so idle panes cost nothing. content changes
         // already request redraws from their own events (pty output, keys, resize)
-        if self.any_flash() {
+        // the main window's idle wakeup need (ms), or None when it can fully sleep
+        let main_ms: Option<u64> = if self.any_flash() {
             // fade the bell flash out quickly
             self.redraw();
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(60),
-            ));
+            Some(60)
         } else if self.pw.focused && self.blinking_cursor_on_screen() {
             self.redraw();
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(530),
-            ));
+            Some(530)
         } else if self.pw.focused {
             // keep the status-bar clock current without busy-redrawing: wake
             // coarsely and only repaint when the displayed minute actually rolls
@@ -5345,11 +5371,17 @@ impl ApplicationHandler<UserEvent> for App {
             if stale {
                 self.redraw();
             }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_secs(5),
-            ));
+            Some(5000)
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            None
+        };
+        // a torn-off window mid-animation needs ~60fps wakeups; take the soonest
+        // of the main window's need and the satellite tick so neither is starved
+        let sat_ms = sat_anim.then_some(16u64);
+        match main_ms.into_iter().chain(sat_ms).min() {
+            Some(ms) => event_loop
+                .set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(ms))),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }
