@@ -202,25 +202,49 @@ fn atlas_benches(filter: &Option<String>) {
     });
 }
 
+/// a Terminal with EVERY cell filled (worst-case render = rows*cols glyphs, like
+/// a full-screen TUI), so the draw_grid benches are apples-to-apples and reflect
+/// the heaviest real frame. mode 0 = plain, 1 = per-cell colored, 2 = combining
+fn filled_terminal(rows: usize, cols: usize, mode: u8) -> Terminal {
+    let mut buf = Vec::new();
+    for r in 0..rows {
+        for c in 0..cols {
+            match mode {
+                1 => {
+                    if c % 8 == 0 {
+                        buf.extend_from_slice(format!("\x1b[38;5;{}m", (r + c) % 256).as_bytes());
+                    }
+                    buf.push(b'A' + ((r + c) % 26) as u8);
+                }
+                2 => {
+                    let base = char::from(b'a' + ((r + c) % 26) as u8);
+                    let mut tmp = [0u8; 4];
+                    buf.extend_from_slice(base.encode_utf8(&mut tmp).as_bytes());
+                    buf.extend_from_slice("\u{0301}".as_bytes()); // combining acute folds in
+                }
+                _ => buf.push(b'A' + ((r + c) % 26) as u8),
+            }
+        }
+        // exactly cols chars per row wraps to fill the next row (no blank cells)
+    }
+    let mut t = Terminal::new(rows, cols);
+    vte::Parser::new().advance(&mut t, &buf);
+    t
+}
+
 fn render_benches(filter: &Option<String>) {
     let mut atlas = GlyphAtlas::new(16.0, 13.0, 2.0, None, 1.32);
     atlas.prewarm_ascii();
 
-    let plain = plain_chunk(50 * 200 * 2);
-    let mut t_plain = Terminal::new(50, 200);
-    vte::Parser::new().advance(&mut t_plain, &plain);
+    let t_plain = filled_terminal(50, 200, 0);
     let (d, n) = best_render(&mut atlas, &t_plain, 4000);
     report_render("draw_grid_plain_fullscreen", filter, d, 4000, n);
 
-    let csi = csi_chunk(50 * 200 * 2);
-    let mut t_csi = Terminal::new(50, 200);
-    vte::Parser::new().advance(&mut t_csi, &csi);
+    let t_csi = filled_terminal(50, 200, 1);
     let (d, n) = best_render(&mut atlas, &t_csi, 4000);
     report_render("draw_grid_colored_fullscreen", filter, d, 4000, n);
 
-    let comb = combining_chunk(50 * 200 * 4);
-    let mut t_comb = Terminal::new(50, 200);
-    vte::Parser::new().advance(&mut t_comb, &comb);
+    let t_comb = filled_terminal(50, 200, 2);
     let (d, n) = best_render(&mut atlas, &t_comb, 4000);
     report_render("draw_grid_combining_fullscreen", filter, d, 4000, n);
 }
