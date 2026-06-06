@@ -17,6 +17,8 @@ mod win;
 mod termview;
 #[cfg(debug_assertions)]
 mod uiview;
+#[cfg(feature = "microbench")]
+mod microbench;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -5456,6 +5458,11 @@ fn main() -> Result<()> {
     // dev-only headless chrome capture (full window to PNG)
     #[cfg(debug_assertions)]
     if uiview::maybe_run() {
+        return Ok(());
+    }
+    // private cpu microbenchmarks (feature-gated; absent from the shipped binary)
+    #[cfg(feature = "microbench")]
+    if microbench::maybe_run() {
         return Ok(());
     }
     timing("process start");

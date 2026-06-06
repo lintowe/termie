@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::color::Color;
 
@@ -154,6 +154,10 @@ pub struct Grid {
     /// grapheme clusters; a cell's cluster id indexes here, 0 = none and
     /// clusters[0] is the empty sentinel
     clusters: Vec<String>,
+    /// reverse index (cluster text -> id) so interning is O(1) instead of a
+    /// linear scan of `clusters` — matters for varied non-Latin text where the
+    /// table grows toward its cap
+    cluster_index: HashMap<String, u32>,
     /// kitty graphics placements anchored to absolute lines (scroll with text)
     placements: Vec<Placement>,
 }
@@ -207,6 +211,7 @@ impl Grid {
             scrollback_limit: 10_000,
             links: vec![String::new()],
             clusters: vec![String::new()],
+            cluster_index: HashMap::new(),
             placements: Vec::new(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
@@ -999,8 +1004,8 @@ impl Grid {
     }
 
     fn intern_cluster(&mut self, s: &str) -> u32 {
-        if let Some(i) = self.clusters.iter().position(|c| c == s) {
-            return i as u32;
+        if let Some(&i) = self.cluster_index.get(s) {
+            return i;
         }
         // cap the table so a long session of distinct combining/ZWJ sequences
         // can't grow it without bound; past the cap a cell falls back to its base
@@ -1008,8 +1013,10 @@ impl Grid {
         if self.clusters.len() >= 16384 {
             return 0;
         }
+        let id = self.clusters.len() as u32;
         self.clusters.push(s.to_string());
-        (self.clusters.len() - 1) as u32
+        self.cluster_index.insert(s.to_string(), id);
+        id
     }
 
     /// the grapheme string for a cluster id (empty for 0 or out of range)

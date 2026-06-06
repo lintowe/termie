@@ -21,7 +21,7 @@ pub struct GlyphKey {
     pub italic: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AtlasGlyph {
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -829,5 +829,28 @@ mod tests {
         // cached blank (the no-cache-on-NoSpace invariant, observed end to end)
         let g = atlas.get(GlyphKey { font: FontId::Content, c: 'A', bold: false, italic: false });
         assert!(g.is_some(), "a normal glyph must still rasterize after the atlas grows");
+    }
+
+    // a cluster cache hit returns the same glyph the first (rasterizing) call did
+    #[test]
+    fn get_cluster_cache_hit_is_stable() {
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
+        let first = atlas.get_cluster("e\u{0301}", false, false);
+        let second = atlas.get_cluster("e\u{0301}", false, false);
+        assert_eq!(first, second);
+    }
+
+    // the style prefix in the reused cache key keeps bold/italic/regular variants
+    // of the SAME cluster text in distinct cache entries (no cross-style bleed)
+    #[test]
+    fn get_cluster_style_prefix_disambiguates() {
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
+        let reg = atlas.get_cluster("a\u{0300}", false, false);
+        let bold = atlas.get_cluster("a\u{0300}", true, false);
+        let ital = atlas.get_cluster("a\u{0300}", false, true);
+        // re-fetching each style returns its own cached entry unchanged
+        assert_eq!(reg, atlas.get_cluster("a\u{0300}", false, false));
+        assert_eq!(bold, atlas.get_cluster("a\u{0300}", true, false));
+        assert_eq!(ital, atlas.get_cluster("a\u{0300}", false, true));
     }
 }

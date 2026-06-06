@@ -13,7 +13,7 @@ use winit::window::{ResizeDirection, Window};
 use crate::color::{Color, Palette, Rgb, ThemeId};
 use crate::grid::CursorShape;
 use crate::term::Terminal;
-use atlas::{FontId, GlyphAtlas, GlyphKey};
+pub(crate) use atlas::{FontId, GlyphAtlas, GlyphKey};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -4059,6 +4059,35 @@ fn clip_image_v(top_y: f32, height: f32, content_h: f32) -> Option<(f32, f32, f3
         return None;
     }
     Some((vis_top, vis_bot - vis_top, (vis_top - top_y) / height, (vis_bot - top_y) / height))
+}
+
+#[cfg(feature = "microbench")]
+impl Renderer {
+    /// build the per-frame instance list for a full screen `iters` times with a
+    /// warm atlas; returns (total elapsed, instances in the last build). lets the
+    /// --microbench harness time draw_grid (it + Instance are private to this mod)
+    pub(crate) fn bench_draw_grid(
+        atlas: &mut GlyphAtlas,
+        term: &Terminal,
+        iters: u64,
+    ) -> (std::time::Duration, usize) {
+        let palette = Palette::from_theme(ThemeId::Instrument);
+        let mut out: Vec<Instance> = Vec::new();
+        let run = |atlas: &mut GlyphAtlas, out: &mut Vec<Instance>| {
+            out.clear();
+            Self::draw_grid(
+                atlas, &palette, out, term, 0.0, 0.0, true, true, 2.0, CursorShape::Block, None, None, &[], true,
+            );
+        };
+        for _ in 0..(iters / 8).max(1) {
+            run(atlas, &mut out);
+        }
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            run(atlas, &mut out);
+        }
+        (t0.elapsed(), out.len())
+    }
 }
 
 #[cfg(test)]

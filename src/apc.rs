@@ -217,4 +217,101 @@ mod tests {
         assert_eq!(pass, b"ab");
         assert!(kitty.is_empty()); // not a 'G' payload
     }
+
+    // the bulk-copy rewrite (extend runs between escapes) must be byte-identical
+    // to scanning one byte at a time
+    #[test]
+    fn bulk_copy_matches_byte_at_a_time() {
+        let stream: &[u8] =
+            b"hello\x1b[31mworld\x1b\x1b[0m\x1b_Znope\x1b\\tail\x1b_Ga=T,f=24,s=1,v=1;QUJD\x1b\\done";
+        let mut a = ApcScanner::default();
+        let (pa, ka) = a.feed(stream);
+        let (pass_one, kitty_one) = (pa.to_vec(), ka.to_vec());
+
+        let mut b = ApcScanner::default();
+        let mut pass_bytes = Vec::new();
+        let mut kitty_bytes: Vec<Vec<u8>> = Vec::new();
+        for &byte in stream {
+            let (p, k) = b.feed(&[byte]);
+            pass_bytes.extend_from_slice(p);
+            kitty_bytes.extend(k.iter().cloned());
+        }
+        assert_eq!(pass_one, pass_bytes);
+        assert_eq!(kitty_one, kitty_bytes);
+    }
+
+    // feed() clears but REUSES its buffers — a later feed must not see stale bytes
+    #[test]
+    fn reused_buffers_dont_leak_across_feeds() {
+        let mut s = ApcScanner::default();
+        let (p1, _) = s.feed(b"\x1b_Ga=T;QUJD\x1b\\lots of passthrough text here");
+        assert_eq!(p1.to_vec(), b"lots of passthrough text here");
+        let (p2, k2) = s.feed(b"x");
+        assert_eq!(p2, b"x"); // not "x" appended to the prior pass buffer
+        assert!(k2.is_empty());
+    }
+
+    // the Esc/Apc/ApcEsc state must survive a feed boundary at ANY byte offset
+    #[test]
+    fn apc_split_exactly_at_chunk_boundary() {
+        let seq: &[u8] = b"\x1b_Ga=T,f=24,s=1,v=1;QUJD\x1b\\";
+        for i in 1..seq.len() {
+            let mut s = ApcScanner::default();
+            let (p1, k1) = s.feed(&seq[..i]);
+            let mut pass = p1.to_vec();
+            let mut kitty: Vec<Vec<u8>> = k1.to_vec();
+            let (p2, k2) = s.feed(&seq[i..]);
+            pass.extend_from_slice(p2);
+            kitty.extend(k2.iter().cloned());
+            assert!(pass.is_empty(), "split at {i}: passthrough not empty");
+            assert_eq!(kitty.len(), 1, "split at {i}: expected one payload");
+            let cmd = KittyCmd::parse(&kitty[0]).expect("parse");
+            assert_eq!(cmd.action, b'T');
+            assert_eq!(cmd.payload, b"ABC");
+        }
+    }
+
+    // a doubled ESC outside an APC stays armed (so ESC ESC _ still opens it), and
+    // a literal ESC inside the payload is preserved
+    #[test]
+    fn esc_esc_and_literal_esc_in_payload() {
+        let mut s = ApcScanner::default();
+        let (pass, kitty) = s.feed(b"\x1b\x1b_Ga=T;QUJD\x1b\\");
+        // ESC ESC is not the APC introducer: the first ESC is replayed to vte
+        // (the scanner only intercepts ESC _), the second ESC + _ opens the APC
+        assert_eq!(pass, b"\x1b");
+        assert_eq!(kitty.len(), 1);
+        assert_eq!(&kitty[0][..], b"Ga=T;QUJD");
+
+        let mut s = ApcScanner::default();
+        let (_p, k) = s.feed(b"\x1b_Ga=T;AA\x1bBB\x1b\\");
+        assert_eq!(k.len(), 1);
+        assert_eq!(&k[0][..], b"Ga=T;AA\x1bBB"); // embedded ESC kept
+    }
+
+    // an APC that overruns MAX_APC with no terminator resyncs back to Normal
+    #[test]
+    fn max_apc_overflow_resyncs_to_normal() {
+        let mut s = ApcScanner::default();
+        s.feed(b"\x1b_G"); // open an APC
+        let junk = vec![b'A'; MAX_APC + 1]; // overrun the cap with no ESC \
+        let (_p, k) = s.feed(&junk);
+        assert!(k.is_empty());
+        // resync'd to Normal: the now-orphaned ESC \ (string terminator) just
+        // passes through to vte, and no kitty payload came from the oversized junk
+        let (pass, kitty) = s.feed(b"\x1b\\after");
+        assert_eq!(pass, b"\x1b\\after");
+        assert!(kitty.is_empty());
+    }
+
+    // KittyCmd::parse default-fill + malformed/None branches
+    #[test]
+    fn kittycmd_parse_defaults_and_malformed() {
+        let d = KittyCmd::parse(b"G").expect("bare G");
+        assert_eq!((d.action, d.format, d.width, d.id, d.more, d.quiet), (b't', 32, 0, 0, false, 0));
+        let q = KittyCmd::parse(b"Ga=q,q=2;").expect("query");
+        assert_eq!((q.action, q.quiet), (b'q', 2));
+        assert!(KittyCmd::parse(b"Gf=notanumber;AAAA").is_none()); // bad int -> None
+        assert!(KittyCmd::parse(b"Zfoo").is_none()); // not a G payload
+    }
 }
