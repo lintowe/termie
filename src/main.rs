@@ -1058,8 +1058,14 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
             }
         }
         b'd' => {
-            term.images.delete(cmd.id);
-            term.grid.remove_placements(cmd.id);
+            // bare a=d (no i=) means delete-all: the d= sub-target key isn't
+            // parsed, so cmd.id stays 0 and an id-scoped removal would be a no-op
+            if cmd.id == 0 {
+                term.grid.clear_placements();
+            } else {
+                term.images.delete(cmd.id);
+                term.grid.remove_placements(cmd.id);
+            }
         }
         b'q' => {
             if cmd.quiet == 0 {
@@ -1487,6 +1493,15 @@ struct PaneWindow {
     maximized: bool,
     pane_mode: bool,
     settings_open: bool,
+    // os focus (drives this window's cursor blink/render) + its in-flight ime
+    // composition; both are per-window and must not leak through the swap
+    focused: bool,
+    ime_composing: bool,
+    // this window's open right-click pane context menu (None = closed)
+    pane_menu: Option<PaneMenu>,
+    // this window's focused-pane git branch + the cwd it was computed for
+    git: Option<String>,
+    last_git_cwd: Option<String>,
 }
 
 struct App {
@@ -1502,9 +1517,6 @@ struct App {
     cur_sat: Option<usize>,
     next_id: usize,
     mods: ModifiersState,
-    focused: bool,
-    /// open right-click pane context menu (None = closed)
-    pane_menu: Option<PaneMenu>,
     shown: bool,
     pool: Vec<Pane>,
     selection: Option<Sel>,
@@ -1512,7 +1524,6 @@ struct App {
     last_click: Option<(Instant, f64, f64)>,
     // consecutive click count in a pane's content for word/line select cycling
     click_seq: u32,
-    git: Option<String>,
     palette: Option<PaletteState>,
     find: Option<FindState>,
     /// a modal confirm prompt (e.g. a risky paste), when open
@@ -1521,9 +1532,6 @@ struct App {
     rename: Option<RenameState>,
     /// accesskit adapter for the main window (screen-reader tree); None until boot
     a11y: Option<accesskit_winit::Adapter>,
-    /// true while the user is composing via the IME; raw keystrokes are then
-    /// ignored and the OS candidate window is parked at the cursor
-    ime_composing: bool,
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
     cursor: PhysicalPosition<f64>,
@@ -1556,8 +1564,6 @@ struct App {
     quake_hotkey_spawned: bool,
     /// persisted settings loaded at startup; renderer-owned ones applied in boot
     persisted: Persisted,
-    /// last cwd we computed a git branch for (skip the FS walk when unchanged)
-    last_git_cwd: Option<String>,
     /// broadcast input: typed keys go to every pane in the active tab
     broadcast: bool,
     /// button + pane that received a forwarded press; drag motion and release
@@ -1624,27 +1630,28 @@ impl App {
                 maximized: false,
                 pane_mode: false,
                 settings_open: false,
+                focused: true,
+                ime_composing: false,
+                pane_menu: None,
+                git: None,
+                last_git_cwd: None,
             },
             satellites: Vec::new(),
             cur_sat: None,
             next_id: 0,
             mods: ModifiersState::empty(),
             keybindings: load_keybindings(),
-            focused: true,
-            pane_menu: None,
             shown: false,
             pool: Vec::new(),
             selection: None,
             selecting: false,
             last_click: None,
             click_seq: 0,
-            git: None,
             palette: None,
             find: None,
             confirm: None,
             rename: None,
             a11y: None,
-            ime_composing: false,
             market: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             pressed: None,
@@ -1660,7 +1667,6 @@ impl App {
                 quake_key: p.quake_key,
             },
             persisted: p,
-            last_git_cwd: None,
             broadcast: false,
             mouse_down: None,
             cursor_icon: CursorIcon::Default,
@@ -2333,7 +2339,7 @@ impl App {
     fn paint(&mut self) {
         let clock = win::local_hm();
         let focus_ease = self.focus_ease();
-        let git = self.git.clone();
+        let git = self.pw.git.clone();
         let sessions = self.pw.tabs.len();
         let palette_view = self.palette.as_ref().map(|p| render::PaletteView {
             query: p.query.clone(),
@@ -2374,7 +2380,7 @@ impl App {
         let config = self.config;
         let settings_open = self.pw.settings_open;
         let settings_p = self.settings_p();
-        let pane_menu_view = self.pane_menu.as_ref().map(|m| render::PaneMenuView {
+        let pane_menu_view = self.pw.pane_menu.as_ref().map(|m| render::PaneMenuView {
             x: m.x,
             y: m.y,
             hovered: m.hovered,
@@ -2415,7 +2421,6 @@ impl App {
         }
         let App {
             pw,
-            focused,
             selection,
             link,
             ..
@@ -2426,6 +2431,7 @@ impl App {
             active_tab,
             layout_cache,
             maximized,
+            focused,
             ..
         } = pw;
         if let Some(r) = renderer.as_mut() {
@@ -2549,9 +2555,9 @@ impl App {
             .and_then(|t| t.root.as_ref().and_then(|r| find_pane(r, t.focused)))
             .and_then(|p| p.term.cwd.clone());
         // only walk the filesystem for .git/HEAD when the cwd actually changed
-        if cwd != self.last_git_cwd {
-            self.git = git_branch(cwd.as_deref());
-            self.last_git_cwd = cwd;
+        if cwd != self.pw.last_git_cwd {
+            self.pw.git = git_branch(cwd.as_deref());
+            self.pw.last_git_cwd = cwd;
         }
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_tabs(labels, active);
@@ -3679,6 +3685,11 @@ impl App {
             maximized: false,
             pane_mode: false,
             settings_open: false,
+            focused: true,
+            ime_composing: false,
+            pane_menu: None,
+            git: None,
+            last_git_cwd: None,
         });
         // relayout + paint the new satellite via the swap-into-pw technique, then
         // relayout + repaint the main window (which just lost a pane)
@@ -3783,9 +3794,9 @@ impl App {
                 self.paint();
             }
             WindowEvent::Focused(f) => {
-                self.focused = f;
+                self.pw.focused = f;
                 if !f {
-                    self.ime_composing = false;
+                    self.pw.ime_composing = false;
                 }
                 self.paint();
             }
@@ -3931,9 +3942,9 @@ impl App {
         self.cursor = position;
         let (px, py) = (position.x as f32, position.y as f32);
         // while the pane menu is open, only track which item is hovered
-        if self.pane_menu.is_some() {
+        if self.pw.pane_menu.is_some() {
             let h = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(px, py));
-            if let Some(m) = self.pane_menu.as_mut()
+            if let Some(m) = self.pw.pane_menu.as_mut()
                 && m.hovered != h
             {
                 m.hovered = h;
@@ -4079,7 +4090,7 @@ impl App {
                     matches!(self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy)), Some(Hit::Content));
                 if on_content {
                     self.focus_pane_at(cx, cy);
-                    self.pane_menu = Some(PaneMenu { x: cx, y: cy, hovered: None });
+                    self.pw.pane_menu = Some(PaneMenu { x: cx, y: cy, hovered: None });
                     self.redraw();
                 }
             }
@@ -4096,9 +4107,9 @@ impl App {
                 let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
                 // a left-press while the pane menu is open runs the clicked item
                 // (or dismisses it when the click lands elsewhere)
-                if self.pane_menu.is_some() && state == ElementState::Pressed {
+                if self.pw.pane_menu.is_some() && state == ElementState::Pressed {
                     let item = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(cx, cy));
-                    self.pane_menu = None;
+                    self.pw.pane_menu = None;
                     if let Some(i) = item {
                         self.pane_menu_action(i, event_loop);
                     }
@@ -4389,8 +4400,8 @@ impl App {
             return false;
         }
         // Esc closes an open pane context menu before anything else sees it
-        if self.pane_menu.is_some() && event.logical_key == Key::Named(NamedKey::Escape) {
-            self.pane_menu = None;
+        if self.pw.pane_menu.is_some() && event.logical_key == Key::Named(NamedKey::Escape) {
+            self.pw.pane_menu = None;
             self.redraw();
             return true;
         }
@@ -4850,7 +4861,15 @@ impl ApplicationHandler<UserEvent> for App {
                     // when it ends up empty
                     self.cur_sat = Some(idx);
                     std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
-                    self.close_focused_pane_by_id(id, event_loop);
+                    // close_focused_pane_by_id only inspects the active tab, so
+                    // focus the tab that actually owns the exited pane first (a
+                    // torn-off window can hold several tabs)
+                    if let Some(ti) = self.pw.tabs.iter().position(|t| {
+                        t.root.as_ref().map(|r| find_pane(r, id).is_some()).unwrap_or(false)
+                    }) {
+                        self.pw.active_tab = ti;
+                        self.close_focused_pane_by_id(id, event_loop);
+                    }
                     std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
                     self.cur_sat = None;
                     if self.satellites.get(idx).is_some_and(|s| s.tabs.is_empty()) {
@@ -4969,12 +4988,12 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::Focused(f) => {
-                self.focused = f;
+                self.pw.focused = f;
                 // losing focus mid-composition must clear the IME flag, or a
                 // missing Disabled/Commit (a real winit-on-Windows gap) would
                 // leave every keystroke swallowed with no in-app recovery
                 if !f {
-                    self.ime_composing = false;
+                    self.pw.ime_composing = false;
                 }
                 // a held drag can't survive losing focus: release it so the TUI
                 // doesn't see a stuck button
@@ -5031,17 +5050,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => {}
                 Ime::Preedit(text, _cursor) => {
-                    self.ime_composing = !text.is_empty();
+                    self.pw.ime_composing = !text.is_empty();
                     self.apply_ime_area();
                     self.redraw();
                 }
                 Ime::Commit(text) => {
-                    self.ime_composing = false;
+                    self.pw.ime_composing = false;
                     self.write_to_focused(text.as_bytes());
                     self.redraw();
                 }
                 Ime::Disabled => {
-                    self.ime_composing = false;
+                    self.pw.ime_composing = false;
                     self.redraw();
                 }
             },
@@ -5049,7 +5068,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // while composing, the IME owns text input; swallow only key
                 // presses (releases must pass so kitty release-reporting + held
                 // modifiers don't get stuck)
-                if self.ime_composing && event.state == ElementState::Pressed {
+                if self.pw.ime_composing && event.state == ElementState::Pressed {
                     return;
                 }
                 if self.handle_shortcut(&event, event_loop) {
@@ -5283,12 +5302,12 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(60),
             ));
-        } else if self.focused && self.blinking_cursor_on_screen() {
+        } else if self.pw.focused && self.blinking_cursor_on_screen() {
             self.redraw();
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(530),
             ));
-        } else if self.focused {
+        } else if self.pw.focused {
             // keep the status-bar clock current without busy-redrawing: wake
             // coarsely and only repaint when the displayed minute actually rolls
             let now_hm = win::local_hm();

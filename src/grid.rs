@@ -1097,6 +1097,11 @@ impl Grid {
         self.placements.retain(|p| p.image_id != image_id);
     }
 
+    /// drop every image placement (kitty bare a=d delete-all, no id specified)
+    pub fn clear_placements(&mut self) {
+        self.placements.clear();
+    }
+
     pub fn placements(&self) -> &[Placement] {
         &self.placements
     }
