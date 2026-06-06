@@ -4870,12 +4870,22 @@ impl ApplicationHandler<UserEvent> for App {
                     std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
                     // close_focused_pane_by_id only inspects the active tab, so
                     // focus the tab that actually owns the exited pane first (a
-                    // torn-off window can hold several tabs)
+                    // torn-off window can hold several tabs); mirror the main
+                    // window: restore the previously-viewed tab + relabel afterward
+                    // so a background-tab pane exit doesn't yank the visible tab
                     if let Some(ti) = self.pw.tabs.iter().position(|t| {
                         t.root.as_ref().map(|r| find_pane(r, id).is_some()).unwrap_or(false)
                     }) {
+                        let prev_active = self.pw.active_tab;
                         self.pw.active_tab = ti;
                         self.close_focused_pane_by_id(id, event_loop);
+                        if ti != prev_active && prev_active < self.pw.tabs.len() {
+                            self.pw.active_tab =
+                                prev_active.min(self.pw.tabs.len().saturating_sub(1));
+                            self.relayout_all();
+                        }
+                        self.sync_tabs();
+                        self.redraw();
                     }
                     std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
                     self.cur_sat = None;
