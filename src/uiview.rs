@@ -6,7 +6,9 @@
 
 use vte::Parser;
 
-use crate::render::{self, ConfirmView, FindView, Hot, PaletteView, PaneMenuView, PaneView, RenameView};
+use crate::render::{
+    self, ConfirmView, FindView, Hot, MarketRowView, MarketView, PaletteView, PaneMenuView, PaneView, RenameView,
+};
 use crate::term::Terminal;
 
 /// returns true if `--uiview` was requested and handled (caller should exit)
@@ -82,6 +84,25 @@ pub fn maybe_run() -> bool {
         "rename" => {
             r.set_rename(Some(RenameView { buf: "backend".into() }));
             r.settle_overlay();
+        }
+        "market" => {
+            r.set_market(Some(MarketView {
+                rows: vec![
+                    MarketRowView { label: "tamagotchi  v1.2".into(), tag: "on".into(), sub: "reads: pane title".into() },
+                    MarketRowView { label: "relay  v0.4".into(), tag: "install".into(), sub: "net: localhost:7000".into() },
+                    MarketRowView { label: "css-loader  v2.0".into(), tag: "update".into(), sub: String::new() },
+                    MarketRowView { label: "git-status  v1.0".into(), tag: "off".into(), sub: "runs: git".into() },
+                ],
+                selected: 1,
+                status: "4 plugins  \u{b7}  enter to toggle".into(),
+            }));
+            r.settle_overlay();
+        }
+        "settings2" => {
+            // settings scrolled down to the APPEARANCE section (font/pad/opacity/theme)
+            r.set_settings_panel(true, 1.0);
+            r.set_plugins(vec![("tamagotchi".into(), true), ("relay".into(), false)]);
+            r.scroll_settings(400.0);
         }
         _ => {}
     }

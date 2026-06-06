@@ -4024,7 +4024,27 @@ impl Renderer {
                 pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-                pass.draw(0..6, 0..instances.len() as u32);
+                // mirror the live render's settings-body scissor so a scrolled
+                // settings panel clips in the capture instead of overflowing
+                let total = instances.len() as u32;
+                match self.panel_clip {
+                    Some((start, clip)) if start < total => {
+                        pass.draw(0..6, 0..start);
+                        let (w, h) = (self.config.width as f32, self.config.height as f32);
+                        let sx = clip[0].clamp(0.0, w);
+                        let sy = clip[1].clamp(0.0, h);
+                        let sw = ((clip[0] + clip[2]).min(w) - sx).max(0.0);
+                        let sh = ((clip[1] + clip[3]).min(h) - sy).max(0.0);
+                        if sw >= 1.0 && sh >= 1.0 {
+                            pass.set_scissor_rect(sx as u32, sy as u32, sw as u32, sh as u32);
+                            pass.draw(0..6, start..total);
+                            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                        } else {
+                            pass.draw(0..6, start..total);
+                        }
+                    }
+                    _ => pass.draw(0..6, 0..total),
+                }
             }
         }
         let bpr = padded_bytes_per_row(width);
