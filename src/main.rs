@@ -3298,6 +3298,16 @@ impl App {
                     if let Some(w) = &self.pw.window {
                         w.set_minimized(true);
                     }
+                } else if self.cur_sat.is_some() {
+                    // a torn-off window's close button kills only that window's
+                    // shells and empties it; satellite_event removes the now-empty
+                    // window after the swap-back (never exits the app)
+                    for tab in &mut self.pw.tabs {
+                        if let Some(root) = tab.root.as_mut() {
+                            kill_all(root);
+                        }
+                    }
+                    self.pw.tabs.clear();
                 } else {
                     for tab in &mut self.pw.tabs {
                         if let Some(root) = tab.root.as_mut() {
@@ -3774,6 +3784,14 @@ impl App {
                 }
                 self.paint();
             }
+            // torn-off windows get the same mouse handling as the main window —
+            // hover/selection/scroll/context-menu/title-bar — via the swapped-in
+            // self.pw (close button + close-tab stay window-scoped through cur_sat)
+            WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
+            WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
+            WindowEvent::MouseInput {
+                state, button, ..
+            } => self.on_mouse_input(state, button, event_loop),
             _ => {}
         }
         std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
@@ -3898,6 +3916,415 @@ impl App {
             if let Some(w) = &self.pw.window {
                 w.set_cursor(icon);
             }
+        }
+    }
+
+    /// pointer motion: hover/link/divider feedback, selection drag, mouse-report
+    /// motion, divider drag. operates on self.pw so the swap reuses it for any
+    /// window
+    fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        self.cursor = position;
+        let (px, py) = (position.x as f32, position.y as f32);
+        // while the pane menu is open, only track which item is hovered
+        if self.pane_menu.is_some() {
+            let h = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(px, py));
+            if let Some(m) = self.pane_menu.as_mut()
+                && m.hovered != h
+            {
+                m.hovered = h;
+                self.redraw();
+            }
+            return;
+        }
+        // mouse-tracking motion (1002 drag / 1003 any-motion)
+        if self.drag_divider.is_none() && !self.settings_open && !self.mods.shift_key() {
+            if let Some((btn, id)) = self.mouse_down {
+                // a forwarded press is held: lock motion to the press-pane
+                // (even off its rect) and don't fall through to selection
+                let wants = self
+                    .pw.tabs
+                    .get(self.pw.active_tab)
+                    .and_then(|t| t.root.as_ref().and_then(|r| find_pane(r, id)))
+                    .map(|p| p.term.wants_motion(true))
+                    .unwrap_or(false);
+                if wants {
+                    self.report_to_pane(id, btn, true, true);
+                }
+                return;
+            } else if self.pane_wants_motion() {
+                // 1003 any-motion with no button held
+                self.mouse_report(3, true, true);
+                return;
+            }
+        }
+        if let Some(path) = self.drag_divider.clone() {
+            // pane-mode: drag a divider to resize the split
+            if let Some(content) = self.pw.renderer.as_ref().map(|r| r.content_rect()) {
+                if let Some(root) = self.pw.tabs.get_mut(self.pw.active_tab).and_then(|t| t.root.as_mut()) {
+                    set_divider_ratio(root, content, &path, px, py);
+                }
+                self.relayout_all();
+                self.redraw();
+            }
+        } else if self.selecting {
+            if let (Some(mut sel), Some(cell)) =
+                (self.selection, self.cell_in_focused(px, py))
+            {
+                sel.end = cell;
+                self.selection = Some(sel);
+                self.redraw();
+            }
+        } else {
+            if let Some(r) = self.pw.renderer.as_mut() {
+                let hovered = match r.hit_test(px, py) {
+                    Hit::Button(c) => Some(c),
+                    _ => None,
+                };
+                if r.set_hovered(hovered) {
+                    self.redraw();
+                }
+            }
+            // ctrl-hover a url: underline it and show a hand (click opens)
+            let new_link = if self.mods.control_key() && !self.settings_open {
+                self.focused_url_at(px, py).map(|(r, a, b, _)| (r, a, b))
+            } else {
+                None
+            };
+            if new_link != self.link {
+                self.link = new_link;
+                self.redraw();
+            }
+            let icon = if new_link.is_some() {
+                CursorIcon::Pointer
+            } else {
+                // otherwise show a resize pointer over a split divider
+                let dir = if self.settings_open || self.mods.shift_key() {
+                    None
+                } else if let (Some(content), Some(root)) = (
+                    self.pw.renderer.as_ref().map(|r| r.content_rect()),
+                    self.pw.tabs.get(self.pw.active_tab).and_then(|t| t.root.as_ref()),
+                ) {
+                    divider_dir(root, content, px, py, 6.0)
+                } else {
+                    None
+                };
+                match dir {
+                    Some(Dir::Vertical) => CursorIcon::EwResize,
+                    Some(Dir::Horizontal) => CursorIcon::NsResize,
+                    None => CursorIcon::Default,
+                }
+            };
+            self.set_pointer(icon);
+        }
+    }
+
+    /// wheel: settings-panel scroll, mouse-report wheel buttons, or local scrollback
+    fn on_mouse_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        use winit::event::MouseScrollDelta;
+        let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+        // the open settings panel grabs the wheel when hovered
+        if self.settings_open {
+            let over = self.pw.renderer.as_ref().map(|r| r.in_settings_panel(cx, cy)).unwrap_or(false);
+            if over {
+                let amt = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
+                    MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
+                };
+                if let Some(r) = self.pw.renderer.as_mut() {
+                    r.scroll_settings(amt);
+                }
+                self.redraw();
+                return;
+            }
+        }
+        let up = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y > 0.0,
+            MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
+        };
+        // a TUI with mouse reporting gets wheel events (button 64/65)
+        if self.mouse_report(if up { 64 } else { 65 }, true, false) {
+            return;
+        }
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * 3.0,
+            MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as f32,
+        };
+        if let Some(id) = self.pane_at(cx, cy)
+            && let Some(tab) = self.pw.tabs.get_mut(self.pw.active_tab)
+                && let Some(root) = tab.root.as_mut()
+                    && let Some(p) = find_pane_mut(root, id) {
+                        // alt screen has no scrollback — don't local-scroll it
+                        if !p.term.using_alt {
+                            p.term.grid.scroll_view(lines.round() as isize);
+                            self.redraw();
+                        }
+                    }
+    }
+
+    /// left/right/middle button press+release: context menu, tab close, selection,
+    /// click-to-focus, divider/pane drag, link open, widget click, title-bar buttons
+    fn on_mouse_input(&mut self, state: ElementState, button: MouseButton, event_loop: &ActiveEventLoop) {
+        match button {
+            MouseButton::Right if state == ElementState::Pressed => {
+                // right-click on a pane opens the pane context menu (split / close
+                // / paste) at the cursor; focus the pane under it first so the
+                // actions target it
+                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let on_content =
+                    matches!(self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy)), Some(Hit::Content));
+                if on_content {
+                    self.focus_pane_at(cx, cy);
+                    self.pane_menu = Some(PaneMenu { x: cx, y: cy, hovered: None });
+                    self.redraw();
+                }
+            }
+            MouseButton::Middle if state == ElementState::Pressed => {
+                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                if let Some(Hit::Button(Hot::Tab(i) | Hot::TabClose(i))) =
+                    self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy))
+                {
+                    self.close_tab(i, event_loop);
+                }
+            }
+            MouseButton::Left => {
+                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
+                let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
+                // a left-press while the pane menu is open runs the clicked item
+                // (or dismisses it when the click lands elsewhere)
+                if self.pane_menu.is_some() && state == ElementState::Pressed {
+                    let item = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(cx, cy));
+                    self.pane_menu = None;
+                    if let Some(i) = item {
+                        self.pane_menu_action(i, event_loop);
+                    }
+                    self.redraw();
+                    return;
+                }
+                // always finalize a forwarded press with a release report, even if
+                // the cursor left the pane (else the TUI sees a stuck drag)
+                if state == ElementState::Released
+                    && let Some((btn, id)) = self.mouse_down.take() {
+                        self.report_to_pane(id, btn, false, false);
+                        return;
+                    }
+                // while the settings panel is open, a press outside it dismisses it
+                // (and is consumed); presses inside fall through to its controls
+                if self.settings_open && state == ElementState::Pressed {
+                    let in_panel = self
+                        .pw.renderer
+                        .as_ref()
+                        .map(|r| r.in_settings_panel(cx, cy))
+                        .unwrap_or(false);
+                    if !in_panel {
+                        self.close_settings();
+                        return;
+                    }
+                    if let Some(Hit::Button(h)) = hit {
+                        self.pressed = Some(h);
+                    }
+                    return;
+                }
+                // pane mode: drag a divider to resize, or drag a pane onto another
+                // to swap them (instead of selecting text)
+                if self.pane_mode && !matches!(hit, Some(Hit::Button(_)) | Some(Hit::TitleBar) | Some(Hit::Resize(_))) {
+                    match state {
+                        ElementState::Pressed => {
+                            let found = if let (Some(content), Some(root)) = (
+                                self.pw.renderer.as_ref().map(|r| r.content_rect()),
+                                self.pw.tabs.get(self.pw.active_tab).and_then(|t| t.root.as_ref()),
+                            ) {
+                                let mut path = Vec::new();
+                                find_divider(root, content, cx, cy, 8.0, &mut path)
+                            } else {
+                                None
+                            };
+                            if let Some(p) = found {
+                                self.drag_divider = Some(p);
+                            } else if let Some(id) = self.pane_at(cx, cy) {
+                                self.drag_pane = Some(id);
+                                self.focus_pane_at(cx, cy);
+                            }
+                        }
+                        ElementState::Released => {
+                            if self.drag_divider.take().is_none()
+                                && let Some(src) = self.drag_pane.take()
+                                    && let Some(dst) = self.pane_at(cx, cy)
+                                        && dst != src {
+                                            if let Some(root) = self.pw.tabs.get_mut(self.pw.active_tab).and_then(|t| t.root.as_mut()) {
+                                                swap_panes(root, src, dst);
+                                            }
+                                            self.relayout_all();
+                                            self.sync_tabs();
+                                            self.redraw();
+                                        }
+                        }
+                    }
+                    return;
+                }
+                // ctrl+click opens a web link under the cursor (before any TUI
+                // forwarding, so it works inside mouse-reporting apps too)
+                if state == ElementState::Pressed && self.mods.control_key()
+                    && let Some((_, _, _, url)) = self.focused_url_at(cx, cy) {
+                        win::open_url(&url);
+                        return;
+                    }
+                // a click on a plugin dock widget notifies the owning plugin
+                if state == ElementState::Pressed {
+                    let di = self.pw.renderer.as_ref().and_then(|r| r.widget_at(cx, cy));
+                    if let Some(di) = di
+                        && let Some((pidx, wid, _)) = self.plugin_widgets.get(di)
+                    {
+                        let (pidx, id) = (*pidx, wid.clone());
+                        if let Some(p) = self.plugins.get_mut(pidx) {
+                            p.send(&plugin::HostEvent::WidgetClicked { id });
+                        }
+                        return;
+                    }
+                }
+                // forward a press to a TUI with mouse reporting on (Shift bypasses
+                // for manual selection); release is finalized at the top of the arm
+                if matches!(hit, Some(Hit::Content))
+                    && !self.mods.shift_key()
+                    && state == ElementState::Pressed
+                    && let Some(id) = self.pane_at(cx, cy)
+                        && self.report_to_pane(id, 0, true, false) {
+                            self.focus_pane_at(cx, cy);
+                            self.mouse_down = Some((0, id));
+                            return;
+                        }
+                // drag a split divider directly to resize it (no pane mode needed)
+                if matches!(hit, Some(Hit::Content)) && !self.mods.shift_key() {
+                    match state {
+                        ElementState::Pressed => {
+                            let found = if let (Some(content), Some(root)) = (
+                                self.pw.renderer.as_ref().map(|r| r.content_rect()),
+                                self.pw.tabs.get(self.pw.active_tab).and_then(|t| t.root.as_ref()),
+                            ) {
+                                let mut path = Vec::new();
+                                find_divider(root, content, cx, cy, 6.0, &mut path)
+                            } else {
+                                None
+                            };
+                            if let Some(p) = found {
+                                self.drag_divider = Some(p);
+                                return;
+                            }
+                        }
+                        ElementState::Released => {
+                            if self.drag_divider.take().is_some() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                match state {
+                    ElementState::Pressed => match hit {
+                        Some(Hit::Button(h)) => self.pressed = Some(h),
+                        Some(Hit::Content) => {
+                            self.focus_pane_at(cx, cy);
+                            let now = Instant::now();
+                            // cycle 1=char, 2=word, 3=line on rapid clicks in place
+                            let consecutive = self
+                                .last_click
+                                .map(|(t, lx, ly)| {
+                                    now.duration_since(t) < Duration::from_millis(400)
+                                        && (lx - cx as f64).abs() < 6.0
+                                        && (ly - cy as f64).abs() < 6.0
+                                })
+                                .unwrap_or(false);
+                            self.click_seq = if consecutive { (self.click_seq % 3) + 1 } else { 1 };
+                            self.last_click = Some((now, cx as f64, cy as f64));
+                            if let (Some(pane), Some((row, col))) =
+                                (self.active_focused_id(), self.cell_in_focused(cx, cy))
+                            {
+                                let grid = self
+                                    .pw.tabs
+                                    .get(self.pw.active_tab)
+                                    .and_then(|t| t.root.as_ref())
+                                    .and_then(|r| find_pane(r, pane))
+                                    .map(|p| &p.term.grid);
+                                match self.click_seq {
+                                    2 => {
+                                        let (lo, hi) = grid
+                                            .map(|g| g.word_bounds(row, col))
+                                            .unwrap_or((col, col));
+                                        self.selection =
+                                            Some(Sel { pane, start: (row, lo), end: (row, hi) });
+                                        self.selecting = false;
+                                        if self.config.copy_on_select {
+                                            self.copy_selection();
+                                        }
+                                    }
+                                    3 => {
+                                        let hi =
+                                            grid.map(|g| g.line_last_col(row)).unwrap_or(0);
+                                        self.selection =
+                                            Some(Sel { pane, start: (row, 0), end: (row, hi) });
+                                        self.selecting = false;
+                                        if self.config.copy_on_select {
+                                            self.copy_selection();
+                                        }
+                                    }
+                                    _ => {
+                                        self.selection = Some(Sel {
+                                            pane,
+                                            start: (row, col),
+                                            end: (row, col),
+                                        });
+                                        self.selecting = true;
+                                    }
+                                }
+                            }
+                            self.redraw();
+                        }
+                        Some(Hit::TitleBar) => {
+                            // double-click the empty title bar opens a new tab
+                            let now = Instant::now();
+                            let dbl = self
+                                .last_click
+                                .map(|(t, lx, ly)| {
+                                    now.duration_since(t) < Duration::from_millis(400)
+                                        && (lx - cx as f64).abs() < 6.0
+                                        && (ly - cy as f64).abs() < 6.0
+                                })
+                                .unwrap_or(false);
+                            if dbl {
+                                self.last_click = None;
+                                self.new_tab();
+                            } else {
+                                self.last_click = Some((now, cx as f64, cy as f64));
+                                if let Some(w) = &self.pw.window {
+                                    let _ = w.drag_window();
+                                }
+                            }
+                        }
+                        Some(Hit::Resize(dir)) => {
+                            if let Some(w) = &self.pw.window {
+                                let _ = w.drag_resize_window(dir);
+                            }
+                        }
+                        _ => {}
+                    },
+                    ElementState::Released => {
+                        self.selecting = false;
+                        // a plain click (no drag) clears the selection; a real drag
+                        // auto-copies when copy-on-select is enabled
+                        if let Some(sel) = self.selection {
+                            if sel.start == sel.end {
+                                self.selection = None;
+                                self.redraw();
+                            } else if self.config.copy_on_select {
+                                self.copy_selection();
+                            }
+                        }
+                        if let Some(h) = self.pressed.take()
+                            && matches!(hit, Some(Hit::Button(hh)) if hh == h) {
+                                self.button_action(event_loop, h);
+                            }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4568,413 +4995,11 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = position;
-                let (px, py) = (position.x as f32, position.y as f32);
-                // while the pane menu is open, only track which item is hovered
-                if self.pane_menu.is_some() {
-                    let h = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(px, py));
-                    if let Some(m) = self.pane_menu.as_mut()
-                        && m.hovered != h
-                    {
-                        m.hovered = h;
-                        self.redraw();
-                    }
-                    return;
-                }
-                // mouse-tracking motion (1002 drag / 1003 any-motion)
-                if self.drag_divider.is_none() && !self.settings_open && !self.mods.shift_key() {
-                    if let Some((btn, id)) = self.mouse_down {
-                        // a forwarded press is held: lock motion to the press-pane
-                        // (even off its rect) and don't fall through to selection
-                        let wants = self
-                            .pw.tabs
-                            .get(self.pw.active_tab)
-                            .and_then(|t| t.root.as_ref().and_then(|r| find_pane(r, id)))
-                            .map(|p| p.term.wants_motion(true))
-                            .unwrap_or(false);
-                        if wants {
-                            self.report_to_pane(id, btn, true, true);
-                        }
-                        return;
-                    } else if self.pane_wants_motion() {
-                        // 1003 any-motion with no button held
-                        self.mouse_report(3, true, true);
-                        return;
-                    }
-                }
-                if let Some(path) = self.drag_divider.clone() {
-                    // pane-mode: drag a divider to resize the split
-                    if let Some(content) = self.pw.renderer.as_ref().map(|r| r.content_rect()) {
-                        if let Some(root) = self.pw.tabs.get_mut(self.pw.active_tab).and_then(|t| t.root.as_mut()) {
-                            set_divider_ratio(root, content, &path, px, py);
-                        }
-                        self.relayout_all();
-                        self.redraw();
-                    }
-                } else if self.selecting {
-                    if let (Some(mut sel), Some(cell)) =
-                        (self.selection, self.cell_in_focused(px, py))
-                    {
-                        sel.end = cell;
-                        self.selection = Some(sel);
-                        self.redraw();
-                    }
-                } else {
-                    if let Some(r) = self.pw.renderer.as_mut() {
-                        let hovered = match r.hit_test(px, py) {
-                            Hit::Button(c) => Some(c),
-                            _ => None,
-                        };
-                        if r.set_hovered(hovered) {
-                            self.redraw();
-                        }
-                    }
-                    // ctrl-hover a url: underline it and show a hand (click opens)
-                    let new_link = if self.mods.control_key() && !self.settings_open {
-                        self.focused_url_at(px, py).map(|(r, a, b, _)| (r, a, b))
-                    } else {
-                        None
-                    };
-                    if new_link != self.link {
-                        self.link = new_link;
-                        self.redraw();
-                    }
-                    let icon = if new_link.is_some() {
-                        CursorIcon::Pointer
-                    } else {
-                        // otherwise show a resize pointer over a split divider
-                        let dir = if self.settings_open || self.mods.shift_key() {
-                            None
-                        } else if let (Some(content), Some(root)) = (
-                            self.pw.renderer.as_ref().map(|r| r.content_rect()),
-                            self.pw.tabs.get(self.pw.active_tab).and_then(|t| t.root.as_ref()),
-                        ) {
-                            divider_dir(root, content, px, py, 6.0)
-                        } else {
-                            None
-                        };
-                        match dir {
-                            Some(Dir::Vertical) => CursorIcon::EwResize,
-                            Some(Dir::Horizontal) => CursorIcon::NsResize,
-                            None => CursorIcon::Default,
-                        }
-                    };
-                    self.set_pointer(icon);
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                use winit::event::MouseScrollDelta;
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
-                // the open settings panel grabs the wheel when hovered
-                if self.settings_open {
-                    let over = self.pw.renderer.as_ref().map(|r| r.in_settings_panel(cx, cy)).unwrap_or(false);
-                    if over {
-                        let amt = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
-                            MouseScrollDelta::PixelDelta(p) => -(p.y as f32),
-                        };
-                        if let Some(r) = self.pw.renderer.as_mut() {
-                            r.scroll_settings(amt);
-                        }
-                        self.redraw();
-                        return;
-                    }
-                }
-                let up = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y > 0.0,
-                    MouseScrollDelta::PixelDelta(p) => p.y > 0.0,
-                };
-                // a TUI with mouse reporting gets wheel events (button 64/65)
-                if self.mouse_report(if up { 64 } else { 65 }, true, false) {
-                    return;
-                }
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y * 3.0,
-                    MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as f32,
-                };
-                if let Some(id) = self.pane_at(cx, cy)
-                    && let Some(tab) = self.pw.tabs.get_mut(self.pw.active_tab)
-                        && let Some(root) = tab.root.as_mut()
-                            && let Some(p) = find_pane_mut(root, id) {
-                                // alt screen has no scrollback — don't local-scroll it
-                                if !p.term.using_alt {
-                                    p.term.grid.scroll_view(lines.round() as isize);
-                                    self.redraw();
-                                }
-                            }
-            }
+            WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
+            WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Right,
-                ..
-            } => {
-                // right-click on a pane opens the pane context menu (split / close
-                // / paste) at the cursor; focus the pane under it first so the
-                // actions target it
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
-                let on_content =
-                    matches!(self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy)), Some(Hit::Content));
-                if on_content {
-                    self.focus_pane_at(cx, cy);
-                    self.pane_menu = Some(PaneMenu { x: cx, y: cy, hovered: None });
-                    self.redraw();
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Middle,
-                ..
-            } => {
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
-                if let Some(Hit::Button(Hot::Tab(i) | Hot::TabClose(i))) =
-                    self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy))
-                {
-                    self.close_tab(i, event_loop);
-                }
-            }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => {
-                let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
-                let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
-                // a left-press while the pane menu is open runs the clicked item
-                // (or dismisses it when the click lands elsewhere)
-                if self.pane_menu.is_some() && state == ElementState::Pressed {
-                    let item = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(cx, cy));
-                    self.pane_menu = None;
-                    if let Some(i) = item {
-                        self.pane_menu_action(i, event_loop);
-                    }
-                    self.redraw();
-                    return;
-                }
-                // always finalize a forwarded press with a release report, even if
-                // the cursor left the pane (else the TUI sees a stuck drag)
-                if state == ElementState::Released
-                    && let Some((btn, id)) = self.mouse_down.take() {
-                        self.report_to_pane(id, btn, false, false);
-                        return;
-                    }
-                // while the settings panel is open, a press outside it dismisses it
-                // (and is consumed); presses inside fall through to its controls
-                if self.settings_open && state == ElementState::Pressed {
-                    let in_panel = self
-                        .pw.renderer
-                        .as_ref()
-                        .map(|r| r.in_settings_panel(cx, cy))
-                        .unwrap_or(false);
-                    if !in_panel {
-                        self.close_settings();
-                        return;
-                    }
-                    if let Some(Hit::Button(h)) = hit {
-                        self.pressed = Some(h);
-                    }
-                    return;
-                }
-                // pane mode: drag a divider to resize, or drag a pane onto another
-                // to swap them (instead of selecting text)
-                if self.pane_mode && !matches!(hit, Some(Hit::Button(_)) | Some(Hit::TitleBar) | Some(Hit::Resize(_))) {
-                    match state {
-                        ElementState::Pressed => {
-                            let found = if let (Some(content), Some(root)) = (
-                                self.pw.renderer.as_ref().map(|r| r.content_rect()),
-                                self.pw.tabs.get(self.pw.active_tab).and_then(|t| t.root.as_ref()),
-                            ) {
-                                let mut path = Vec::new();
-                                find_divider(root, content, cx, cy, 8.0, &mut path)
-                            } else {
-                                None
-                            };
-                            if let Some(p) = found {
-                                self.drag_divider = Some(p);
-                            } else if let Some(id) = self.pane_at(cx, cy) {
-                                self.drag_pane = Some(id);
-                                self.focus_pane_at(cx, cy);
-                            }
-                        }
-                        ElementState::Released => {
-                            if self.drag_divider.take().is_none()
-                                && let Some(src) = self.drag_pane.take()
-                                    && let Some(dst) = self.pane_at(cx, cy)
-                                        && dst != src {
-                                            if let Some(root) = self.pw.tabs.get_mut(self.pw.active_tab).and_then(|t| t.root.as_mut()) {
-                                                swap_panes(root, src, dst);
-                                            }
-                                            self.relayout_all();
-                                            self.sync_tabs();
-                                            self.redraw();
-                                        }
-                        }
-                    }
-                    return;
-                }
-                // ctrl+click opens a web link under the cursor (before any TUI
-                // forwarding, so it works inside mouse-reporting apps too)
-                if state == ElementState::Pressed && self.mods.control_key()
-                    && let Some((_, _, _, url)) = self.focused_url_at(cx, cy) {
-                        win::open_url(&url);
-                        return;
-                    }
-                // a click on a plugin dock widget notifies the owning plugin
-                if state == ElementState::Pressed {
-                    let di = self.pw.renderer.as_ref().and_then(|r| r.widget_at(cx, cy));
-                    if let Some(di) = di
-                        && let Some((pidx, wid, _)) = self.plugin_widgets.get(di)
-                    {
-                        let (pidx, id) = (*pidx, wid.clone());
-                        if let Some(p) = self.plugins.get_mut(pidx) {
-                            p.send(&plugin::HostEvent::WidgetClicked { id });
-                        }
-                        return;
-                    }
-                }
-                // forward a press to a TUI with mouse reporting on (Shift bypasses
-                // for manual selection); release is finalized at the top of the arm
-                if matches!(hit, Some(Hit::Content))
-                    && !self.mods.shift_key()
-                    && state == ElementState::Pressed
-                    && let Some(id) = self.pane_at(cx, cy)
-                        && self.report_to_pane(id, 0, true, false) {
-                            self.focus_pane_at(cx, cy);
-                            self.mouse_down = Some((0, id));
-                            return;
-                        }
-                // drag a split divider directly to resize it (no pane mode needed)
-                if matches!(hit, Some(Hit::Content)) && !self.mods.shift_key() {
-                    match state {
-                        ElementState::Pressed => {
-                            let found = if let (Some(content), Some(root)) = (
-                                self.pw.renderer.as_ref().map(|r| r.content_rect()),
-                                self.pw.tabs.get(self.pw.active_tab).and_then(|t| t.root.as_ref()),
-                            ) {
-                                let mut path = Vec::new();
-                                find_divider(root, content, cx, cy, 6.0, &mut path)
-                            } else {
-                                None
-                            };
-                            if let Some(p) = found {
-                                self.drag_divider = Some(p);
-                                return;
-                            }
-                        }
-                        ElementState::Released => {
-                            if self.drag_divider.take().is_some() {
-                                return;
-                            }
-                        }
-                    }
-                }
-                match state {
-                    ElementState::Pressed => match hit {
-                        Some(Hit::Button(h)) => self.pressed = Some(h),
-                        Some(Hit::Content) => {
-                            self.focus_pane_at(cx, cy);
-                            let now = Instant::now();
-                            // cycle 1=char, 2=word, 3=line on rapid clicks in place
-                            let consecutive = self
-                                .last_click
-                                .map(|(t, lx, ly)| {
-                                    now.duration_since(t) < Duration::from_millis(400)
-                                        && (lx - cx as f64).abs() < 6.0
-                                        && (ly - cy as f64).abs() < 6.0
-                                })
-                                .unwrap_or(false);
-                            self.click_seq = if consecutive { (self.click_seq % 3) + 1 } else { 1 };
-                            self.last_click = Some((now, cx as f64, cy as f64));
-                            if let (Some(pane), Some((row, col))) =
-                                (self.active_focused_id(), self.cell_in_focused(cx, cy))
-                            {
-                                let grid = self
-                                    .pw.tabs
-                                    .get(self.pw.active_tab)
-                                    .and_then(|t| t.root.as_ref())
-                                    .and_then(|r| find_pane(r, pane))
-                                    .map(|p| &p.term.grid);
-                                match self.click_seq {
-                                    2 => {
-                                        let (lo, hi) = grid
-                                            .map(|g| g.word_bounds(row, col))
-                                            .unwrap_or((col, col));
-                                        self.selection =
-                                            Some(Sel { pane, start: (row, lo), end: (row, hi) });
-                                        self.selecting = false;
-                                        if self.config.copy_on_select {
-                                            self.copy_selection();
-                                        }
-                                    }
-                                    3 => {
-                                        let hi =
-                                            grid.map(|g| g.line_last_col(row)).unwrap_or(0);
-                                        self.selection =
-                                            Some(Sel { pane, start: (row, 0), end: (row, hi) });
-                                        self.selecting = false;
-                                        if self.config.copy_on_select {
-                                            self.copy_selection();
-                                        }
-                                    }
-                                    _ => {
-                                        self.selection = Some(Sel {
-                                            pane,
-                                            start: (row, col),
-                                            end: (row, col),
-                                        });
-                                        self.selecting = true;
-                                    }
-                                }
-                            }
-                            self.redraw();
-                        }
-                        Some(Hit::TitleBar) => {
-                            // double-click the empty title bar opens a new tab
-                            let now = Instant::now();
-                            let dbl = self
-                                .last_click
-                                .map(|(t, lx, ly)| {
-                                    now.duration_since(t) < Duration::from_millis(400)
-                                        && (lx - cx as f64).abs() < 6.0
-                                        && (ly - cy as f64).abs() < 6.0
-                                })
-                                .unwrap_or(false);
-                            if dbl {
-                                self.last_click = None;
-                                self.new_tab();
-                            } else {
-                                self.last_click = Some((now, cx as f64, cy as f64));
-                                if let Some(w) = &self.pw.window {
-                                    let _ = w.drag_window();
-                                }
-                            }
-                        }
-                        Some(Hit::Resize(dir)) => {
-                            if let Some(w) = &self.pw.window {
-                                let _ = w.drag_resize_window(dir);
-                            }
-                        }
-                        _ => {}
-                    },
-                    ElementState::Released => {
-                        self.selecting = false;
-                        // a plain click (no drag) clears the selection; a real drag
-                        // auto-copies when copy-on-select is enabled
-                        if let Some(sel) = self.selection {
-                            if sel.start == sel.end {
-                                self.selection = None;
-                                self.redraw();
-                            } else if self.config.copy_on_select {
-                                self.copy_selection();
-                            }
-                        }
-                        if let Some(h) = self.pressed.take()
-                            && matches!(hit, Some(Hit::Button(hh)) if hh == h) {
-                                self.button_action(event_loop, h);
-                            }
-                    }
-                }
-            }
+                state, button, ..
+            } => self.on_mouse_input(state, button, event_loop),
             WindowEvent::Resized(size) => {
                 // reflow on a width change moves cell coordinates, so a stale
                 // selection would highlight the wrong cells
