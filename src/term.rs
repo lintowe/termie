@@ -146,7 +146,7 @@ impl Terminal {
         self.gl = 0;
         self.app_cursor_keys = false;
         self.bracketed_paste = false;
-        self.apply_sgr(&[vec![0]]);
+        self.apply_sgr(&[&[0u16][..]]);
         self.grid.set_scroll_region(0, self.grid.rows - 1);
         self.grid.origin_mode = false;
         self.grid.cursor.shape_set = false;
@@ -300,7 +300,7 @@ impl Terminal {
         // non-private (ANSI) modes: none needed for the tracer bullet
     }
 
-    fn apply_sgr(&mut self, groups: &[Vec<u16>]) {
+    fn apply_sgr(&mut self, groups: &[&[u16]]) {
         let cur = &mut self.grid.cursor;
         if groups.is_empty() {
             cur.fg = Color::Default;
@@ -310,7 +310,7 @@ impl Terminal {
         }
         let mut i = 0;
         while i < groups.len() {
-            let g = &groups[i];
+            let g = groups[i];
             let code = g.first().copied().unwrap_or(0);
             // colon-encoded extended color is self-contained in one group
             if g.len() > 1 && (code == 38 || code == 48 || code == 58) {
@@ -583,8 +583,18 @@ impl Perform for Terminal {
             'S' => self.grid.scroll_up(param_at(params, 0, 1) as usize),
             'T' => self.grid.scroll_down(param_at(params, 0, 1) as usize),
             'm' => {
-                let groups: Vec<Vec<u16>> = params.iter().map(|p| p.to_vec()).collect();
-                self.apply_sgr(&groups);
+                // borrow the param groups into a stack array (no per-sequence heap
+                // alloc on the parse hot path); 32 covers any real SGR run
+                let mut groups: [&[u16]; 32] = [&[]; 32];
+                let mut n = 0;
+                for p in params.iter() {
+                    if n == groups.len() {
+                        break;
+                    }
+                    groups[n] = p;
+                    n += 1;
+                }
+                self.apply_sgr(&groups[..n]);
             }
             'r' => {
                 let top = param_at(params, 0, 1) as usize - 1;
@@ -877,6 +887,67 @@ mod tests {
         // unrecognized mode -> 0
         feed(&mut t, b"\x1b[?9999$p");
         assert_eq!(t.responses, b"\x1b[?9999;0$y");
+    }
+
+    #[test]
+    fn decrqm_reports_default_and_mouse_modes() {
+        let mut t = Terminal::new(4, 10);
+        // cursor visibility (mode 25) defaults on -> 1
+        feed(&mut t, b"\x1b[?25$p");
+        assert_eq!(t.responses, b"\x1b[?25;1$y");
+        t.responses.clear();
+        // set mouse button-tracking (1002), query reports set
+        feed(&mut t, b"\x1b[?1002h\x1b[?1002$p");
+        assert_eq!(t.responses, b"\x1b[?1002;1$y");
+        t.responses.clear();
+        // a mouse mode that is not set reports reset
+        feed(&mut t, b"\x1b[?1003$p");
+        assert_eq!(t.responses, b"\x1b[?1003;2$y");
+    }
+
+    #[test]
+    fn rep_repeats_charset_mapped_and_clamps() {
+        // REP repeats the POST-charset glyph: ESC(0 maps 'q'->box, CSI 2 b repeats it
+        let mut t = Terminal::new(2, 6);
+        feed(&mut t, b"\x1b(0q\x1b[2b");
+        assert_eq!(t.grid.lines[0][0].c, '\u{2500}');
+        assert_eq!(t.grid.lines[0][1].c, '\u{2500}');
+        assert_eq!(t.grid.lines[0][2].c, '\u{2500}');
+        // a huge REP count is clamped to cols*rows and must not panic
+        let mut t2 = Terminal::new(2, 6);
+        feed(&mut t2, b"X\x1b[99999b");
+        assert!(t2.grid.cursor.row < t2.grid.rows && t2.grid.cursor.col < t2.grid.cols);
+    }
+
+    #[test]
+    fn decstr_resets_full_surface() {
+        let mut t = Terminal::new(10, 10);
+        // hide cursor, set a scroll region, origin mode, a red+bold pen, bracketed paste
+        feed(&mut t, b"\x1b[?25l\x1b[3;7r\x1b[?6h\x1b[31;1m\x1b[?2004h");
+        assert!(!t.grid.cursor.visible);
+        assert!(t.grid.origin_mode);
+        assert!(t.bracketed_paste);
+        feed(&mut t, b"\x1b[!p"); // DECSTR soft reset
+        assert!(t.grid.cursor.visible); // DECTCEM re-show
+        assert!(!t.grid.origin_mode);
+        assert!(!t.bracketed_paste);
+        assert_eq!(t.grid.cursor.fg, Color::Default); // SGR pen reset
+        assert!(!t.grid.cursor.attrs.bold);
+    }
+
+    #[test]
+    fn ris_resets_grid_and_modes() {
+        let mut t = Terminal::new(4, 8);
+        feed(&mut t, b"\x1b[?1049h"); // alt screen
+        feed(&mut t, b"\x1b[>1u"); // push a kitty keyboard flag
+        feed(&mut t, b"\x1b(0X"); // graphics charset + a char
+        feed(&mut t, b"\x1bc"); // RIS
+        assert!(!t.using_alt);
+        assert_eq!(t.kbd_flags(), 0);
+        assert_eq!(t.grid.lines[0][0].c, ' '); // grid blanked
+        // charset reset: 'q' is literal again, not a box char
+        feed(&mut t, b"q");
+        assert_eq!(t.grid.lines[0][0].c, 'q');
     }
 
     #[test]

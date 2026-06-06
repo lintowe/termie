@@ -97,4 +97,21 @@ mod tests {
         assert_eq!(m.get(&42), Some(&"answer"));
         assert_eq!(m.get(&1), None);
     }
+
+    // the u64 path backs the atlas image_cache; distinct from the str/tuple paths
+    #[test]
+    fn u64_and_byte_tail_paths() {
+        assert_eq!(h(&0xDEAD_BEEF_0000_0001u64), h(&0xDEAD_BEEF_0000_0001u64)); // deterministic
+        assert_ne!(h(&1u64), h(&2u64)); // distinct keys don't collide
+        // odd byte-tail lengths exercise the 8/4/2/1 split in write()
+        for len in [1usize, 2, 3, 4, 5, 7, 8, 9] {
+            let buf = vec![0xABu8; len];
+            assert_eq!(h(&buf), h(&buf));
+        }
+        // round-trip as an image_cache-style FxHashMap<u64, _>
+        let mut m: FxHashMap<u64, u32> = FxHashMap::default();
+        m.insert(0xFFFF_0000_FFFF_0000, 99);
+        assert_eq!(m.get(&0xFFFF_0000_FFFF_0000), Some(&99));
+        assert_eq!(m.get(&0), None);
+    }
 }

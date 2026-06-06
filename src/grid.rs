@@ -1274,6 +1274,28 @@ mod tests {
         assert_eq!(g.intern_cluster("definitely-new-after-cap"), 0);
     }
 
+    // direct coverage of char_width, including the ASCII fast path + its boundaries
+    #[test]
+    fn char_width_classifies_each_class() {
+        // printable ASCII fast path -> 1, at both ends of the range
+        assert_eq!(char_width(' '), 1); // 0x20
+        assert_eq!(char_width('A'), 1);
+        assert_eq!(char_width('~'), 1); // 0x7e, last in the fast-path range
+        // NUL -> 0
+        assert_eq!(char_width('\0'), 0);
+        // DEL (0x7f) is outside the fast path but falls through to width 1
+        assert_eq!(char_width('\u{7f}'), 1);
+        // combining mark / ZWJ / variation selector -> 0
+        assert_eq!(char_width('\u{0301}'), 0); // combining acute
+        assert_eq!(char_width('\u{200D}'), 0); // ZWJ
+        assert_eq!(char_width('\u{FE0F}'), 0); // VS16
+        // East Asian wide + emoji -> 2
+        assert_eq!(char_width('世'), 2);
+        assert_eq!(char_width('\u{1F600}'), 2); // grinning face emoji
+        // an ordinary Latin-1 letter (outside the ASCII fast path) is width 1
+        assert_eq!(char_width('é'), 1);
+    }
+
     #[test]
     fn wide_char_writes_continuation_and_advances_two() {
         let mut g = Grid::new(2, 6);
