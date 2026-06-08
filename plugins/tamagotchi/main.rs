@@ -41,7 +41,7 @@ fn render(hunger: u8, joy: u8) -> (String, Vec<String>) {
         ">  -  <"
     };
     let bar = |v: u8| {
-        let filled = (v as usize + 9) / 10;
+        let filled = (v as usize).div_ceil(10);
         let mut s = String::new();
         for i in 0..10 {
             s.push(if i < filled { '#' } else { '.' });
