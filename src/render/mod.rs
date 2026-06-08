@@ -3211,7 +3211,7 @@ impl Renderer {
         self.section_label(out, cx, g.sec_about_y, cw, "ABOUT", wide, RULE_2, MUTE);
         let about: [(&str, &str); 3] = [
             ("FONT", font_name),
-            ("VERSION", "termie 0.1"),
+            ("VERSION", concat!("termie ", env!("CARGO_PKG_VERSION"))),
             ("RENDERER", self.backend_label),
         ];
         let about_dx = 120.0 * s;
