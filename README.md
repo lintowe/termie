@@ -4,6 +4,9 @@
 
 **A fast, lightweight GPU terminal multiplexer for Windows — a cockpit for running AI TUIs across many repos at once.**
 
+[![CI](https://github.com/lintowe/termie/actions/workflows/ci.yml/badge.svg)](https://github.com/lintowe/termie/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 </div>
 
 termie is a from-scratch terminal emulator + multiplexer written in Rust. It renders on the GPU (wgpu) in a single-process [winit](https://github.com/rust-windowing/winit) app, ships as a ~7.6 MB binary, and is built around one job: driving several long-running CLI sessions (many shells) across different repositories without a pile of disconnected windows.
@@ -14,11 +17,13 @@ termie is a from-scratch terminal emulator + multiplexer written in Rust. It ren
 
 - **GPU-rendered, lightweight.** wgpu glyph-atlas rendering, an instrument-panel aesthetic, a ~7.6 MB stripped release binary, and a lean dependency tree.
 - **Fast to open shells.** A pre-warmed shell pool keeps a started PowerShell ready so new tabs/splits feel instant; the window appears before any shell finishes spawning.
-- **Tabs + recursive split panes.** Split vertically/horizontally, drag dividers, swap panes, and broadcast input to every pane in a tab (cockpit mode).
+- **Tabs + recursive split panes.** Split vertically/horizontally, drag dividers, swap panes, tear a pane off into its own window, and broadcast input to every pane in a tab (cockpit mode).
 - **Built for many repos.** Splits and a "new tab here" command open in the focused pane's directory; per-tab shell choice (`pwsh` / `cmd` / `wsl`) from the palette; drag a file in to type its path; right-click to copy the selection or paste.
 - **Command palette.** `Ctrl+Shift+P` for fuzzy access to every action.
 - **Faithful keyboard + modern escapes.** The kitty keyboard protocol (so `Shift+Enter` inserts a newline in TUIs, plus accurate modified-key reporting), OSC 8 clickable hyperlinks, OSC 52 clipboard writes, OSC 4/10/11/12 color queries, and curly/double/dotted underline styles, strikethrough, and blink.
 - **Real terminal emulation.** [vte](https://github.com/alacritty/vte)-based parser, alt screen, scroll regions, mouse reporting (SGR + legacy), bracketed paste, OSC-7 cwd (tab labels + window title), URL detection (Ctrl-click to open), DECSCUSR cursor shapes, and DEC 2026 synchronized output for tear-free frames.
+- **Inline images + color emoji.** Displays images sent over the kitty graphics protocol (raw RGB / RGBA, scroll-anchored to the cell grid) and renders color emoji — both packed into a dedicated RGBA atlas beside the monochrome glyph cache.
+- **Sessions, IME, and a screen-reader path.** Restores the tab and split layout on launch with crash recovery, composes input through the IME (CJK and friends), and exposes the focused pane to assistive tech via AccessKit.
 - **Themes, fonts, and customization.** Three built-in themes (Instrument / Koi / Paper), bundled Maple Mono Nerd Font, lazy system-font discovery, adjustable font size, padding, cursor shape/blink, and window opacity in an in-app settings panel — plus per-user color overrides (`colors.conf`) and rebindable keys (`keybindings.conf`).
 - **Plugin system + in-app marketplace.** Extend termie without bloating the core: plugins run as separate OS processes over a small JSON protocol, so they can be written in any language and can't slow startup or crash the app. See [docs/plugin-system-plan.md](docs/plugin-system-plan.md) and [plugins/README.md](plugins/README.md).
 

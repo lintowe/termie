@@ -8,8 +8,10 @@ take termie down.
 
 See `docs/plugin-system-plan.md` for the full design and rationale.
 
-> Status: Phase 1 (host + protocol spine) is implemented. Tier-1 widget
-> rendering, the plugin bus, and the in-app marketplace land in later phases.
+> Status: implemented through the marketplace client. The plugin host and v1
+> protocol, Tier-1 widgets and the dock, the in-process bus, local
+> install/enable/disable, and the in-app store all work. Tier-2 immediate-mode
+> rendering, OS sandboxing, and a cross-machine bus are possible later work.
 > The protocol below is the v1 contract (`api_version` 1).
 
 ## Where plugins live
