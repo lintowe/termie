@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Plugins
+- Rebuilt the in-app plugin store as a card layout — each plugin shows its name, version, description, permission badges, and an **Install** / **Enabled** / **Disabled** action, with live installed/available counts in the header and distinct loading, empty, and unreachable-catalog states.
+- The store now tells a failed catalog fetch apart from an empty catalog and shows an accurate message instead of always blaming "offline".
+
 ## v0.1.1 — 2026-06-08
 
 ### Terminal fidelity
