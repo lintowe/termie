@@ -190,6 +190,18 @@ pub struct MarketView {
     pub fetch_failed: bool,
 }
 
+/// what a click in the marketplace overlay landed on; row indices are into the
+/// view's `rows`
+#[derive(Clone, Copy)]
+pub enum MarketHit {
+    /// the card body — select the row
+    Card(usize),
+    /// the install/enable/disable action chip — act on the row
+    Chip(usize),
+    /// the close (×) control
+    Close,
+}
+
 /// a plugin-declared widget to draw in the side dock. render-side mirror of the
 /// plugin protocol's Widget, so the renderer doesn't depend on the plugin module.
 /// `draw` is the Tier-2 immediate-mode primitive list (empty for a Tier-1 widget)
@@ -542,6 +554,9 @@ pub struct Renderer {
     pane_menu_view: Option<PaneMenuView>,
     find_view: Option<FindView>,
     market_view: Option<MarketView>,
+    /// per-frame clickable regions for the market overlay (close, cards, chips),
+    /// rebuilt by build_market so a click can route to a row or its action
+    market_hits: Vec<((f32, f32, f32, f32), MarketHit)>,
     confirm_view: Option<ConfirmView>,
     rename_view: Option<RenameView>,
     /// plugin-declared Tier-1 widgets shown in the right-side dock; when
@@ -1194,6 +1209,7 @@ impl Renderer {
             pane_menu_view: None,
             find_view: None,
             market_view: None,
+            market_hits: Vec::new(),
             confirm_view: None,
             rename_view: None,
             dock: Vec::new(),
@@ -1732,7 +1748,19 @@ impl Renderer {
     }
 
     pub fn set_market(&mut self, m: Option<MarketView>) {
+        // a closed market draws nothing, so drop its stale clickable regions now
+        if m.is_none() {
+            self.market_hits.clear();
+        }
         self.market_view = m;
+    }
+
+    /// what a click at (x, y) lands on in the open market overlay, if anything
+    pub fn market_hit_at(&self, x: f32, y: f32) -> Option<MarketHit> {
+        self.market_hits
+            .iter()
+            .find(|((rx, ry, rw, rh), _)| x >= *rx && x < *rx + *rw && y >= *ry && y < *ry + *rh)
+            .map(|(_, h)| *h)
     }
 
     pub fn set_find(&mut self, f: Option<FindView>) {
@@ -3626,6 +3654,7 @@ impl Renderer {
     /// plus a status footer. modeled on the command palette
     #[allow(non_snake_case)]
     fn build_market(&mut self, out: &mut Vec<Instance>, track: f32) {
+        self.market_hits.clear();
         let Some(mv) = self.market_view.as_ref() else {
             return;
         };
@@ -3681,6 +3710,10 @@ impl Renderer {
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x, title_y, "\u{f487}  PLUGINS", PAPER, 1.0, track);
         let close_x = col_x + col_w - char_w;
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, close_x, title_y, "\u{00d7}", MUTE, 1.0, track);
+        self.market_hits.push((
+            (close_x - 4.0 * s, title_y - 2.0 * s, char_w + 8.0 * s, chrome_h + 4.0 * s),
+            MarketHit::Close,
+        ));
         let count = format!("{n_installed} installed \u{b7} {n_avail} available");
         let count_w = self.text_w(FontId::Chrome, &count, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, close_x - 20.0 * s - count_w, title_y, &count, MUTE, 1.0, track);
@@ -3752,6 +3785,7 @@ impl Renderer {
             let chip_x = col_x + col_w - pad - chip_w;
             let chip_h = chrome_h + 8.0 * s;
             let chip_y = (l1 - 4.0 * s).round();
+            self.market_hits.push(((chip_x, chip_y, chip_w, chip_h), MarketHit::Chip(idx)));
             if chip_fill {
                 Self::push_rect(out, chip_x, chip_y, chip_w, chip_h, PAPER, 1.0);
             } else {
@@ -3787,6 +3821,7 @@ impl Renderer {
                     px += pw + 6.0 * s;
                 }
             }
+            self.market_hits.push(((col_x, ry, col_w, card_h), MarketHit::Card(idx)));
         }
 
         // ---- footer: status (left) + key hints (right) ----

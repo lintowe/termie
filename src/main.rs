@@ -3155,8 +3155,34 @@ impl App {
         self.start_plugins();
     }
 
-    /// act on the selected marketplace row (Enter): toggle enable for an
-    /// installed plugin, or install an available one
+    /// route a left-click in the open marketplace to a row, its action chip, or
+    /// the close control — mouse parity with the keyboard navigation
+    fn market_click(&mut self, cx: f32, cy: f32) {
+        let Some(hit) = self.pw.renderer.as_ref().and_then(|r| r.market_hit_at(cx, cy)) else {
+            return;
+        };
+        match hit {
+            render::MarketHit::Close => {
+                self.market = None;
+                self.redraw();
+            }
+            render::MarketHit::Chip(i) => {
+                if let Some(m) = self.market.as_mut() {
+                    m.selected = i;
+                }
+                self.market_activate();
+            }
+            render::MarketHit::Card(i) => {
+                if let Some(m) = self.market.as_mut() {
+                    m.selected = i;
+                }
+                self.redraw();
+            }
+        }
+    }
+
+    /// act on the selected marketplace row (Enter or a chip click): toggle enable
+    /// for an installed plugin, or install an available one
     fn market_activate(&mut self) {
         let Some(m) = self.market.as_ref() else {
             return;
@@ -4323,6 +4349,14 @@ impl App {
             }
             MouseButton::Left => {
                 let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
+                // the marketplace is a full-page overlay: handle its clicks and
+                // consume the press so nothing falls through to the panes
+                if self.market.is_some() {
+                    if state == ElementState::Pressed {
+                        self.market_click(cx, cy);
+                    }
+                    return;
+                }
                 let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
                 // a left-press while the pane menu is open runs the clicked item
                 // (or dismisses it when the click lands elsewhere)
