@@ -3132,8 +3132,10 @@ impl Renderer {
             [g.panel_x, g.body_top, g.panel_w, g.body_bottom - g.body_top],
         ));
 
-        // PLUGINS (top of the panel: installed list with on/off + browse store)
-        self.section_label(out, cx, g.sec_plugins_y, cw, "PLUGINS", wide, RULE_2, MUTE);
+        // PLUGINS (top of the panel: installed list with on/off + browse store).
+        // stop the header rule short of the browse button so it doesn't run under it
+        let plug_rule_w = (g.plugins_btn.0 - cx - 12.0 * s).max(0.0);
+        self.section_label(out, cx, g.sec_plugins_y, plug_rule_w, "PLUGINS", wide, RULE_2, MUTE);
         self.cycle_btn(out, g.plugins_btn, "browse \u{25B8}", Hot::OpenPlugins, track);
         if g.plugin_rows.is_empty() {
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.sec_plugins_y + 32.0 * s), "no plugins installed", RULE_2, 1.0, track);
@@ -3533,59 +3535,57 @@ impl Renderer {
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let char_w = self.text_w(FontId::Chrome, "M", track).max(1.0);
 
-        // dim the rest of the screen
-        Self::push_rect(out, 0.0, 0.0, w, h, INK_0, 0.6);
+        // full-window page (its own screen under the tab strip), not a popup
+        let top = self.title_bar_h;
+        let bottom = (h - self.status_bar_h).max(top + 1.0);
+        Self::push_rect(out, 0.0, top, w, bottom - top, INK_1, 1.0);
+        Self::push_rect(out, 0.0, top, w, hair * 2.0, PAPER, 1.0);
 
-        let pad = 20.0 * s;
-        let bw = (760.0 * s).min(w - 64.0 * s);
-        let bx = ((w - bw) / 2.0).round();
-        let by = (self.title_bar_h + 48.0 * s).round();
-        let line = chrome_h + 5.0 * s; // text line advance within a card
-        let head_h = (chrome_h + 28.0 * s).round();
-        let foot_h = (chrome_h + 24.0 * s).round();
-        let card_h = (chrome_h * 3.0 + 30.0 * s).round(); // name + description + permissions
-        // cap visible cards so the panel never runs off-screen
-        let avail = h - by - head_h - foot_h - 32.0 * s;
-        let max_visible = (avail / card_h).floor().max(1.0) as usize;
-        let visible = rows.len().clamp(1, max_visible.max(1));
-        // scroll so the selected card stays in view
-        let first = if selected >= visible { selected + 1 - visible } else { 0 };
-        let body_h = card_h * visible as f32;
-        let bh = head_h + body_h + foot_h;
+        // centered content column
+        let col_w = (940.0 * s).min(w - 96.0 * s);
+        let col_x = ((w - col_w) / 2.0).round();
+        let pad = 24.0 * s;
+        let line = chrome_h + 6.0 * s; // text line advance within a card
 
-        // shadow + body + border + top accent
-        Self::push_rect(out, bx - 3.0 * s, by + 6.0 * s, bw + 6.0 * s, bh, INK_0, 0.5);
-        Self::push_rect(out, bx, by, bw, bh, INK_1, 1.0);
-        Self::stroke_rect(out, (bx, by, bw, bh), hair, RULE_2);
-        Self::push_rect(out, bx, by, bw, hair * 2.0, PAPER, 1.0);
-
-        // ---- header: title (left), count + close glyph (right) ----
-        let hy = (by + (head_h - chrome_h) / 2.0).round();
-        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, hy, "\u{f487} PLUGINS", PAPER, 1.0, track);
-        let close_x = bx + bw - pad - char_w;
-        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, close_x, hy, "\u{00d7}", MUTE, 1.0, track);
+        // ---- header band: title + counts + close, subtitle, rule ----
+        let title_y = (top + 30.0 * s).round();
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x, title_y, "\u{f487}  PLUGINS", PAPER, 1.0, track);
+        let close_x = col_x + col_w - char_w;
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, close_x, title_y, "\u{00d7}", MUTE, 1.0, track);
         let count = format!("{n_installed} installed \u{b7} {n_avail} available");
         let count_w = self.text_w(FontId::Chrome, &count, track);
-        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, close_x - 18.0 * s - count_w, hy, &count, MUTE, 1.0, track);
-        Self::push_rect(out, bx, by + head_h, bw, hair, RULE_2, 1.0);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, close_x - 20.0 * s - count_w, title_y, &count, MUTE, 1.0, track);
+        let sub_y = (title_y + chrome_h + 7.0 * s).round();
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x, sub_y, "browse and manage plugins \u{2014} each runs as its own process", MUTE, 1.0, track);
+        let rule_y = (sub_y + chrome_h + 14.0 * s).round();
+        Self::push_rect(out, col_x, rule_y, col_w, hair, RULE_2, 1.0);
 
-        let body_top = by + head_h;
+        // ---- body region (scroll-capped cards) ----
+        let foot_h = chrome_h + 22.0 * s;
+        let body_top = rule_y + 20.0 * s;
+        let body_bottom = bottom - foot_h;
+        let card_h = (chrome_h * 3.0 + 34.0 * s).round();
+        let gap = 12.0 * s;
+        let stride = card_h + gap;
+        let max_visible = (((body_bottom - body_top + gap) / stride).floor().max(1.0)) as usize;
+        let visible = rows.len().clamp(1, max_visible);
+        let first = if selected >= visible { selected + 1 - visible } else { 0 };
 
-        // ---- empty / loading / error states ----
+        // empty / loading / error state, centered in the body
         if rows.is_empty() {
             let (msg, hint) = if loading {
                 ("Fetching the catalog\u{2026}", "")
             } else if fetch_failed {
-                ("Couldn't reach the plugin catalog.", "Check your connection, then reopen the store.")
+                ("Couldn't reach the plugin catalog.", "If the catalog repo is private, install the GitHub CLI and run `gh auth login`.")
             } else {
-                ("No plugins available yet.", "")
+                ("No plugins in the catalog yet.", "")
             };
-            let my = (body_top + card_h / 2.0 - chrome_h).round();
+            let my = ((body_top + body_bottom) / 2.0 - chrome_h).round();
             let mw = self.text_w(FontId::Chrome, msg, track);
-            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + (bw - mw) / 2.0, my, msg, TEXT_2, 1.0, track);
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x + (col_w - mw) / 2.0, my, msg, TEXT_2, 1.0, track);
             if !hint.is_empty() {
                 let hw = self.text_w(FontId::Chrome, hint, track);
-                let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + (bw - hw) / 2.0, my + line, hint, MUTE, 1.0, track);
+                let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x + (col_w - hw) / 2.0, my + line, hint, MUTE, 1.0, track);
             }
         }
 
@@ -3595,23 +3595,22 @@ impl Renderer {
             let Some(r) = rows.get(idx) else {
                 break;
             };
-            let ry = body_top + card_h * vi as f32;
+            let ry = body_top + stride * vi as f32;
             let sel = idx == selected;
+            // each card is an outlined surface; the selected one brightens with a left accent
+            Self::push_rect(out, col_x, ry, col_w, card_h, if sel { INK_3 } else { INK_0 }, if sel { 1.0 } else { 0.3 });
+            Self::stroke_rect(out, (col_x, ry, col_w, card_h), hair, if sel { PAPER } else { RULE_2 });
             if sel {
-                Self::push_rect(out, bx, ry, bw, card_h, INK_3, 1.0);
-                Self::push_rect(out, bx, ry, 3.0 * s, card_h, PAPER, 1.0);
-            } else if vi > 0 {
-                Self::push_rect(out, bx + pad, ry, bw - 2.0 * pad, hair, RULE_2, 0.5);
+                Self::push_rect(out, col_x, ry, 3.0 * s, card_h, PAPER, 1.0);
             }
-            let inner = bx + pad;
+            let inner = col_x + pad;
             // line 1: name + version (left), action chip (right)
-            let l1 = (ry + 9.0 * s).round();
+            let l1 = (ry + 13.0 * s).round();
             let name_col = if sel { PAPER } else { TEXT_2 };
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, inner, l1, &r.name, name_col, 1.0, track);
             let nw = self.text_w(FontId::Chrome, &r.name, track);
             let ver = format!("v{}", r.version);
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, inner + nw + 10.0 * s, l1, &ver, MUTE, 1.0, track);
-            // action chip: filled INSTALL for catalog rows, outlined state for installed
             let (chip, chip_fill, chip_fg, chip_border) = if !r.installed {
                 ("INSTALL", true, INK_0, PAPER)
             } else if r.enabled {
@@ -3619,19 +3618,20 @@ impl Renderer {
             } else {
                 ("DISABLED", false, MUTE, RULE_2)
             };
-            let chip_w = self.text_w(FontId::Chrome, chip, track) + 16.0 * s;
-            let chip_x = bx + bw - pad - chip_w;
-            let chip_h = chrome_h + 6.0 * s;
-            let chip_y = (l1 - 3.0 * s).round();
+            let cw_chip = self.text_w(FontId::Chrome, chip, track);
+            let chip_w = cw_chip + 18.0 * s;
+            let chip_x = col_x + col_w - pad - chip_w;
+            let chip_h = chrome_h + 8.0 * s;
+            let chip_y = (l1 - 4.0 * s).round();
             if chip_fill {
                 Self::push_rect(out, chip_x, chip_y, chip_w, chip_h, PAPER, 1.0);
             } else {
                 Self::stroke_rect(out, (chip_x, chip_y, chip_w, chip_h), hair, chip_border);
             }
-            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, chip_x + 8.0 * s, l1, chip, chip_fg, 1.0, track);
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, chip_x + (chip_w - cw_chip) / 2.0, l1, chip, chip_fg, 1.0, track);
             // line 2: description (truncated to the card width)
             let l2 = (l1 + line).round();
-            let dmax = ((bw - 2.0 * pad) / char_w).floor() as usize;
+            let dmax = ((col_w - 2.0 * pad) / char_w).floor() as usize;
             let desc = if r.desc.is_empty() {
                 "\u{2014}".to_string()
             } else if r.desc.chars().count() > dmax {
@@ -3642,7 +3642,7 @@ impl Renderer {
                 r.desc.clone()
             };
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, inner, l2, &desc, MUTE, 1.0, track);
-            // line 3: permission badges, or a reassuring note when there are none
+            // line 3: permission badges, or a note when there are none
             let l3 = (l2 + line).round();
             if r.perms.is_empty() {
                 let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, inner, l3, "no special permissions", RULE_2, 1.0, track);
@@ -3650,7 +3650,7 @@ impl Renderer {
                 let mut px = inner;
                 for p in &r.perms {
                     let pw = self.text_w(FontId::Chrome, p, track) + 12.0 * s;
-                    if px + pw > bx + bw - pad {
+                    if px + pw > col_x + col_w - pad {
                         break;
                     }
                     Self::stroke_rect(out, (px, (l3 - 2.0 * s).round(), pw, chrome_h + 4.0 * s), hair, RULE_2);
@@ -3661,15 +3661,14 @@ impl Renderer {
         }
 
         // ---- footer: status (left) + key hints (right) ----
-        let fy0 = by + head_h + body_h;
-        Self::push_rect(out, bx, fy0, bw, hair, RULE_2, 1.0);
-        let fy = (fy0 + (foot_h - chrome_h) / 2.0).round();
-        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, fy, &status, MUTE, 1.0, track);
+        Self::push_rect(out, col_x, body_bottom + 6.0 * s, col_w, hair, RULE_2, 1.0);
+        let fy = (body_bottom + 6.0 * s + (foot_h - chrome_h) / 2.0).round();
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x, fy, &status, MUTE, 1.0, track);
         let hints = "\u{2191}\u{2193} select \u{b7} enter install/toggle \u{b7} r remove \u{b7} esc close";
         let hints_w = self.text_w(FontId::Chrome, hints, track);
         let status_w = self.text_w(FontId::Chrome, &status, track);
-        if hints_w + status_w + 24.0 * s < bw - 2.0 * pad {
-            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + bw - pad - hints_w, fy, hints, RULE_2, 1.0, track);
+        if hints_w + status_w + 24.0 * s < col_w {
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, col_x + col_w - hints_w, fy, hints, RULE_2, 1.0, track);
         }
     }
 
