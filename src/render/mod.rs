@@ -2930,7 +2930,7 @@ impl Renderer {
         let _ = Self::seg(&mut self.atlas, &mut out, sx, st_top, "TABS", &self.status_tabs.1, track, wide, scale, RULE_2, MUTE);
 
         // right cluster (right→left): version · READY/PANE · clock
-        let ver = "termie 0.1";
+        let ver = concat!("termie ", env!("CARGO_PKG_VERSION"));
         let ver_w = self.text_w(FontId::Chrome, ver, track);
         let (ready, ready_col) = if self.broadcast {
             ("BROADCAST", PAPER)
