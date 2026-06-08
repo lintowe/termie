@@ -64,20 +64,22 @@ pub fn parse_index(text: &str) -> Vec<Entry> {
 }
 
 /// fetch the remote index with curl (silent, fail-on-error, follow redirects,
-/// 15s cap). returns the parsed entries, or empty on any failure
-pub fn fetch_index() -> Vec<Entry> {
+/// 15s cap). Ok(entries) on a successful fetch (possibly empty if the catalog
+/// is), Err(reason) if the request itself failed — so the store can show an
+/// accurate message instead of conflating "empty" with "unreachable"
+pub fn fetch_index() -> Result<Vec<Entry>, String> {
     let out = Command::new("curl")
         .args(["-fsSL", "--max-time", "15", INDEX_URL])
         .output();
     match out {
-        Ok(o) if o.status.success() => parse_index(&String::from_utf8_lossy(&o.stdout)),
+        Ok(o) if o.status.success() => Ok(parse_index(&String::from_utf8_lossy(&o.stdout))),
         Ok(o) => {
             log::warn!("marketplace index fetch failed: status {:?}", o.status);
-            Vec::new()
+            Err(format!("couldn't reach the catalog (curl exit {})", o.status.code().unwrap_or(-1)))
         }
         Err(e) => {
             log::warn!("marketplace index fetch failed: {e}");
-            Vec::new()
+            Err(format!("couldn't run curl: {e}"))
         }
     }
 }

@@ -55,8 +55,9 @@ enum UserEvent {
     PaneReady(Option<Box<Pane>>),
     /// a plugin process emitted a protocol message (id = plugin index)
     Plugin { id: usize, msg: plugin::PluginMsg },
-    /// the marketplace catalog finished fetching on a worker thread
-    Market(Vec<plugin::market::Entry>),
+    /// the marketplace catalog finished fetching on a worker thread (Ok with
+    /// entries, or Err with a reason the fetch failed)
+    Market(Result<Vec<plugin::market::Entry>, String>),
     /// the global quake hotkey fired (from the hotkey thread)
     ToggleQuake,
     /// an accesskit adapter event (screen-reader tree request / action)
@@ -294,6 +295,8 @@ struct MarketRow {
     id: String,
     name: String,
     version: String,
+    /// one-line catalog description (empty when unknown)
+    description: String,
     permissions: Vec<String>,
     /// installed + currently enabled
     installed: bool,
@@ -308,6 +311,10 @@ struct MarketState {
     selected: usize,
     /// transient status line (last action result / hint)
     status: String,
+    /// the remote catalog is still being fetched on a worker thread
+    loading: bool,
+    /// the catalog fetch failed (vs. simply returning no entries)
+    fetch_failed: bool,
 }
 
 // ---- tree helpers (free functions, by-value where ownership moves) ----
@@ -2404,28 +2411,19 @@ impl App {
             rows: m
                 .rows
                 .iter()
-                .map(|r| {
-                    let tag = if !r.installed {
-                        "install".to_string()
-                    } else if r.enabled {
-                        "on".to_string()
-                    } else {
-                        "off".to_string()
-                    };
-                    let sub = if r.permissions.is_empty() {
-                        format!("v{}", r.version)
-                    } else {
-                        format!("v{} · perms: {}", r.version, r.permissions.join(", "))
-                    };
-                    render::MarketRowView {
-                        label: r.name.clone(),
-                        tag,
-                        sub,
-                    }
+                .map(|r| render::MarketRowView {
+                    name: r.name.clone(),
+                    version: r.version.clone(),
+                    description: r.description.clone(),
+                    permissions: r.permissions.clone(),
+                    installed: r.installed,
+                    enabled: r.enabled,
                 })
                 .collect(),
             selected: m.selected,
             status: m.status.clone(),
+            loading: m.loading,
+            fetch_failed: m.fetch_failed,
         });
         let config = self.config;
         let settings_open = self.pw.settings_open;
@@ -2958,6 +2956,7 @@ impl App {
                     id: d.manifest.id.clone(),
                     name: d.manifest.name.clone(),
                     version: d.manifest.version.clone(),
+                    description: cat.map(|e| e.description.clone()).unwrap_or_default(),
                     permissions: d.manifest.permissions.clone(),
                     installed: true,
                     enabled: d.enabled,
@@ -2972,6 +2971,7 @@ impl App {
                     id: e.id.clone(),
                     name: e.name.clone(),
                     version: e.version.clone(),
+                    description: e.description.clone(),
                     permissions: e.permissions.clone(),
                     installed: false,
                     enabled: false,
@@ -2990,7 +2990,9 @@ impl App {
         self.market = Some(MarketState {
             rows,
             selected: 0,
-            status: "fetching catalog… (enter: toggle/install · r: remove · esc: close)".to_string(),
+            status: "fetching catalog\u{2026}".to_string(),
+            loading: true,
+            fetch_failed: false,
         });
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -3048,7 +3050,7 @@ impl App {
                 id: row.id.clone(),
                 name: row.name.clone(),
                 version: row.version.clone(),
-                description: String::new(),
+                description: row.description.clone(),
                 url,
                 permissions: row.permissions.clone(),
             };
@@ -3122,7 +3124,7 @@ impl App {
                             id: r.id.clone(),
                             name: r.name.clone(),
                             version: r.version.clone(),
-                            description: String::new(),
+                            description: r.description.clone(),
                             url: u.clone(),
                             permissions: r.permissions.clone(),
                         })
@@ -5015,18 +5017,32 @@ impl ApplicationHandler<UserEvent> for App {
                     log::info!("plugin {id} exited");
                 }
             },
-            UserEvent::Market(catalog) => {
-                // the remote catalog arrived: merge it into the open overlay
+            UserEvent::Market(result) => {
+                // the remote catalog arrived (or failed): merge into the open overlay
                 if self.market.is_some() {
-                    let rows = self.market_rows(&catalog);
-                    if let Some(m) = self.market.as_mut() {
-                        m.selected = m.selected.min(rows.len().saturating_sub(1));
-                        m.rows = rows;
-                        m.status = if catalog.is_empty() {
-                            "catalog unavailable (offline?) · showing installed only".to_string()
-                        } else {
-                            "enter: toggle/install · r: remove · esc: close".to_string()
-                        };
+                    match result {
+                        Ok(catalog) => {
+                            let empty = catalog.is_empty();
+                            let rows = self.market_rows(&catalog);
+                            if let Some(m) = self.market.as_mut() {
+                                m.selected = m.selected.min(rows.len().saturating_sub(1));
+                                m.rows = rows;
+                                m.loading = false;
+                                m.fetch_failed = false;
+                                m.status = if empty {
+                                    "the catalog has no plugins yet".to_string()
+                                } else {
+                                    String::new()
+                                };
+                            }
+                        }
+                        Err(e) => {
+                            if let Some(m) = self.market.as_mut() {
+                                m.loading = false;
+                                m.fetch_failed = true;
+                                m.status = e;
+                            }
+                        }
                     }
                     self.redraw();
                 }

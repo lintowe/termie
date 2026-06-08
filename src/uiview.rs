@@ -90,13 +90,15 @@ pub fn maybe_run() -> bool {
         "market" => {
             r.set_market(Some(MarketView {
                 rows: vec![
-                    MarketRowView { label: "tamagotchi  v1.2".into(), tag: "on".into(), sub: "reads: pane title".into() },
-                    MarketRowView { label: "relay  v0.4".into(), tag: "install".into(), sub: "net: localhost:7000".into() },
-                    MarketRowView { label: "css-loader  v2.0".into(), tag: "update".into(), sub: String::new() },
-                    MarketRowView { label: "git-status  v1.0".into(), tag: "off".into(), sub: "runs: git".into() },
+                    MarketRowView { name: "tamagotchi".into(), version: "1.2".into(), description: "a desktop pet that reacts to your terminal".into(), permissions: vec![], installed: true, enabled: true },
+                    MarketRowView { name: "git-status".into(), version: "1.0".into(), description: "live branch + dirty-state widget in the dock".into(), permissions: vec!["read_output".into()], installed: true, enabled: false },
+                    MarketRowView { name: "relay".into(), version: "0.4".into(), description: "bridge sessions over a local socket".into(), permissions: vec!["write_pty".into()], installed: false, enabled: false },
+                    MarketRowView { name: "css-loader".into(), version: "2.0".into(), description: "hot-reload stylesheets while you edit".into(), permissions: vec![], installed: false, enabled: false },
                 ],
-                selected: 1,
-                status: "4 plugins  \u{b7}  enter to toggle".into(),
+                selected: 2,
+                status: String::new(),
+                loading: false,
+                fetch_failed: false,
             }));
             r.settle_overlay();
         }
