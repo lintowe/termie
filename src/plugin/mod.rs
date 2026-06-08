@@ -13,7 +13,7 @@ pub mod market;
 mod proto;
 
 pub use manifest::{id_is_safe, Manifest, KNOWN_PERMISSIONS};
-pub use proto::{HostEvent, PluginCmd, API_VERSION};
+pub use proto::{DrawCmd, HostEvent, PluginCmd, API_VERSION};
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};

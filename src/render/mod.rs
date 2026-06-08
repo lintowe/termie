@@ -190,13 +190,24 @@ pub struct MarketView {
     pub fetch_failed: bool,
 }
 
-/// a plugin-declared Tier-1 widget to draw in the side dock. render-side mirror
-/// of the plugin protocol's Widget, so the renderer doesn't depend on the
-/// plugin module
+/// a plugin-declared widget to draw in the side dock. render-side mirror of the
+/// plugin protocol's Widget, so the renderer doesn't depend on the plugin module.
+/// `draw` is the Tier-2 immediate-mode primitive list (empty for a Tier-1 widget)
 #[derive(Clone, Default)]
 pub struct DockWidget {
     pub title: String,
     pub lines: Vec<String>,
+    pub draw: Vec<DockDraw>,
+    pub canvas_h: Option<f32>,
+}
+
+/// a Tier-2 draw primitive in dock-canvas space (coords normalized 0..1). render
+/// mirror of the protocol's DrawCmd; `color` is resolved against the active
+/// palette at draw time
+#[derive(Clone)]
+pub enum DockDraw {
+    Rect { x: f32, y: f32, w: f32, h: f32, color: String },
+    Text { x: f32, y: f32, text: String, color: String },
 }
 
 pub enum Hit {
@@ -3258,17 +3269,27 @@ impl Renderer {
         let mut y = cy + pad;
         self.dock_hitboxes.clear();
         // snapshot widget data so the atlas can be borrowed mutably while drawing
-        let widgets: Vec<(String, Vec<String>)> =
-            self.dock.iter().map(|w| (w.title.clone(), w.lines.clone())).collect();
-        for (i, (title, lines)) in widgets.iter().enumerate() {
+        let widgets: Vec<DockWidget> = self.dock.clone();
+        for (i, w) in widgets.into_iter().enumerate() {
+            let DockWidget { title, lines, draw, canvas_h } = w;
             let band_top = if i == 0 { cy } else { y - pad * 0.5 };
             if i > 0 {
                 let ry = (y - pad * 0.5).round();
                 Self::push_rect(out, dx + pad, ry, dw - pad * 2.0, hair, RULE, 1.0);
             }
-            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, dx + pad, y.round(), title, PAPER, 1.0, track);
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, dx + pad, y.round(), &title, PAPER, 1.0, track);
             y += row;
-            for line in lines {
+            // Tier-2 canvas: paint the plugin's immediate-mode primitives in a
+            // bounded box, each clipped so a plugin can't paint outside its widget
+            if !draw.is_empty() {
+                let avail = (cy + ch - y - pad * 0.5).max(0.0);
+                let bh = (canvas_h.unwrap_or(72.0) * s).min(avail);
+                if bh >= 1.0 {
+                    self.draw_canvas(out, &draw, (dx + pad, y.round(), (dw - pad * 2.0).max(1.0), bh), track);
+                    y += bh + pad * 0.5;
+                }
+            }
+            for line in &lines {
                 if y > cy + ch - row {
                     break; // clip to dock height; no scroll in v1
                 }
@@ -3277,6 +3298,85 @@ impl Renderer {
             }
             y += pad * 0.5;
             self.dock_hitboxes.push((dx, band_top, dw, (y - band_top).max(0.0)));
+        }
+    }
+
+    /// paint a Tier-2 draw list into the pixel box (bx,by,bw,bh); each primitive's
+    /// normalized coords map into the box and are clipped to it
+    fn draw_canvas(&mut self, out: &mut Vec<Instance>, draw: &[DockDraw], rect: (f32, f32, f32, f32), track: f32) {
+        let (bx, by, bw, bh) = rect;
+        let m = self.atlas.metrics(FontId::Chrome);
+        let adv = m.cell_w + track;
+        for cmd in draw {
+            match cmd {
+                DockDraw::Rect { x, y, w, h, color } => {
+                    let rx = bx + x * bw;
+                    let ry = by + y * bh;
+                    let rw = (w * bw).min(bx + bw - rx).max(0.0);
+                    let rh = (h * bh).min(by + bh - ry).max(0.0);
+                    if rw >= 1.0 && rh >= 1.0 {
+                        let c = self.dock_color(color);
+                        Self::push_rect(out, rx.round(), ry.round(), rw, rh, c, 1.0);
+                    }
+                }
+                DockDraw::Text { x, y, text, color } => {
+                    let tx = bx + x * bw;
+                    let ty = (by + y * bh).round();
+                    // clip vertically; truncate horizontally to the box width
+                    if ty >= by && ty + m.cell_h <= by + bh + 0.5 {
+                        let room = ((bx + bw - tx) / adv).floor().max(0.0) as usize;
+                        if room > 0 {
+                            let clipped: String = text.chars().take(room).collect();
+                            let c = self.dock_color(color);
+                            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, tx, ty, &clipped, c, 1.0, track);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// resolve a Tier-2 color spec (a palette role name or a #hex string) to an
+    /// Rgb, falling back to the dock body color for anything unrecognized
+    fn dock_color(&self, spec: &str) -> Rgb {
+        let p = &self.palette;
+        if let Some(hex) = spec.strip_prefix('#')
+            && let Some(c) = Self::parse_hex_rgb(hex)
+        {
+            return c;
+        }
+        match spec {
+            "paper" => p.paper,
+            "text" | "text2" => p.text2,
+            "mute" => p.mute,
+            "rule" => p.rule,
+            "rule2" => p.rule2,
+            "ink" | "ink1" => p.ink1,
+            "ink0" => p.ink0,
+            "ink3" => p.ink3,
+            "ink4" => p.ink4,
+            "accent" => p.paper,
+            _ => p.text2,
+        }
+    }
+
+    /// parse "#rgb" or "#rrggbb" (leading # already stripped) into an Rgb
+    fn parse_hex_rgb(hex: &str) -> Option<Rgb> {
+        let h = hex.as_bytes();
+        let nib = |c: u8| match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        };
+        match h.len() {
+            3 => Some(Rgb::new(nib(h[0])? * 17, nib(h[1])? * 17, nib(h[2])? * 17)),
+            6 => Some(Rgb::new(
+                nib(h[0])? * 16 + nib(h[1])?,
+                nib(h[2])? * 16 + nib(h[3])?,
+                nib(h[4])? * 16 + nib(h[5])?,
+            )),
+            _ => None,
         }
     }
 
@@ -4259,6 +4359,24 @@ mod tests {
         assert!(clip_image_v(-60.0, 50.0, 200.0).is_none()); // wholly above
         assert!(clip_image_v(250.0, 50.0, 200.0).is_none()); // wholly below
         assert!(clip_image_v(10.0, 0.0, 200.0).is_none()); // degenerate height
+    }
+
+    #[test]
+    fn tier2_hex_color_parses_3_and_6_digit() {
+        use super::{Renderer, Rgb};
+        assert_eq!(Renderer::parse_hex_rgb("fff"), Some(Rgb::new(255, 255, 255)));
+        assert_eq!(Renderer::parse_hex_rgb("000"), Some(Rgb::new(0, 0, 0)));
+        assert_eq!(Renderer::parse_hex_rgb("6486a6"), Some(Rgb::new(0x64, 0x86, 0xa6)));
+        assert_eq!(Renderer::parse_hex_rgb("f0a"), Some(Rgb::new(255, 0, 170)));
+    }
+
+    #[test]
+    fn tier2_hex_color_rejects_bad_input() {
+        use super::Renderer;
+        assert!(Renderer::parse_hex_rgb("").is_none());
+        assert!(Renderer::parse_hex_rgb("12").is_none());
+        assert!(Renderer::parse_hex_rgb("12345").is_none());
+        assert!(Renderer::parse_hex_rgb("gg00zz").is_none());
     }
 }
 

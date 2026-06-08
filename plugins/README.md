@@ -8,11 +8,12 @@ take termie down.
 
 See `docs/plugin-system-plan.md` for the full design and rationale.
 
-> Status: implemented through the marketplace client. The plugin host and v1
-> protocol, Tier-1 widgets and the dock, the in-process bus, local
-> install/enable/disable, and the in-app store all work. Tier-2 immediate-mode
-> rendering, OS sandboxing, and a cross-machine bus are possible later work.
-> The protocol below is the v1 contract (`api_version` 1).
+> Status: implemented through Tier-2 rendering. The plugin host and protocol,
+> Tier-1 widgets and the dock, Tier-2 immediate-mode drawing, the in-process bus,
+> local install/enable/disable, and the in-app store all work. OS sandboxing and a
+> cross-machine bus are possible later work. The protocol below is the **v2**
+> contract (`api_version` 2); a v1 plugin that never sends a draw list keeps
+> working unchanged.
 
 ## Where plugins live
 
@@ -27,13 +28,15 @@ this `plugins/` folder in the repo.
   "id": "tamagotchi",
   "name": "Tamagotchi",
   "version": "0.1.0",
-  "api_version": 1,
+  "api_version": 2,
   "entry": { "cmd": "tamagotchi.exe", "args": [] },
   "permissions": []
 }
 ```
 
 - `id` — unique; defaults to the directory name if omitted.
+- `api_version` — the protocol version the plugin is built against. A Tier-1
+  plugin may still declare `1`; declare `2` if you send a Tier-2 draw list.
 - `entry.cmd` — the executable to run. Relative paths resolve against the plugin
   directory; absolute paths are used as-is.
 - `entry.args` — optional argument list.
@@ -54,38 +57,78 @@ degrades gracefully instead of breaking the stream.
 
 ### Host → plugin events
 
-| `t`              | fields                          |
-|------------------|---------------------------------|
+| `t`              | fields                          |                                  |
+|------------------|---------------------------------|----------------------------------|
 | `hello`          | `api_version`, `permissions[]`  | sent once on startup (handshake) |
-| `focus_changed`  | `pane`                          |
-| `tab_changed`    | `tab`                           |
-| `cwd_changed`    | `cwd`                           |
-| `bell`           | `pane`                          |
-| `widget_clicked` | `id`                            |
-| `message`        | `from`, `topic`, `body`         | from another plugin via the bus |
-| `shutdown`       | —                               |
+| `focus_changed`  | `pane`                          |                                  |
+| `tab_changed`    | `tab`                           |                                  |
+| `cwd_changed`    | `cwd`                           |                                  |
+| `bell`           | `pane`                          |                                  |
+| `widget_clicked` | `id`                            |                                  |
+| `message`        | `from`, `topic`, `body`         | from another plugin via the bus  |
+| `shutdown`       | —                               |                                  |
+
+`hello.api_version` is the host's protocol version — read it to decide whether to
+send a Tier-2 draw list.
 
 ### Plugin → termie commands
 
-| `t`              | fields                          |
-|------------------|---------------------------------|
-| `ready`          | `name`, `api_version`           | announce yourself after `hello` |
-| `declare_widget` | `widget` (`id`, `title`, `lines[]`) |
-| `update_widget`  | `widget`                        |
-| `notify`         | `text`                          |
-| `write_pty`      | `data`                          | requires the `write_pty` permission |
-| `publish`        | `topic`, `body`                 | publish to the bus |
-| `subscribe`      | `topic` (`"*"` = all)           |
+| `t`              | fields                              |                                     |
+|------------------|-------------------------------------|-------------------------------------|
+| `ready`          | `name`, `api_version`               | announce yourself after `hello`     |
+| `declare_widget` | `widget`                            |                                     |
+| `update_widget`  | `widget`                            |                                     |
+| `notify`         | `text`                              |                                     |
+| `write_pty`      | `data`                              | requires the `write_pty` permission |
+| `publish`        | `topic`, `body`                     | publish to the bus                  |
+| `subscribe`      | `topic` (`"*"` = all)               |                                     |
+
+### The `widget` object
+
+| field      | type       |                                                          |
+|------------|------------|----------------------------------------------------------|
+| `id`       | string     | stable per widget; updates upsert by `id`                |
+| `title`    | string     | drawn at the top of the dock card                        |
+| `lines[]`  | string[]   | Tier-1 text body                                         |
+| `draw[]`   | DrawCmd[]  | Tier-2 immediate-mode primitives (optional, `api ≥ 2`)   |
+| `canvas_h` | number     | Tier-2 canvas height in logical px (optional, 8–360)     |
+
+A Tier-1 widget sets `lines`. A Tier-2 widget sets `draw` (and usually
+`canvas_h`); termie paints the canvas under the title, then any `lines` below it.
+Unknown widget fields are ignored, so a v1 host silently shows the Tier-1 body.
+
+### Tier-2 immediate-mode drawing (`api_version` ≥ 2)
+
+`draw` is a list of primitives painted into the widget's canvas box. Coordinates
+are **normalized 0..1** within that box, so a plugin is independent of DPI and
+window size and can never paint outside its own widget. Up to 256 primitives are
+drawn per widget; extras are dropped.
+
+| primitive | fields                              |
+|-----------|-------------------------------------|
+| `rect`    | `x`, `y`, `w`, `h`, `color`         |
+| `text`    | `x`, `y`, `text`, `color`           |
+
+`color` is a palette role — `paper`, `text`, `mute`, `rule`, `rule2`, `ink`,
+`ink0`, `ink3`, `ink4`, `accent` — or a `"#rrggbb"` / `"#rgb"` hex string. Palette
+roles follow the user's theme; an unrecognized spec falls back to the body color.
+A meter is a track `rect` plus a narrower fill `rect`; a bar chart is a row of
+rects; labels are `text`.
 
 ### Minimal exchange
 
 ```
-<- {"t":"hello","api_version":1,"permissions":[]}
--> {"t":"ready","name":"tamagotchi","api_version":1}
--> {"t":"declare_widget","widget":{"id":"pet","title":"Tama","lines":["happy","hunger 80%"]}}
-<- {"t":"bell","pane":0}
--> {"t":"update_widget","widget":{"id":"pet","title":"Tama","lines":["startled!","hunger 80%"]}}
+<- {"t":"hello","api_version":2,"permissions":[]}
+-> {"t":"ready","name":"tamagotchi","api_version":2}
+-> {"t":"declare_widget","widget":{"id":"pet","title":"Tama","lines":[]}}
+-> {"t":"update_widget","widget":{"id":"pet","title":"Tama","canvas_h":76,"draw":[
+     {"t":"text","x":0.0,"y":0.0,"text":">  w  <","color":"paper"},
+     {"t":"rect","x":0.3,"y":0.3,"w":0.7,"h":0.14,"color":"ink3"},
+     {"t":"rect","x":0.3,"y":0.3,"w":0.56,"h":0.14,"color":"#83a06d"}
+   ]}}
 ```
 
 A plugin should read lines from stdin in a loop and exit cleanly when stdin
-closes or it receives `shutdown`.
+closes or it receives `shutdown`. The reference `tamagotchi` plugin sends the
+Tier-1 body on a v1 host and upgrades to graphical meters on a v2 host — see
+`plugins/tamagotchi/main.rs`.

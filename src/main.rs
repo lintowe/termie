@@ -2085,9 +2085,23 @@ impl App {
             C::Notify { text } => {
                 log::info!("plugin notify: {text}");
             }
-            // Tier-1 widgets: upsert by (plugin, id) and rebuild the dock
+            // plugin widgets: upsert by (plugin, id) and rebuild the dock. a
+            // Tier-2 widget also carries an immediate-mode draw list (mapped into
+            // the renderer's dock mirror here)
             C::DeclareWidget(w) | C::UpdateWidget(w) => {
-                let dw = render::DockWidget { title: w.title, lines: w.lines };
+                let draw = w
+                    .draw
+                    .into_iter()
+                    .map(|d| match d {
+                        plugin::DrawCmd::Rect { x, y, w: rw, h, color } => {
+                            render::DockDraw::Rect { x, y, w: rw, h, color }
+                        }
+                        plugin::DrawCmd::Text { x, y, text, color } => {
+                            render::DockDraw::Text { x, y, text, color }
+                        }
+                    })
+                    .collect();
+                let dw = render::DockWidget { title: w.title, lines: w.lines, draw, canvas_h: w.canvas_h };
                 match self
                     .plugin_widgets
                     .iter_mut()
