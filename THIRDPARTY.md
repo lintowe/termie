@@ -22,7 +22,8 @@ that project.
 
 ## Rust dependencies
 
-termie links a number of Rust crates (anyhow, bytemuck, cosmic-text, log,
-pollster, portable-pty, vte, wgpu, windows, winit), each under permissive
-licenses (MIT, Apache-2.0, and similar). Their full license texts can be
-regenerated from the dependency tree with `cargo about` or `cargo deny`.
+termie links a number of Rust crates (anyhow, bytemuck, cosmic-text, log, png,
+pollster, portable-pty, vte, wgpu, windows, winit, and their transitive
+dependencies), each under permissive licenses (MIT, Apache-2.0, and similar).
+Their full license texts can be regenerated from the dependency tree with
+`cargo about` or `cargo deny`.

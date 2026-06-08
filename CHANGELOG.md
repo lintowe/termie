@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Terminal fidelity
+- **Kitty PNG images** (`f=100`): the graphics protocol now decodes PNG payloads (paletted / grayscale / 16-bit are normalized to RGBA8), alongside the existing raw RGB (`f=24`) and RGBA (`f=32`).
+
 ### Dev tooling
 - Live PTY integration tests — spawn a real shell, feed its output through the terminal (answering the queries ConPTY gates on), and assert the rendered grid. `#[ignore]`d so they stay out of CI; run with `cargo test -- --ignored`.
 
