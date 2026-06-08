@@ -9,9 +9,12 @@ You need the stable [Rust toolchain](https://rustup.rs/).
 ```powershell
 cargo build              # debug
 cargo test               # unit + golden tests
+cargo test -- --ignored  # live PTY integration tests (spawn a real shell; local only)
 cargo clippy --all-targets
 cargo build --release    # optimized, ~7.6 MB
 ```
+
+The `--ignored` tests spawn a real shell through the pty and aren't run in CI (they're timing-sensitive); run them locally when changing the pty or terminal-response path.
 
 The bundled example plugins are independent crates. If you touch them, build each:
 

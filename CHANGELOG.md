@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Dev tooling
+- Live PTY integration tests — spawn a real shell, feed its output through the terminal (answering the queries ConPTY gates on), and assert the rendered grid. `#[ignore]`d so they stay out of CI; run with `cargo test -- --ignored`.
+
 ## v0.1.2 — 2026-06-08
 
 ### Plugins
