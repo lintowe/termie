@@ -1,6 +1,8 @@
 //! plugin marketplace: a curated remote index of installable plugins plus the
-//! local install/remove plumbing. network + archive work shells out to tools
-//! that ship with Windows (`curl`, `tar`) so termie gains no new dependency.
+//! local install/remove plumbing. archive work shells out to `tar` (ships with
+//! Windows). catalog + plugin downloads go through the GitHub CLI (`gh`) when
+//! the file lives in the catalog repo, so a private catalog works with the
+//! user's existing login, and fall back to anonymous `curl` for a public host.
 //!
 //! security: downloaded archives are unpacked into a fresh temp dir and the
 //! resulting `plugin.json` is validated (id safe + matches the catalog id)
@@ -17,6 +19,12 @@ use super::manifest::{id_is_safe, Manifest};
 /// the security model is trust-the-store (subprocess is not a sandbox)
 pub const INDEX_URL: &str =
     "https://raw.githubusercontent.com/lintowe/termie-plugins/main/index.json";
+/// the catalog repo + ref behind the raw URLs above. files under this prefix are
+/// fetched through `gh` (authenticated) so a private catalog works; everything
+/// else falls back to anonymous curl
+const CATALOG_REPO: &str = "lintowe/termie-plugins";
+const CATALOG_REF: &str = "main";
+const CATALOG_RAW_PREFIX: &str = "https://raw.githubusercontent.com/lintowe/termie-plugins/main/";
 
 /// one catalog entry from the remote index
 #[derive(Clone, Debug, PartialEq)]
@@ -63,25 +71,39 @@ pub fn parse_index(text: &str) -> Vec<Entry> {
         .collect()
 }
 
-/// fetch the remote index with curl (silent, fail-on-error, follow redirects,
-/// 15s cap). Ok(entries) on a successful fetch (possibly empty if the catalog
-/// is), Err(reason) if the request itself failed — so the store can show an
-/// accurate message instead of conflating "empty" with "unreachable"
-pub fn fetch_index() -> Result<Vec<Entry>, String> {
-    let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "15", INDEX_URL])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(parse_index(&String::from_utf8_lossy(&o.stdout))),
-        Ok(o) => {
-            log::warn!("marketplace index fetch failed: status {:?}", o.status);
-            Err(format!("couldn't reach the catalog (curl exit {})", o.status.code().unwrap_or(-1)))
-        }
-        Err(e) => {
-            log::warn!("marketplace index fetch failed: {e}");
-            Err(format!("couldn't run curl: {e}"))
+/// fetch raw bytes for a catalog URL. files under the catalog repo go through
+/// the GitHub CLI (`gh api … Accept: raw`) so a private repo works with the
+/// user's login; anything else — or a missing/unauthenticated gh — falls back
+/// to anonymous curl
+fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let repo_path = url.strip_prefix(CATALOG_RAW_PREFIX);
+    if let Some(path) = repo_path {
+        let api = format!("repos/{CATALOG_REPO}/contents/{path}?ref={CATALOG_REF}");
+        match Command::new("gh")
+            .args(["api", &api, "-H", "Accept: application/vnd.github.raw"])
+            .output()
+        {
+            Ok(o) if o.status.success() => return Ok(o.stdout),
+            Ok(o) => log::warn!("gh fetch of {path} failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
+            Err(e) => log::warn!("gh unavailable ({e}); trying curl"),
         }
     }
+    match Command::new("curl").args(["-fsSL", "--max-time", "60", url]).output() {
+        Ok(o) if o.status.success() => Ok(o.stdout),
+        Ok(_) if repo_path.is_some() => {
+            Err("couldn't reach the catalog — install the GitHub CLI and run `gh auth login`".to_string())
+        }
+        Ok(o) => Err(format!("fetch failed (curl exit {})", o.status.code().unwrap_or(-1))),
+        Err(e) => Err(format!("couldn't run curl: {e}")),
+    }
+}
+
+/// fetch + parse the catalog index. Ok(entries) on a successful fetch (possibly
+/// empty if the catalog is), Err(reason) if the request itself failed — so the
+/// store can tell "empty" from "unreachable"
+pub fn fetch_index() -> Result<Vec<Entry>, String> {
+    let bytes = fetch_bytes(INDEX_URL)?;
+    Ok(parse_index(&String::from_utf8_lossy(&bytes)))
 }
 
 /// download + install `entry` into `plugins_dir`. downloads the archive to a
@@ -99,17 +121,9 @@ pub fn install(entry: &Entry, plugins_dir: &Path, temp_dir: &Path) -> Result<Man
     let unpack = work.join("unpack");
     std::fs::create_dir_all(&unpack).map_err(|e| format!("unpack dir: {e}"))?;
 
-    // download
-    let dl = Command::new("curl")
-        .args(["-fsSL", "--max-time", "60", "-o"])
-        .arg(&archive)
-        .arg(&entry.url)
-        .status();
-    match dl {
-        Ok(s) if s.success() => {}
-        Ok(s) => return Err(format!("download failed: status {s:?}")),
-        Err(e) => return Err(format!("download failed: {e}")),
-    }
+    // download (authenticated via gh for the private catalog repo, else curl)
+    let bytes = fetch_bytes(&entry.url).map_err(|e| format!("download failed: {e}"))?;
+    std::fs::write(&archive, &bytes).map_err(|e| format!("write archive: {e}"))?;
 
     // unpack with tar (handles .zip on modern Windows). -C extracts into unpack
     let ex = Command::new("tar")
