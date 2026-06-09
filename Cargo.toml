@@ -5,6 +5,11 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A GPU-rendered terminal multiplexer for Windows — a cockpit for AI TUIs"
 repository = "https://github.com/lintowe/termie"
+homepage = "https://github.com/lintowe/termie"
+readme = "README.md"
+keywords = ["terminal", "multiplexer", "gpu", "wgpu", "windows"]
+categories = ["command-line-utilities", "gui"]
+rust-version = "1.88"
 
 [dependencies]
 accesskit = "0.24"
