@@ -66,12 +66,20 @@ impl Plugin {
         on_msg: impl Fn(PluginMsg) + Send + 'static,
     ) -> std::io::Result<Plugin> {
         let id = id.into();
-        let mut child = Command::new(program)
-            .args(args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        // a gui host spawning a console-subsystem plugin would otherwise pop a
+        // console window; suppress it (the sandbox path already does)
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn()?;
 
         let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().expect("piped stdout"));
         let writer = child.stdin.take().map(|w| Box::new(w) as Box<dyn Write + Send>);
