@@ -1238,8 +1238,9 @@ struct Persisted {
     /// run plugins inside a windows appcontainer for privilege isolation
     /// (`plugin_sandbox=appcontainer`); off by default
     plugin_sandbox: bool,
-    /// experimental: paint inline instead of via request_redraw for pty output
-    /// (`inline_paint=true`); off by default — wants on-device tear-checking
+    /// paint pty output inline instead of via the request_redraw hop, shaving up
+    /// to a frame of input-to-photon latency and staying tear-free under Fifo
+    /// vsync; on by default — set `inline_paint=false` to use the redraw hop
     inline_paint: bool,
     /// draw the input-to-photon latency hud (`latency_hud=true`); off by default
     latency_hud: bool,
@@ -1267,7 +1268,7 @@ impl Default for Persisted {
             quake_key: None,
             wsl_distro: None,
             plugin_sandbox: false,
-            inline_paint: false,
+            inline_paint: true,
             latency_hud: false,
         }
     }
@@ -3703,8 +3704,9 @@ impl App {
         if self.persisted.plugin_sandbox {
             let _ = writeln!(s, "plugin_sandbox=appcontainer");
         }
-        if self.persisted.inline_paint {
-            let _ = writeln!(s, "inline_paint=true");
+        if !self.persisted.inline_paint {
+            // on by default; persist only the opt-out
+            let _ = writeln!(s, "inline_paint=false");
         }
         if self.persisted.latency_hud {
             let _ = writeln!(s, "latency_hud=true");
