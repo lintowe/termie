@@ -12,7 +12,8 @@ env:
 jobs:
   # build the app + run the unit tests on the primary (Windows) target
   test:
-    runs-on: windows-latest
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,7 +27,8 @@ jobs:
   # formatting is intentionally not enforced; clippy runs as a quality gate and
   # the build is warning-clean, so any new clippy warning shows up clearly
   lint:
-    runs-on: windows-latest
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -38,7 +40,8 @@ jobs:
 
   # security advisory scan of the dependency tree (RUSTSEC database)
   audit:
-    runs-on: ubuntu-latest
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, linux-vm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -51,7 +54,8 @@ jobs:
   # the bundled example plugins are independent crates (their own workspace);
   # build them so the reference plugins never silently break
   plugins:
-    runs-on: windows-latest
+    if: github.actor == 'lintowe'
+    runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
