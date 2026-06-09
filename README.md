@@ -86,7 +86,7 @@ Drop files in `%APPDATA%\termie\`:
 
 ## Plugins
 
-Plugins are separate processes termie talks to over newline-delimited JSON, so a plugin can be any language and as heavy as it likes while the core stays lean. They render **Tier-1 widgets** in a side dock and can talk to each other over an in-process bus. The in-app marketplace (palette → "plugins") browses, installs, enables/disables, and removes them; sensitive permissions are off by default and shown at install. Two reference plugins live in [`plugins/`](plugins/): a tamagotchi pet and a session relay.
+Plugins are separate processes termie talks to over newline-delimited JSON, so a plugin can be any language and as heavy as it likes while the core stays lean. They render widgets in a side dock — **Tier-1** text or **Tier-2** immediate-mode graphics (drawn meters, bars, and labels) — talk to each other over an in-process bus, and can be confined to a Windows AppContainer sandbox (opt-in). The in-app marketplace (palette → "plugins") browses, installs, enables/disables, and removes them; sensitive permissions are off by default and shown at install. Two reference plugins live in [`plugins/`](plugins/): a tamagotchi pet and a session relay.
 
 ## Building & development
 
