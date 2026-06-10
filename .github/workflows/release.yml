@@ -31,7 +31,7 @@ jobs:
         run: cargo build --release
 
       - name: package
-        shell: pwsh
+        shell: powershell
         run: |
           $tag = "${{ github.ref_name }}"
           $stage = Join-Path $env:RUNNER_TEMP "termie-pkg"
@@ -42,10 +42,9 @@ jobs:
           $zip = "termie-$tag-windows-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
-          "ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: attach to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: ${{ env.ZIP }}
+          files: termie-${{ github.ref_name }}-windows-x64.zip
           fail_on_unmatched_files: true

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 — 2026-06-11
+
+### Fixes
+- **Release packaging** now runs under Windows PowerShell on the build runner (which has no PowerShell 7), so the zip is actually built and attached. 0.2.0 and 0.2.1 were tagged but their release builds didn't publish a binary; 0.2.2 is the first 0.2.x with an attached download.
+
 ## 0.2.1 — 2026-06-11
 
 ### Project
