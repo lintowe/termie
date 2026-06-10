@@ -32,6 +32,7 @@
 
 ### Fixes
 - The settings panel now **eases shut** instead of snapping. The close tween was front-loaded by an ease-out curve, so most of the motion happened in the first few frames and it read as instant; it now eases in-out (and runs a touch longer) so it visibly slides back to the terminal.
+- The **browse** button in the settings PLUGINS row is no longer clipped along its top edge — the scrollable body now has a few px of top headroom so the first row clears the scissor at `body_top`.
 
 ## v0.1.3 — 2026-06-08
 

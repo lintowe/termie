@@ -1873,7 +1873,9 @@ impl Renderer {
         let hdr_adv = 32.0 * s;
         let chip_h = 42.0 * s;
         let key_row = 22.0 * s;
-        let mut y = 0.0;
+        // top headroom so the first row isn't clipped by the body scissor at
+        // body_top — the browse button sits a few px above its label row
+        let mut y = 8.0 * s;
         // PLUGINS first so the marketplace is the first thing in the gear menu
         let sec_plugins = y;
         y += hdr_adv;
