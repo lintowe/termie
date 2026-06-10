@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.1 — 2026-06-11
+
+### Project
+- **Plugins moved to the [`termie-plugins`](https://github.com/lintowe/termie-plugins) registry** — each plugin now lives there as source and is built into the catalog the in-app store fetches, and that's where plugins are contributed. No change to the termie binary or to how the store works.
+- **CI hardening**: GitHub Actions are pinned to full commit SHAs, the workflow token is least-privilege (`contents: read`), and `cargo-audit` runs as part of CI.
+
 ## v0.2.0 — 2026-06-11
 
 ### Terminal fidelity
