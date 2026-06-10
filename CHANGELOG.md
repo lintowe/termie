@@ -1,12 +1,12 @@
 # Changelog
 
-## v0.2.1 — 2026-06-11
+## 0.2.1 — 2026-06-11
 
 ### Project
 - **Plugins moved to the [`termie-plugins`](https://github.com/lintowe/termie-plugins) registry** — each plugin now lives there as source and is built into the catalog the in-app store fetches, and that's where plugins are contributed. No change to the termie binary or to how the store works.
 - **CI hardening**: GitHub Actions are pinned to full commit SHAs, the workflow token is least-privilege (`contents: read`), and `cargo-audit` runs as part of CI.
 
-## v0.2.0 — 2026-06-11
+## 0.2.0 — 2026-06-11
 
 ### Terminal fidelity
 - **Taskbar progress** (ConEmu OSC 9;4): a program reporting progress — winget, CI scripts, build tools — now lights up termie's Windows taskbar button: green for normal progress, red for error, yellow for paused, pulsing for indeterminate. Progress from every pane in the window is folded into one value (error wins, then paused, then the largest percentage), clears when the reporting pane closes or resets, and keeps updating while the window is minimized — which is exactly when the taskbar is what you're watching.
@@ -40,7 +40,7 @@
 - The settings panel now **eases shut** instead of snapping. The close tween was front-loaded by an ease-out curve, so most of the motion happened in the first few frames and it read as instant; it now eases in-out (and runs a touch longer) so it visibly slides back to the terminal.
 - The **browse** button in the settings PLUGINS row is no longer clipped along its top edge — the scrollable body now has a few px of top headroom so the first row clears the scissor at `body_top`.
 
-## v0.1.3 — 2026-06-08
+## 0.1.3 — 2026-06-08
 
 ### Terminal fidelity
 - **Kitty PNG images** (`f=100`): the graphics protocol now decodes PNG payloads (paletted / grayscale / 16-bit are normalized to RGBA8), alongside the existing raw RGB (`f=24`) and RGBA (`f=32`).
@@ -48,7 +48,7 @@
 ### Dev tooling
 - Live PTY integration tests — spawn a real shell, feed its output through the terminal (answering the queries ConPTY gates on), and assert the rendered grid. `#[ignore]`d so they stay out of CI; run with `cargo test -- --ignored`.
 
-## v0.1.2 — 2026-06-08
+## 0.1.2 — 2026-06-08
 
 ### Plugins
 - Rebuilt the in-app plugin store as a **full-page view** — each plugin is a card with its name, version, description, permission badges, and an **Install** / **Enabled** / **Disabled** action, with live installed/available counts in the header and distinct loading, empty, and unreachable-catalog states.
@@ -58,7 +58,7 @@
 ### Fixes
 - Settings: the PLUGINS section rule no longer draws through the "browse" button.
 
-## v0.1.1 — 2026-06-08
+## 0.1.1 — 2026-06-08
 
 ### Terminal fidelity
 - **Kitty keyboard protocol** (disambiguate + report-event-types): `Shift+Enter` now inserts a newline in TUIs that support it, with faithful modified-key reporting. termie advertises `TERM_PROGRAM=ghostty` so those apps enable it; `Ctrl+J` and `\`-then-Enter remain as universal fallbacks.
