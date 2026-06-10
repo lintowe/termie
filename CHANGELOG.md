@@ -30,6 +30,9 @@
 ### Rendering
 - **Lower input latency by default**: terminal output now paints inline instead of through the request-redraw hop, shaving up to a frame of input→photon latency while staying tear-free under Fifo vsync and one present per loop turn. Set `inline_paint=false` to restore the previous path. An optional latency HUD (`latency_hud=true`) draws a live input→photon (p50/p95) and frame-interval readout in the bottom-left for measuring it.
 
+### Fixes
+- The settings panel now **eases shut** instead of snapping. The close tween was front-loaded by an ease-out curve, so most of the motion happened in the first few frames and it read as instant; it now eases in-out (and runs a touch longer) so it visibly slides back to the terminal.
+
 ## v0.1.3 — 2026-06-08
 
 ### Terminal fidelity

@@ -3026,7 +3026,6 @@ impl App {
 
     /// docked fraction of the settings panel (0 = hidden, 1 = fully in)
     fn settings_p(&self) -> f32 {
-        const DUR: f32 = 0.14;
         match self.settings_anim {
             None => {
                 if self.pw.settings_open {
@@ -3036,16 +3035,24 @@ impl App {
                 }
             }
             Some(t) => {
-                let e = (t.elapsed().as_secs_f32() / DUR).clamp(0.0, 1.0);
-                // ease-out cubic
-                let eased = 1.0_f32 - (1.0_f32 - e).powi(3);
+                let e = (t.elapsed().as_secs_f32() / self.settings_anim_dur()).clamp(0.0, 1.0);
                 if self.pw.settings_open {
-                    eased
+                    // ease-out cubic: rushes in, then settles
+                    1.0_f32 - (1.0_f32 - e).powi(3)
                 } else {
-                    1.0 - eased
+                    // ease-in-out (smoothstep): the close eases away from rest
+                    // instead of snapping. a plain ease-out front-loaded the
+                    // motion, so the panel looked like it vanished instantly
+                    1.0_f32 - e * e * (3.0_f32 - 2.0_f32 * e)
                 }
             }
         }
+    }
+
+    /// settings slide duration; the close runs a little longer so the slide back
+    /// to the terminal is clearly visible rather than a blink
+    fn settings_anim_dur(&self) -> f32 {
+        if self.pw.settings_open { 0.14 } else { 0.22 }
     }
 
     /// 0→1 fade for the focused-pane accent border after a focus change, so it
@@ -5701,7 +5708,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // settings slide: redraw at ~60fps until the transition settles
         if let Some(t) = self.settings_anim {
-            if t.elapsed().as_secs_f32() >= 0.14 {
+            if t.elapsed().as_secs_f32() >= self.settings_anim_dur() {
                 self.settings_anim = None;
             } else {
                 self.redraw();
