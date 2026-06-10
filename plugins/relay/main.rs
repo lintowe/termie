@@ -1,3 +1,5 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 //! termie reference plugin: a session relay over the in-process plugin bus.
 //!
 //! demonstrates the Phase-3 bus: this plugin `subscribe`s to a topic, and

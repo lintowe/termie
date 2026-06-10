@@ -1,15 +1,20 @@
 # tamagotchi — termie reference plugin
 
-A tiny pet that lives in termie's plugin dock. It's the first-party reference
-for the v1 plugin protocol: zero dependencies, ~150 lines, demonstrates
-declaring/updating a Tier-1 widget and reacting to host events.
+A small animated pet that lives in termie's plugin dock. It's the first-party
+reference for the Tier-2 plugin protocol: zero dependencies, demonstrates an
+immediate-mode draw list and reacting to host events.
 
 ## What it does
 
-- Declares a `pet` widget, then repaints it every ~2s as the pet gets hungrier
-  and a little less joyful over time.
-- Reacts to host events: a terminal `bell` startles it happy; switching pane
-  focus cheers it up slightly.
+- Declares a `pet` widget, then animates it: the creature idles, blinks, hops,
+  and naps when left alone, and its food/joy gauges drift over time.
+- Reacts to host events: a terminal `bell` startles it into a sparkly bounce,
+  switching pane focus cheers it up, and clicking the card pets and feeds it.
+- Draws a pixel creature plus segmented gauges from `rect`/`text` primitives on a
+  Tier-2 host, and falls back to a face + text bars on an older Tier-1 host
+  (chosen from the `hello` handshake).
+- Only sends a frame when the drawing changes, so an idle pet lets the terminal
+  idle too.
 - Exits cleanly when termie closes its stdin or sends `shutdown`.
 
 ## Build & install
