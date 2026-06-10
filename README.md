@@ -20,7 +20,7 @@ termie is a from-scratch terminal emulator + multiplexer written in Rust. It ren
 - **Tabs + recursive split panes.** Split vertically/horizontally, drag dividers, swap panes, tear a pane off into its own window, and broadcast input to every pane in a tab (cockpit mode).
 - **Built for many repos.** Splits and a "new tab here" command open in the focused pane's directory; per-tab shell choice (`pwsh` / `cmd` / `wsl`) from the palette; drag a file in to type its path; right-click to copy the selection or paste.
 - **Command palette.** `Ctrl+Shift+P` for fuzzy access to every action.
-- **Faithful keyboard + modern escapes.** The kitty keyboard protocol (so `Shift+Enter` inserts a newline in TUIs, plus accurate modified-key reporting), OSC 8 clickable hyperlinks, OSC 52 clipboard writes, OSC 4/10/11/12 color queries, and curly/double/dotted underline styles, strikethrough, and blink.
+- **Faithful keyboard + modern escapes.** The kitty keyboard protocol (so `Shift+Enter` inserts a newline in TUIs, plus accurate modified-key reporting), OSC 8 clickable hyperlinks, OSC 52 clipboard writes, OSC 4/10/11/12 color queries, OSC 9;4 progress shown on the Windows taskbar button, and curly/double/dotted underline styles, strikethrough, and blink.
 - **Real terminal emulation.** [vte](https://github.com/alacritty/vte)-based parser, alt screen, scroll regions, mouse reporting (SGR + legacy), bracketed paste, OSC-7 cwd (tab labels + window title), URL detection (Ctrl-click to open), DECSCUSR cursor shapes, and DEC 2026 synchronized output for tear-free frames.
 - **Inline images + color emoji.** Displays images sent over the kitty graphics protocol (raw RGB / RGBA / PNG, scroll-anchored to the cell grid) and renders color emoji — both packed into a dedicated RGBA atlas beside the monochrome glyph cache.
 - **Sessions, IME, and a screen-reader path.** Restores the tab and split layout on launch with crash recovery, composes input through the IME (CJK and friends), and exposes the focused pane to assistive tech via AccessKit.
@@ -68,7 +68,7 @@ cargo run --release
 | `Ctrl+Shift+F` | find in scrollback |
 | `Ctrl+Up` / `Ctrl+Down` | jump to previous / next shell prompt |
 
-In find, `Enter` / `Shift+Enter` step through matches and `Esc` closes. Double-click selects a word, triple-click selects the line. Prompt jumping uses OSC 133 marks, emitted by most shells once their shell-integration hook is enabled (starship, or the zsh/bash/fish integration scripts, or PowerShell's `PSReadLine`); without it the prompt keys pass through to the running program.
+In find, `Enter` / `Shift+Enter` step through matches and `Esc` closes. Double-click selects a word, triple-click selects the line. `Ctrl`+mouse-wheel zooms the font (also on the palette as font increase / decrease / reset). Prompt jumping uses OSC 133 marks, emitted by most shells once their shell-integration hook is enabled (starship, or the zsh/bash/fish integration scripts, or PowerShell's `PSReadLine`); without it the prompt keys pass through to the running program.
 
 Open the command palette (`Ctrl+Shift+P`) for settings, theme cycling, pane mode, and the plugins marketplace.
 

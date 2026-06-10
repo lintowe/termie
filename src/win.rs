@@ -52,6 +52,54 @@ pub fn apply_window_effects(hwnd_handle: isize) {
 #[cfg(not(windows))]
 pub fn apply_window_effects(_hwnd_handle: isize) {}
 
+/// reflect OSC 9;4 progress on the window's taskbar button. state: 0 clear,
+/// 1 normal (green), 2 error (red), 3 indeterminate (pulse), 4 paused (yellow);
+/// pct is 0–100 and ignored for clear/indeterminate. failures are swallowed —
+/// taskbar flair must never take the terminal down
+#[cfg(windows)]
+pub fn set_taskbar_progress(hwnd_handle: isize, state: u8, pct: u8) {
+    use std::cell::OnceCell;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        ITaskbarList3, TaskbarList, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
+        TBPF_PAUSED,
+    };
+    thread_local! {
+        // created once per thread; None caches a failed creation so we don't
+        // retry com on every output chunk
+        static TASKBAR: OnceCell<Option<ITaskbarList3>> = const { OnceCell::new() };
+    }
+    let hwnd = HWND(hwnd_handle as *mut core::ffi::c_void);
+    TASKBAR.with(|cell| {
+        let tb = cell.get_or_init(|| unsafe {
+            // winit already initialized com (ole drag-drop) on this thread;
+            // S_FALSE / RPC_E_CHANGED_MODE here are both fine to ignore
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER).ok()
+        });
+        let Some(tb) = tb else { return };
+        let flags = match state {
+            1 => TBPF_NORMAL,
+            2 => TBPF_ERROR,
+            3 => TBPF_INDETERMINATE,
+            4 => TBPF_PAUSED,
+            _ => TBPF_NOPROGRESS,
+        };
+        unsafe {
+            let _ = tb.SetProgressState(hwnd, flags);
+            if matches!(state, 1 | 2 | 4) {
+                let _ = tb.SetProgressValue(hwnd, pct.min(100) as u64, 100);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn set_taskbar_progress(_hwnd_handle: isize, _state: u8, _pct: u8) {}
+
 #[cfg(windows)]
 pub fn local_hm() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;

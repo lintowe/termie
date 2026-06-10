@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Terminal fidelity
+- **Taskbar progress** (ConEmu OSC 9;4): a program reporting progress — winget, TUIs, CI scripts — now lights up termie's Windows taskbar button: green for normal progress, red for error, yellow for paused, pulsing for indeterminate. Progress from every pane in the window is folded into one value (error wins, then paused, then the largest percentage), clears when the reporting pane closes or resets, and keeps updating while the window is minimized — which is exactly when the taskbar is what you're watching.
+
+### Workflow
+- **`Ctrl`+mouse-wheel font zoom**, matching Windows Terminal; the palette's font increase / decrease / reset remain.
+
+### Performance
+- **No GPU frames while minimized**: terminal output streaming into a minimized (or quake-hidden) window still updates the grid and the taskbar progress but skips painting; the first turn after restore paints the latest state.
+
 ### Plugins
 - **Tier-2 widget drawing** (plugin protocol `api_version` 2): a plugin can now send an immediate-mode `draw` list — `rect` and `text` primitives in coordinates normalized to the widget canvas, colored by palette role or `#hex` — painted in a `canvas_h`-tall box under the widget title. Each primitive is clipped to the widget so a plugin can never paint over the terminal, and the list is bounded (256 primitives, coordinates clamped). Tier-1 text widgets are unchanged, and a v1 plugin that never sends a draw list is unaffected. The reference tamagotchi plugin upgrades to graphical food/joy meters on a v2 host and falls back to text bars on an older one.
 - **AppContainer sandboxing** (opt-in): set `plugin_sandbox=appcontainer` in `config` to run every plugin inside a Windows AppContainer — low integrity, with no access to your files, registry, network, windows, or other processes unless granted. A plugin's `network` permission maps to the internetClient capability, and the plugin's install directory is granted read+execute so its executable loads. Off by default; on a sandbox-launch failure the plugin is skipped rather than run unconfined.

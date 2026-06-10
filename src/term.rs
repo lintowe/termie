@@ -88,6 +88,9 @@ pub struct Terminal {
     pub clipboard: Option<String>,
     /// pending OSC 4/10/11/12 color queries, answered by the app from the palette
     pub color_queries: Vec<ColorReq>,
+    /// ConEmu OSC 9;4 progress: (state, percent). state 1 normal, 2 error,
+    /// 3 indeterminate, 4 paused; None when cleared (state 0)
+    pub progress: Option<(u8, u8)>,
     /// g0/g1 charset designations + active locking shift (SO/SI) for the DEC
     /// special-graphics line-drawing set
     g0: Charset,
@@ -121,6 +124,7 @@ impl Terminal {
             kbd_stack: vec![0],
             clipboard: None,
             color_queries: Vec::new(),
+            progress: None,
             g0: Charset::Ascii,
             g1: Charset::Ascii,
             gl: 0,
@@ -711,6 +715,7 @@ impl Perform for Terminal {
                 self.g1 = Charset::Ascii;
                 self.gl = 0;
                 self.last_print = None;
+                self.progress = None;
             }
             _ => {}
         }
@@ -778,6 +783,25 @@ impl Perform for Terminal {
                         .and_then(|s| s.parse::<u8>().ok())
                 {
                     self.color_queries.push(ColorReq::Ansi(n));
+                }
+            }
+            b"9" => {
+                // OSC 9 ; 4 ; state ; percent — ConEmu taskbar progress. other
+                // OSC 9 subcommands (toasts etc.) are ignored
+                if params.get(1).copied() == Some(b"4") {
+                    let num = |i: usize| {
+                        params
+                            .get(i)
+                            .and_then(|p| std::str::from_utf8(p).ok())
+                            .and_then(|s| s.parse::<u8>().ok())
+                            .unwrap_or(0)
+                    };
+                    self.progress = match num(2) {
+                        0 => None,
+                        s @ (1 | 2 | 4) => Some((s, num(3).min(100))),
+                        3 => Some((3, 0)),
+                        _ => self.progress,
+                    };
                 }
             }
             b"133" => {
@@ -1125,6 +1149,32 @@ mod tests {
         t.clipboard = None;
         feed(&mut t, b"\x1b]52;c;?\x1b\\");
         assert_eq!(t.clipboard, None);
+    }
+
+    #[test]
+    fn osc9_4_progress_states() {
+        let mut t = Terminal::new(2, 20);
+        feed(&mut t, b"\x1b]9;4;1;50\x1b\\");
+        assert_eq!(t.progress, Some((1, 50)));
+        // percent clamps to 100; error and paused carry one too
+        feed(&mut t, b"\x1b]9;4;2;250\x1b\\");
+        assert_eq!(t.progress, Some((2, 100)));
+        feed(&mut t, b"\x1b]9;4;4;30\x1b\\");
+        assert_eq!(t.progress, Some((4, 30)));
+        // indeterminate has no percent
+        feed(&mut t, b"\x1b]9;4;3;99\x1b\\");
+        assert_eq!(t.progress, Some((3, 0)));
+        // an unknown state leaves the current value; 0 clears
+        feed(&mut t, b"\x1b]9;4;7;10\x1b\\");
+        assert_eq!(t.progress, Some((3, 0)));
+        feed(&mut t, b"\x1b]9;4;0;0\x1b\\");
+        assert_eq!(t.progress, None);
+        // a non-progress OSC 9 (toast) is ignored
+        feed(&mut t, b"\x1b]9;hello\x1b\\");
+        assert_eq!(t.progress, None);
+        // RIS clears a live progress
+        feed(&mut t, b"\x1b]9;4;1;10\x1b\\\x1bc");
+        assert_eq!(t.progress, None);
     }
 
     #[test]

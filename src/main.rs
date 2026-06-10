@@ -892,6 +892,32 @@ fn each_pane_mut(node: &mut Node, f: &mut impl FnMut(&mut Pane)) {
     }
 }
 
+/// fold two panes' OSC 9;4 progress values into the one the taskbar shows:
+/// error beats paused beats normal beats indeterminate; ties take the larger
+/// percentage. (0, 0) means no progress anywhere
+fn merge_progress(a: (u8, u8), b: (u8, u8)) -> (u8, u8) {
+    fn rank(state: u8) -> u8 {
+        match state {
+            2 => 4,
+            4 => 3,
+            1 => 2,
+            3 => 1,
+            _ => 0,
+        }
+    }
+    match rank(a.0).cmp(&rank(b.0)) {
+        std::cmp::Ordering::Greater => a,
+        std::cmp::Ordering::Less => b,
+        std::cmp::Ordering::Equal => {
+            if a.1 >= b.1 {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
 /// number of leaf panes in a tree
 fn pane_count(node: &Node) -> usize {
     let mut n = 0;
@@ -1650,6 +1676,9 @@ struct App {
     last_click: Option<(Instant, f64, f64)>,
     // consecutive click count in a pane's content for word/line select cycling
     click_seq: u32,
+    /// last (state, pct) sent to the taskbar button, so the COM call only
+    /// happens when a pane's OSC 9;4 progress actually changes
+    taskbar_sent: (u8, u8),
     palette: Option<PaletteState>,
     find: Option<FindState>,
     /// accesskit adapter for the main window (screen-reader tree); None until boot
@@ -1777,6 +1806,7 @@ impl App {
             selecting: false,
             last_click: None,
             click_seq: 0,
+            taskbar_sent: (0, 0),
             palette: None,
             find: None,
             a11y: None,
@@ -4291,6 +4321,17 @@ impl App {
     /// wheel: settings-panel scroll, mouse-report wheel buttons, or local scrollback
     fn on_mouse_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
         use winit::event::MouseScrollDelta;
+        // ctrl+wheel zooms the content font, like every other windows terminal
+        if self.mods.control_key() {
+            let y = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            if y != 0.0 {
+                self.nudge_font(if y > 0.0 { 1.0 } else { -1.0 });
+            }
+            return;
+        }
         let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
         // the open settings panel grabs the wheel when hovered
         if self.pw.settings_open {
@@ -4603,6 +4644,29 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// push the merged OSC 9;4 progress of every pane in this window onto the
+    /// taskbar button; the COM call is skipped while the value is unchanged
+    fn sync_taskbar_progress(&mut self) {
+        let mut agg = (0u8, 0u8);
+        for tab in &self.pw.tabs {
+            if let Some(root) = tab.root.as_ref() {
+                each_pane(root, &mut |p| {
+                    agg = merge_progress(agg, p.term.progress.unwrap_or((0, 0)));
+                });
+            }
+        }
+        if agg == self.taskbar_sent {
+            return;
+        }
+        self.taskbar_sent = agg;
+        if let Some(w) = self.pw.window.as_ref()
+            && let Ok(handle) = w.window_handle()
+            && let RawWindowHandle::Win32(h) = handle.as_raw()
+        {
+            win::set_taskbar_progress(h.hwnd.get(), agg.0, agg.1);
         }
     }
 
@@ -5503,16 +5567,29 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
+        // taskbar progress runs every turn (cheap, deduped) so a closed pane
+        // clears its bar, and stays live while minimized — minimized is exactly
+        // when the taskbar button is what the user sees
+        if self.cur_sat.is_none() {
+            self.sync_taskbar_progress();
+        }
         // coalesced pty-output paint: one frame per loop turn no matter how many
         // pty chunks arrived since the last frame. inline_paint (experimental)
         // paints here directly, skipping the request_redraw sub-vsync hop; either
         // way it stays one present per loop turn
         if self.pty_dirty {
-            self.pty_dirty = false;
-            if self.persisted.inline_paint {
-                self.paint();
-            } else {
-                self.redraw();
+            // a minimized window has no pixels to update: skip the gpu frame
+            // but leave the flag set, so the first turn after restore paints
+            // the latest grid (restore always delivers focus/resize events)
+            let minimized =
+                self.pw.window.as_ref().and_then(|w| w.is_minimized()).unwrap_or(false);
+            if !minimized {
+                self.pty_dirty = false;
+                if self.persisted.inline_paint {
+                    self.paint();
+                } else {
+                    self.redraw();
+                }
             }
         }
         // a resize drag is in flight: hold the grid/pty reflow until it settles
@@ -5700,6 +5777,20 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_progress_picks_the_taskbar_value() {
+        // none + none stays none; a single normal wins over none
+        assert_eq!(merge_progress((0, 0), (0, 0)), (0, 0));
+        assert_eq!(merge_progress((0, 0), (1, 40)), (1, 40));
+        // error beats paused beats normal beats indeterminate
+        assert_eq!(merge_progress((1, 90), (2, 10)), (2, 10));
+        assert_eq!(merge_progress((4, 5), (1, 99)), (4, 5));
+        assert_eq!(merge_progress((3, 0), (1, 1)), (1, 1));
+        // equal severity takes the larger percentage, either order
+        assert_eq!(merge_progress((1, 30), (1, 70)), (1, 70));
+        assert_eq!(merge_progress((1, 70), (1, 30)), (1, 70));
+    }
 
     #[test]
     fn latency_percentiles_and_hud() {
