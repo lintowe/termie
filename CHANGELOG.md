@@ -6,6 +6,7 @@
 - **Taskbar progress** (ConEmu OSC 9;4): a program reporting progress — winget, TUIs, CI scripts — now lights up termie's Windows taskbar button: green for normal progress, red for error, yellow for paused, pulsing for indeterminate. Progress from every pane in the window is folded into one value (error wins, then paused, then the largest percentage), clears when the reporting pane closes or resets, and keeps updating while the window is minimized — which is exactly when the taskbar is what you're watching.
 
 ### Workflow
+- **Launch into the current folder**: typing `termie` in File Explorer's address bar (or the Run box, or from a shell sitting in a repo) now opens the first tab in that directory, the way `cmd` does — Windows Terminal lands in your home dir unless you pass `-d .`. A plain Start-menu / desktop launch (its working dir is your home dir) still restores the saved session; a folder or `--cwd` launch is an ad-hoc window and won't overwrite that session.
 - **`Ctrl`+mouse-wheel font zoom**, matching Windows Terminal; the palette's font increase / decrease / reset remain.
 - **Borderless fullscreen** on `F11` (also "toggle fullscreen" on the palette, rebindable or unbindable via `keybindings.conf` like everything else).
 - The classic conhost chords — **`Ctrl+Insert` copy, `Shift+Insert` paste** — now ship as defaults, and `keybindings.conf` understands `insert` / `delete` / `home` / `end` / `pageup` / `pagedown` (plus `ins`/`del`/`pgup`/`pgdn` aliases) as combo keys.

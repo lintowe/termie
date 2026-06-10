@@ -1078,6 +1078,41 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
     out
 }
 
+/// the working directory a bare launch should open its first tab in, or None to
+/// fall through to session restore. typing `termie` in the explorer address bar
+/// (or running it from a shell in a repo) launches with that folder as the
+/// process cwd, so open there, the way cmd does. the start menu / desktop
+/// shortcuts set the working dir to the home dir, so a plain launch from those
+/// returns None and restores the saved session instead
+fn launch_cwd() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    if !cwd.is_dir() {
+        return None;
+    }
+    // a plain shortcut launch lands in the home dir; treat that as "no folder"
+    // so session restore still happens there
+    if let Some(home) = std::env::var_os("USERPROFILE")
+        && same_dir(&cwd, std::path::Path::new(&home))
+    {
+        return None;
+    }
+    Some(cwd.to_string_lossy().into_owned())
+}
+
+/// case-insensitive path equality that ignores a trailing separator, resolving
+/// each side first so e.g. C:\Users\me and C:\Users\me\ compare equal
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let norm = |p: &std::path::Path| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
 /// snapshot a pane tree into the serializable session form, recording the
 /// in-order leaf pane ids so the focused pane can be re-keyed after restore
 fn node_to_snap(node: &Node, leaf_ids: &mut Vec<usize>) -> session::NodeSnap {
@@ -1765,6 +1800,11 @@ struct App {
     /// debounce deadline for the session write; re-armed on every layout change
     /// so a burst (e.g. a divider drag) collapses to one write after it settles
     session_flush_at: Option<Instant>,
+    /// set when this window was launched into a specific folder or command (the
+    /// address bar, a `--cwd` context-menu verb, or `-- command`); such an
+    /// ad-hoc window must never overwrite the saved session, so writes are
+    /// suppressed while it's set
+    session_ephemeral: bool,
     /// running plugin processes (out-of-process, supervised); spawned deferred
     /// after the window is shown so disabled/no plugins cost nothing at boot
     plugins: Vec<plugin::Plugin>,
@@ -1852,6 +1892,7 @@ impl App {
             lat: LatencyMeter::default(),
             session_dirty: false,
             session_flush_at: None,
+            session_ephemeral: false,
             plugins: Vec::new(),
             plugins_started: false,
             plugin_ids: Vec::new(),
@@ -1950,19 +1991,22 @@ impl App {
                 log::warn!("quake hotkey unavailable (already in use by another app)");
             }
         }
-        // an explicit cwd/command (cli or a context-menu verb): spawn the first
-        // tab here at that location instead of adopting a home-dir pool shell.
-        // a bare launch leaves the fast async warm-pool path below unchanged
         // surface installed WSL distros so the user knows valid wsl_distro values
         let distros = win::wsl_distros();
         if !distros.is_empty() {
             log::info!("wsl distros available: {}", distros.join(", "));
         }
-        if !self.cli.is_bare() {
+        // an explicit --cwd/command, or a bare launch from a specific folder
+        // (e.g. `termie` typed in the explorer address bar), opens the first tab
+        // there instead of restoring. such a window is ad-hoc and must not
+        // overwrite the saved session. a plain bare launch from the home dir
+        // falls through to restore + the warm-pool path below
+        let first_cwd = if self.cli.is_bare() { launch_cwd() } else { self.cli.cwd.clone() };
+        let command = self.cli.command.clone();
+        if command.is_some() || first_cwd.is_some() {
+            self.session_ephemeral = true;
             let (cols, rows) = self.content_pane_size();
-            let cwd = self.cli.cwd.clone();
-            let command = self.cli.command.clone();
-            match self.spawn_pane(cols, rows, cwd, None, command.as_deref()) {
+            match self.spawn_pane(cols, rows, first_cwd, None, command.as_deref()) {
                 Ok(pane) => self.install_first_tab(pane),
                 Err(e) => log::error!("failed to spawn the requested command: {e}"),
             }
@@ -3778,13 +3822,22 @@ impl App {
     /// mark the layout changed and (re)arm the debounced session write so a burst
     /// of mutations collapses to one write ~750ms after the last change
     fn mark_session_dirty(&mut self) {
+        // an ad-hoc cwd/command window never persists, so don't even arm the
+        // debounce timer for it
+        if self.session_ephemeral {
+            return;
+        }
         self.session_dirty = true;
         self.session_flush_at = Some(Instant::now() + Duration::from_millis(750));
     }
 
     /// write the session atomically (temp + rename) so a reader never sees a
-    /// half-written file; never clobber a good session with an empty one
+    /// half-written file; never clobber a good session with an empty one, nor
+    /// with an ad-hoc folder/command window that shouldn't persist
     fn write_session(&self) {
+        if self.session_ephemeral {
+            return;
+        }
         let snap = self.session_snapshot();
         if snap.tabs.is_empty() {
             return;
@@ -5950,6 +6003,15 @@ mod tests {
         assert!(!cmd.is_bare());
         // unknown flags are ignored, not misread as a cwd or command
         assert!(p(&["--frobnicate"]).is_bare());
+    }
+
+    #[test]
+    fn same_dir_ignores_case_separators_and_trailing_slash() {
+        use std::path::Path;
+        // non-existent paths exercise the literal-normalization fallback
+        assert!(same_dir(Path::new("C:\\Users\\Me"), Path::new("c:/users/me/")));
+        assert!(same_dir(Path::new("C:\\Users\\Me\\"), Path::new("C:\\users\\me")));
+        assert!(!same_dir(Path::new("C:\\Users\\Me"), Path::new("C:\\Users\\Other")));
     }
 
     #[test]
