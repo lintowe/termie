@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# one self-hosted Windows runner does the (slow) Rust build for both test and
+# lint, so back-to-back pushes used to stack full CI runs behind each other and
+# leave the newest checks "Queued" for ages. collapse a ref to its latest run:
+# a new push cancels the older in-progress/queued run for the same branch or PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
