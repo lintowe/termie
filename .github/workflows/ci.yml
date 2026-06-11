@@ -21,25 +21,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # build the app + run the unit tests on the primary (Windows) target
-  test:
-    if: github.actor == 'lintowe'
-    runs-on: [self-hosted, windows-vm]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - name: build
-        run: cargo build --all-targets
-      - name: test
-        run: cargo test
-
-  # clippy lints. the project keeps its own (non-rustfmt) source style, so
-  # formatting is intentionally not enforced; clippy runs as a quality gate and
-  # the build is warning-clean, so any new clippy warning shows up clearly
-  lint:
+  # one Windows job builds the app, runs the unit tests, and runs clippy. on the
+  # single self-hosted runner this compiles the (heavy) dependency tree once and
+  # lets test + clippy reuse it, instead of two back-to-back cold builds: clippy
+  # reuses the already-compiled deps and only re-checks the workspace crate, so
+  # it's cheap after the build. formatting is intentionally not enforced (the
+  # project keeps its own non-rustfmt style); clippy is the quality gate.
+  build:
     if: github.actor == 'lintowe'
     runs-on: [self-hosted, windows-vm]
     steps:
@@ -49,6 +37,10 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: build
+        run: cargo build --all-targets
+      - name: test
+        run: cargo test
       - name: clippy
         run: cargo clippy --all-targets
 
