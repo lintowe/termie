@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.4 — 2026-06-13
+
+### Fixes
+- **Box-drawing borders connect again**: lines, corners, tees and the block / shade elements are now drawn to fill the whole cell, so boxes no longer leave vertical seams at line heights above 1.0 (the font's own box glyphs are only ~1 em tall, which broke TUI frames like Claude Code's). Rounded corners stay rounded; double / dashed glyphs fall back to the font.
+- **The exe icon is no longer generic**: termie.exe now embeds its application icon as a PE resource, so Explorer, the taskbar (pinned + grouped) and Alt-Tab show termie's icon — previously only a running window carried it.
+
 ## 0.2.3 — 2026-06-13
 
 ### Fixes
