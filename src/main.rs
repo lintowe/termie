@@ -1079,24 +1079,35 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
 }
 
 /// the working directory a bare launch should open its first tab in, or None to
-/// fall through to session restore. typing `termie` in the explorer address bar
-/// (or running it from a shell in a repo) launches with that folder as the
-/// process cwd, so open there, the way cmd does. the start menu / desktop
-/// shortcuts set the working dir to the home dir, so a plain launch from those
-/// returns None and restores the saved session instead
-fn launch_cwd() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    if !cwd.is_dir() {
+/// fall through to session restore. running `termie` from a shell sitting in a
+/// repo launches with that folder as the process cwd, so open there, the way cmd
+/// does. the explorer address bar instead launches a windows-subsystem app with
+/// no working dir, so we inherit explorer's home dir and the process cwd is
+/// useless — when that happens, recover the folder from the explorer window we
+/// were launched from (`fg`). the start menu / desktop / taskbar / run-box
+/// launches all land in the home dir with a non-explorer foreground window, so
+/// they return None and restore the saved session instead
+fn launch_cwd(fg: isize) -> Option<String> {
+    let cwd = std::env::current_dir().ok().filter(|c| c.is_dir());
+    let home = std::env::var_os("USERPROFILE");
+    // a real, non-home process cwd wins (launched from a shell in that folder)
+    if let Some(cwd) = &cwd {
+        let at_home = home.as_ref().is_some_and(|h| same_dir(cwd, std::path::Path::new(h)));
+        if !at_home {
+            return Some(cwd.to_string_lossy().into_owned());
+        }
+    }
+    // cwd is the home dir (or unreadable): if we were launched from an explorer
+    // window, open in the folder it was showing instead of restoring
+    let dir = cwd_path(win::explorer_dir_for(fg).as_deref())?;
+    let p = std::path::Path::new(&dir);
+    if !p.is_dir() {
         return None;
     }
-    // a plain shortcut launch lands in the home dir; treat that as "no folder"
-    // so session restore still happens there
-    if let Some(home) = std::env::var_os("USERPROFILE")
-        && same_dir(&cwd, std::path::Path::new(&home))
-    {
+    if home.as_ref().is_some_and(|h| same_dir(p, std::path::Path::new(h))) {
         return None;
     }
-    Some(cwd.to_string_lossy().into_owned())
+    Some(dir)
 }
 
 /// case-insensitive path equality that ignores a trailing separator, resolving
@@ -1707,6 +1718,11 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     /// this process's parsed command line (always-new-window: one per process)
     cli: CliArgs,
+    /// the foreground window at process start, captured before we create ours.
+    /// when the explorer address bar launches a bare `termie` it passes no working
+    /// dir (we inherit explorer's home dir), so this is how we recover the folder
+    /// the user typed in: the launching explorer window's current location
+    launch_fg: isize,
     /// the main window's state (window/renderer/tabs/active_tab/layout)
     pw: PaneWindow,
     /// torn-off windows, each a full PaneWindow (keyed by window id at routing)
@@ -1829,6 +1845,9 @@ impl App {
         App {
             proxy,
             cli: parse_args(std::env::args().skip(1)),
+            // captured now, before any window of ours exists, so it still names the
+            // explorer window we were launched from
+            launch_fg: win::foreground_window(),
             pw: PaneWindow {
                 window: None,
                 renderer: None,
@@ -2001,7 +2020,7 @@ impl App {
         // there instead of restoring. such a window is ad-hoc and must not
         // overwrite the saved session. a plain bare launch from the home dir
         // falls through to restore + the warm-pool path below
-        let first_cwd = if self.cli.is_bare() { launch_cwd() } else { self.cli.cwd.clone() };
+        let first_cwd = if self.cli.is_bare() { launch_cwd(self.launch_fg) } else { self.cli.cwd.clone() };
         let command = self.cli.command.clone();
         if command.is_some() || first_cwd.is_some() {
             self.session_ephemeral = true;

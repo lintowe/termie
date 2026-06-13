@@ -382,3 +382,73 @@ pub fn spawn_global_hotkey(id: i32, modifiers: u32, vk: u32, on_press: impl Fn()
 pub fn spawn_global_hotkey(_id: i32, _modifiers: u32, _vk: u32, _on_press: impl Fn() + Send + 'static) -> bool {
     false
 }
+
+/// the foreground window right now, as a raw HWND value (0 if none). captured at
+/// startup to remember which window launched us, before we create our own
+#[cfg(windows)]
+pub fn foreground_window() -> isize {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    unsafe { GetForegroundWindow().0 as isize }
+}
+
+#[cfg(not(windows))]
+pub fn foreground_window() -> isize {
+    0
+}
+
+/// if `hwnd` is an explorer file window, the folder it is showing as a `file://`
+/// url; None otherwise. used to recover the launch folder when the explorer
+/// address bar starts a bare `termie` with no working dir of its own. a
+/// non-explorer window, a virtual folder (This PC, etc.), or any com failure
+/// yields None — every step is fallible and never panics
+#[cfg(windows)]
+pub fn explorer_dir_for(hwnd: isize) -> Option<String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    };
+    use windows::Win32::System::Variant::VARIANT;
+    use windows::Win32::UI::Shell::{IShellWindows, IWebBrowser2, ShellWindows};
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    use windows::core::Interface;
+
+    if hwnd == 0 {
+        return None;
+    }
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    // cheap early-out: only explorer file windows carry a folder, so we skip com
+    // entirely for the start menu, taskbar, run box, desktop and every other window
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(h, &mut buf) };
+    let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+    if class != "CabinetWClass" && class != "ExploreWClass" {
+        return None;
+    }
+    unsafe {
+        // winit already put this (main) thread in an STA; S_FALSE / RPC_E_CHANGED_MODE
+        // are both fine to ignore, exactly like the taskbar-progress path does
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let shell_windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL).ok()?;
+        let count = shell_windows.Count().ok()?;
+        for i in 0..count {
+            let Ok(disp) = shell_windows.Item(&VARIANT::from(i)) else {
+                continue;
+            };
+            let Ok(wb) = disp.cast::<IWebBrowser2>() else {
+                continue;
+            };
+            let matches = wb.HWND().map(|w| w.0 as isize == hwnd).unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            let url = wb.LocationURL().ok()?.to_string();
+            return (!url.is_empty()).then_some(url);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
+    None
+}

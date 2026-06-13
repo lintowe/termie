@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- **Address-bar launch lands in the folder again**: typing `termie` in File Explorer's address bar opens the first tab in that folder, not your home dir. The address bar starts a windows-subsystem app with no working directory of its own, so termie inherits Explorer's home dir and the process cwd is useless for this; it now recovers the folder from the Explorer window it was launched from. A shell-in-a-repo launch (real process cwd) is unchanged, and Start-menu / desktop / taskbar / Run-box launches — none of which have an Explorer window in the foreground — still restore the saved session.
+
 ## 0.2.2 — 2026-06-11
 
 ### Fixes
