@@ -437,7 +437,7 @@ pub fn explorer_dir_for(hwnd: isize) -> Option<String> {
             let Ok(wb) = disp.cast::<IWebBrowser2>() else {
                 continue;
             };
-            let matches = wb.HWND().map(|w| w.0 as isize == hwnd).unwrap_or(false);
+            let matches = wb.HWND().map(|w| w.0 == hwnd).unwrap_or(false);
             if !matches {
                 continue;
             }

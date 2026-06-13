@@ -1,4 +1,5 @@
 mod atlas;
+mod boxdraw;
 #[cfg(debug_assertions)]
 pub mod preview;
 

@@ -335,6 +335,36 @@ impl GlyphAtlas {
         }
 
         let m = self.metrics(key.font);
+
+        // box-drawing & block elements are drawn to fill the whole cell, so
+        // borders connect with no vertical seams at any line height (the font's
+        // own glyphs are only ~1 em tall). unsupported ones fall through to the
+        // font path below.
+        let cw = m.cell_w.round().max(1.0) as u32;
+        let ch = m.cell_h.round().max(1.0) as u32;
+        if let Some(cov) = super::boxdraw::coverage(key.c, cw as usize, ch as usize, m.px / 12.0) {
+            let (x, y) = match self.alloc(cw, ch) {
+                Some(p) => p,
+                None => return RasterOutcome::NoSpace,
+            };
+            for row in 0..ch {
+                let dst = ((y + row) * self.dim + x) as usize;
+                let src = (row * cw) as usize;
+                self.data[dst..dst + cw as usize].copy_from_slice(&cov[src..src + cw as usize]);
+            }
+            self.mark_dirty_rows(y, y + ch);
+            let d = self.dim as f32;
+            return RasterOutcome::Glyph(AtlasGlyph {
+                uv_min: [x as f32 / d, y as f32 / d],
+                uv_max: [(x + cw) as f32 / d, (y + ch) as f32 / d],
+                width: m.cell_w,
+                height: m.cell_h,
+                left: 0.0,
+                top: m.ascent,
+                color: false,
+            });
+        }
+
         let mut attrs = Attrs::new().family(Family::Name(m.family));
         if key.bold {
             attrs = attrs.weight(Weight::BOLD);
