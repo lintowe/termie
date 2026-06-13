@@ -15,5 +15,13 @@ fn main() {
                 .long_path_aware(Setting::Enabled),
         )
         .expect("failed to embed application manifest");
+
+        // embed the application icon (assets/icon.ico via app.rc) as a real PE
+        // resource, so explorer, the taskbar (pinned + grouped) and alt-tab show
+        // termie's icon instead of the generic exe icon. icon-only .rc, so it
+        // doesn't add a second manifest that would clash with the one above.
+        println!("cargo:rerun-if-changed=app.rc");
+        println!("cargo:rerun-if-changed=assets/icon.ico");
+        embed_resource::compile("app.rc", embed_resource::NONE);
     }
 }

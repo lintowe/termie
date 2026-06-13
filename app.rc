@@ -1,0 +1,4 @@
+// Windows resource script: embed the application icon into termie.exe so
+// Explorer, the taskbar (pinned and grouped), and Alt-Tab show it instead of
+// the generic exe icon. ID 1 makes it the default application icon.
+1 ICON "assets/icon.ico"
