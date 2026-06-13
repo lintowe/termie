@@ -1088,23 +1088,29 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
 /// launches all land in the home dir with a non-explorer foreground window, so
 /// they return None and restore the saved session instead
 fn launch_cwd(fg: isize) -> Option<String> {
-    let cwd = std::env::current_dir().ok().filter(|c| c.is_dir());
     let home = std::env::var_os("USERPROFILE");
-    // a real, non-home process cwd wins (launched from a shell in that folder)
-    if let Some(cwd) = &cwd {
-        let at_home = home.as_ref().is_some_and(|h| same_dir(cwd, std::path::Path::new(h)));
-        if !at_home {
-            return Some(cwd.to_string_lossy().into_owned());
-        }
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf));
+    // dirs we were handed incidentally rather than chosen by the user: the home
+    // dir (start-menu / desktop / taskbar / run-box launches) and the exe's own
+    // folder (double-clicking termie.exe lands its cwd there). opening a tab in
+    // either is surprising, so neither counts as a launch folder.
+    let incidental = |p: &std::path::Path| {
+        home.as_ref().is_some_and(|h| same_dir(p, std::path::Path::new(h)))
+            || exe_dir.as_deref().is_some_and(|d| same_dir(p, d))
+    };
+    // a real process cwd the user launched in (a shell sitting in a repo) wins
+    if let Some(cwd) = std::env::current_dir().ok().filter(|c| c.is_dir())
+        && !incidental(&cwd)
+    {
+        return Some(cwd.to_string_lossy().into_owned());
     }
-    // cwd is the home dir (or unreadable): if we were launched from an explorer
-    // window, open in the folder it was showing instead of restoring
+    // otherwise the cwd was incidental: if an explorer window launched us, open in
+    // the folder it was showing (its address bar passes no working dir of its own),
+    // unless that folder is itself incidental (e.g. double-clicked from the exe's
+    // own folder), in which case restore the saved session instead
     let dir = cwd_path(win::explorer_dir_for(fg).as_deref())?;
     let p = std::path::Path::new(&dir);
-    if !p.is_dir() {
-        return None;
-    }
-    if home.as_ref().is_some_and(|h| same_dir(p, std::path::Path::new(h))) {
+    if !p.is_dir() || incidental(p) {
         return None;
     }
     Some(dir)
