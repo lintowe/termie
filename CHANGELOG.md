@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5 — 2026-06-13
+
+### Packaging
+- **Releases now ship a Windows installer** (`termie-<version>-windows-x64-setup.exe`) instead of a zip — a wizard that installs termie, creates Start-menu and optional desktop shortcuts, adds it to your `PATH`, registers the "Open in termie" right-click entry, and provides a proper uninstaller (Add/Remove Programs). Built with Inno Setup.
+
 ## 0.2.4 — 2026-06-13
 
 ### Fixes

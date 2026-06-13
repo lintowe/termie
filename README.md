@@ -26,7 +26,7 @@ A plugin system: plugins run as separate processes over a small JSON protocol, r
 
 ## install
 
-Download `termie-<version>-windows-x64.zip` from the [latest release](https://github.com/lintowe/termie/releases/latest), extract it anywhere, and run `termie.exe`. Keep the `assets` folder beside the executable — that's where the bundled font lives. The build is unsigned, so SmartScreen may warn on first launch: **More info → Run anyway**.
+Download `termie-<version>-windows-x64-setup.exe` from the [latest release](https://github.com/lintowe/termie/releases/latest) and run it. The installer adds termie to your Start menu (with an optional desktop shortcut), puts it on your `PATH` so `termie` works from any shell, registers an "Open in termie" right-click entry, and installs an uninstaller. The build is unsigned, so SmartScreen may warn on first launch: **More info → Run anyway**.
 
 ## keybindings
 
