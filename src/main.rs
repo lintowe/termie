@@ -4179,6 +4179,7 @@ impl App {
                 self.pw.focused = f;
                 if !f {
                     self.pw.ime_composing = false;
+                    self.release_held_input();
                 }
                 self.paint();
             }
@@ -4334,6 +4335,16 @@ impl App {
     /// pointer motion: hover/link/divider feedback, selection drag, mouse-report
     /// motion, divider drag. operates on self.pw so the swap reuses it for any
     /// window
+    // clear transient input state on focus loss: a stuck modifier (winit can
+    // miss the release on windows) plus a latched ctrl-hover link would
+    // underline every hovered path until the next real key event
+    fn release_held_input(&mut self) {
+        self.mods = ModifiersState::empty();
+        if self.link.take().is_some() {
+            self.set_pointer(CursorIcon::Default);
+        }
+    }
+
     fn on_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
         self.pw.cursor = position;
         let (px, py) = (position.x as f32, position.y as f32);
@@ -5456,6 +5467,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // leave every keystroke swallowed with no in-app recovery
                 if !f {
                     self.pw.ime_composing = false;
+                    self.release_held_input();
                 }
                 // a held drag can't survive losing focus: release it so the TUI
                 // doesn't see a stuck button

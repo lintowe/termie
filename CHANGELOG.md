@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.7 — 2026-06-14
+
+### Fixes
+- **No more stray underline under paths**: if the window lost focus while a modifier was held — most easily by Ctrl-clicking a path, which opens it and switches away — Ctrl could stay "held" internally, so afterwards hovering any path drew the clickable-link underline even though Ctrl wasn't pressed. termie now drops held modifiers and any hover-link highlight when the window loses focus.
+
 ## 0.2.6 — 2026-06-14
 
 ### Packaging
