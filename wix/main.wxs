@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- termie MSI installer (WiX v3). Per-machine install: Program Files\termie,
+     Start-menu + desktop shortcuts, system PATH, the "Open in termie" right-click
+     verb, an App Paths entry so `termie` resolves from Win+R, and a stable
+     UpgradeCode + MajorUpgrade so installing a new version REPLACES the old one
+     (one install, never two side-by-side). The bundled Maple Mono NF is shipped
+     under assets\fonts next to the exe, where termie loads it at runtime.
+     Build:  candle -arch x64 -dVersion=X.Y.Z wix\main.wxs
+             light -sice:ICE60 -sice:ICE61 -sice:ICE69 main.wixobj -o termie.msi -->
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="termie"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="lintowe"
+           UpgradeCode="47F9CB96-4F69-487E-911F-C94B7B93F27D">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Description="termie $(var.Version) - GPU terminal multiplexer for Windows" />
+
+    <!-- a newer version already present blocks a downgrade; an equal-or-older
+         version is removed and replaced, so there is only ever one termie -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of termie is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="termie.ico" SourceFile="assets\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="termie.ico" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/lintowe/termie" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/lintowe/termie" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="termie">
+          <Directory Id="ASSETSDIR" Name="assets">
+            <Directory Id="FONTSDIR" Name="fonts" />
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="C_termie_exe" Guid="*">
+        <File Id="termie.exe" Source="target\release\termie.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- add the install dir to the machine PATH so `termie` works in any shell -->
+      <Component Id="C_path" Guid="*">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\termie" Name="InstallDir"
+                       Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+        <Environment Id="E_PATH" Name="PATH" Value="[INSTALLDIR]" Action="set"
+                     Part="last" System="yes" Permanent="no" />
+      </Component>
+
+      <!-- App Paths: `termie` resolves from Win+R / ShellExecute -->
+      <Component Id="C_apppaths" Guid="*">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\termie.exe">
+          <RegistryValue Type="string" Value="[INSTALLDIR]termie.exe" KeyPath="yes" />
+          <RegistryValue Name="Path" Type="string" Value="[INSTALLDIR]" />
+        </RegistryKey>
+      </Component>
+
+      <!-- "Open in termie" — right-click a folder or its background; %V is the dir -->
+      <Component Id="C_ctxmenu" Guid="*">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\Directory\shell\termie">
+          <RegistryValue Type="string" Value="Open in termie" KeyPath="yes" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termie.exe" />
+          <RegistryKey Key="command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termie.exe&quot; --cwd &quot;%V&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\Directory\Background\shell\termie">
+          <RegistryValue Type="string" Value="Open in termie" />
+          <RegistryValue Name="Icon" Type="string" Value="[INSTALLDIR]termie.exe" />
+          <RegistryKey Key="command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLDIR]termie.exe&quot; --cwd &quot;%V&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+
+    <!-- non-advertised shortcuts live in their own components with an HKCU
+         keypath (the WiX pattern that satisfies ICE43/ICE57), targeting the
+         installed exe by file id -->
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="C_shortcut_startmenu" Guid="*">
+        <Shortcut Id="S_startmenu" Name="termie" Target="[#termie.exe]"
+                  Description="GPU terminal multiplexer" Icon="termie.ico"
+                  WorkingDirectory="INSTALLDIR" />
+        <RegistryValue Root="HKCU" Key="SOFTWARE\termie" Name="startmenu"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="C_shortcut_desktop" Guid="*">
+        <Shortcut Id="S_desktop" Name="termie" Target="[#termie.exe]"
+                  Description="GPU terminal multiplexer" Icon="termie.ico"
+                  WorkingDirectory="INSTALLDIR" />
+        <RegistryValue Root="HKCU" Key="SOFTWARE\termie" Name="desktop"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- bundled Maple Mono Nerd Font (loaded at runtime from assets\fonts).
+         one component per file: the .ttf files are versioned, so they cannot
+         share an auto-GUID component -->
+    <DirectoryRef Id="FONTSDIR">
+      <Component Id="C_font_regular" Guid="*">
+        <File Id="font_regular" Source="assets\fonts\MapleMono-NF-Regular.ttf" KeyPath="yes" />
+      </Component>
+      <Component Id="C_font_bold" Guid="*">
+        <File Id="font_bold" Source="assets\fonts\MapleMono-NF-Bold.ttf" KeyPath="yes" />
+      </Component>
+      <Component Id="C_font_italic" Guid="*">
+        <File Id="font_italic" Source="assets\fonts\MapleMono-NF-Italic.ttf" KeyPath="yes" />
+      </Component>
+      <Component Id="C_font_bolditalic" Guid="*">
+        <File Id="font_bolditalic" Source="assets\fonts\MapleMono-NF-BoldItalic.ttf" KeyPath="yes" />
+      </Component>
+      <Component Id="C_font_license" Guid="*">
+        <File Id="font_license" Source="assets\fonts\MapleMono-LICENSE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="C_font_ofl" Guid="*">
+        <File Id="font_ofl" Source="assets\fonts\OFL.txt" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="termie" Level="1">
+      <ComponentRef Id="C_termie_exe" />
+      <ComponentRef Id="C_path" />
+      <ComponentRef Id="C_apppaths" />
+      <ComponentRef Id="C_ctxmenu" />
+      <ComponentRef Id="C_shortcut_startmenu" />
+      <ComponentRef Id="C_shortcut_desktop" />
+      <ComponentRef Id="C_font_regular" />
+      <ComponentRef Id="C_font_bold" />
+      <ComponentRef Id="C_font_italic" />
+      <ComponentRef Id="C_font_bolditalic" />
+      <ComponentRef Id="C_font_license" />
+      <ComponentRef Id="C_font_ofl" />
+    </Feature>
+  </Product>
+</Wix>

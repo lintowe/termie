@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6 — 2026-06-14
+
+### Packaging
+- **The installer is now an MSI** (`termie-<version>-windows-x64.msi`), built with WiX. It carries a stable upgrade code, so installing a new version **replaces** the old one instead of leaving a second copy behind — fixing the case where the previous installer could leave two installs side by side. Same integration as before: Start-menu and desktop shortcuts, `PATH`, the "Open in termie" right-click entry, and Add/Remove Programs. It now installs per-machine (one admin prompt). If you installed a build before 0.2.6, uninstall it once from Add/Remove Programs first.
+
 ## 0.2.5 — 2026-06-13
 
 ### Packaging

@@ -4,7 +4,7 @@ A fast, lightweight GPU terminal multiplexer for Windows — tabs, split panes, 
 
 ![termie](shot.png)
 
-- downloads: [GitHub Releases](https://github.com/lintowe/termie/releases) (Windows x64 zip)
+- downloads: [GitHub Releases](https://github.com/lintowe/termie/releases) (Windows x64 installer)
 - plugins: registry at [`lintowe/termie-plugins`](https://github.com/lintowe/termie-plugins)
 - license: MIT OR Apache-2.0
 
@@ -26,7 +26,7 @@ A plugin system: plugins run as separate processes over a small JSON protocol, r
 
 ## install
 
-Download `termie-<version>-windows-x64-setup.exe` from the [latest release](https://github.com/lintowe/termie/releases/latest) and run it. The installer adds termie to your Start menu (with an optional desktop shortcut), puts it on your `PATH` so `termie` works from any shell, registers an "Open in termie" right-click entry, and installs an uninstaller. The build is unsigned, so SmartScreen may warn on first launch: **More info → Run anyway**.
+Download `termie-<version>-windows-x64.msi` from the [latest release](https://github.com/lintowe/termie/releases/latest) and run it. The installer adds termie to your Start menu and desktop, puts it on your `PATH` so `termie` works from any shell, registers an "Open in termie" right-click entry, and shows up in Add/Remove Programs. Installing a newer version replaces the old one — no second copy. It installs for all users, so Windows asks for admin once; the build is unsigned, so SmartScreen may warn first: **More info → Run anyway**.
 
 ## keybindings
 

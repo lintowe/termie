@@ -1,8 +1,7 @@
 name: release
 
 # build, test, and attach the Windows installer when a version tag is pushed.
-# the installer is built with Inno Setup (installer.iss) and named
-# termie-<version>-windows-x64-setup.exe
+# the installer is a WiX MSI (wix/main.wxs) named termie-<version>-windows-x64.msi
 on:
   push:
     tags: ['v*']
@@ -30,22 +29,26 @@ jobs:
       - name: build (release, LTO)
         run: cargo build --release
 
-      - name: build installer (Inno Setup)
+      - name: build installer (WiX MSI)
         shell: powershell
         run: |
           $ver = "${{ github.ref_name }}" -replace '^v',''
-          $iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            Write-Host "installing Inno Setup (per-user, no admin)..."
-            $is = Join-Path $env:RUNNER_TEMP "innosetup.exe"
-            Invoke-WebRequest 'https://jrsoftware.org/download.php/is.exe' -OutFile $is -UseBasicParsing -MaximumRedirection 5
-            Start-Process $is -ArgumentList '/VERYSILENT','/CURRENTUSER','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $wix = Join-Path $env:RUNNER_TEMP 'wix3'
+          if (-not (Test-Path "$wix\candle.exe")) {
+            Write-Host "downloading WiX 3.11 toolset..."
+            $zip = Join-Path $env:RUNNER_TEMP 'wix311-binaries.zip'
+            Invoke-WebRequest 'https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip' -OutFile $zip -UseBasicParsing -MaximumRedirection 5
+            Expand-Archive $zip -DestinationPath $wix -Force
           }
-          & $iscc /DMyAppVersion=$ver installer.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $obj = Join-Path $env:RUNNER_TEMP 'termie.wixobj'
+          & "$wix\candle.exe" -nologo -arch x64 "-dVersion=$ver" -out $obj wix\main.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle failed with exit code $LASTEXITCODE" }
+          & "$wix\light.exe" -nologo -sice:ICE61 -sice:ICE60 -sice:ICE69 -out "dist\termie-$ver-windows-x64.msi" $obj
+          if ($LASTEXITCODE -ne 0) { throw "light failed with exit code $LASTEXITCODE" }
 
       - name: attach to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: dist/termie-*-windows-x64-setup.exe
+          files: dist/termie-*-windows-x64.msi
           fail_on_unmatched_files: true
