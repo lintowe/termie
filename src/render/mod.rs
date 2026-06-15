@@ -1264,10 +1264,13 @@ impl Renderer {
     }
 
     pub fn content_rect(&self) -> (f32, f32, f32, f32) {
+        // symmetric inset: the same `pad` on top as the sides and bottom, so a
+        // program drawing on row 0 (a TUI banner, a mascot) isn't jammed against
+        // the title bar's bottom trim
         let x = self.pad;
-        let y = self.title_bar_h;
+        let y = self.title_bar_h + self.pad;
         let w = (self.config.width as f32 - self.pad * 2.0 - self.dock_w()).max(1.0);
-        let h = (self.config.height as f32 - self.title_bar_h - self.status_bar_h - self.pad)
+        let h = (self.config.height as f32 - self.title_bar_h - self.status_bar_h - self.pad * 2.0)
             .max(1.0);
         (x, y, w, h)
     }
@@ -2655,7 +2658,6 @@ impl Renderer {
     fn build(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32, bare: bool) -> Vec<Instance> {
         // chrome colors come from the active theme's palette
         let INK_0 = self.palette.ink0;
-        let INK_1 = self.palette.ink1;
         let INK_3 = self.palette.ink3;
         let INK_4 = self.palette.ink4;
         let RULE = self.palette.rule;
@@ -2663,6 +2665,7 @@ impl Renderer {
         let MUTE = self.palette.mute;
         let TEXT_2 = self.palette.text2;
         let PAPER = self.palette.paper;
+        let BG = self.palette.bg;
 
         let pad = self.pad;
         let w = self.config.width as f32;
@@ -2771,7 +2774,11 @@ impl Renderer {
         let text_top = ((self.title_bar_h - chrome_h) / 2.0).round();
 
         // ---- title bar (flat opaque instrument) ----
-        Self::push_rect(&mut out, 0.0, 0.0, w, self.title_bar_h, INK_1, 1.0);
+        // fill the bar with the content background, not a darker ink, so the bar
+        // never reads as a dark band above the content the way a darker fill does
+        // against the gradient's lighter top row (the two-tone trim still divides
+        // chrome from content)
+        Self::push_rect(&mut out, 0.0, 0.0, w, self.title_bar_h, BG, 1.0);
         // two-tone trim under the bar: a brighter seam over a darker shadow line
         // reads as a machined edge between chrome and content (instrument depth)
         Self::push_rect(&mut out, 0.0, self.title_bar_h - hair * 2.0, w, hair, RULE_2, 1.0);
