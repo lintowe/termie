@@ -267,6 +267,14 @@ impl Terminal {
             self.grid = primary;
         }
         self.using_alt = false;
+        // a fullscreen app just exited; drop the interaction modes it may have
+        // set but the shell never wants, so they can't bleed into the prompt
+        // (stray mouse reports, kitty-encoded keys, application arrow keys).
+        // bracketed paste and focus reporting are left alone since shells use them
+        self.mouse_proto = MouseProto::Off;
+        self.mouse_sgr = false;
+        self.app_cursor_keys = false;
+        self.kbd_stack = vec![0];
     }
 
     fn set_mode(&mut self, private: bool, mode: u16, enable: bool) {
@@ -1033,6 +1041,24 @@ mod tests {
         feed(&mut t, b"\x1b[?1049l");
         assert!(!t.using_alt);
         assert_eq!(t.grid.lines[0][0].c, 'p');
+    }
+
+    #[test]
+    fn leaving_alt_screen_resets_interaction_modes() {
+        let mut t = Terminal::new(4, 20);
+        // a tui enters the alt screen and turns on mouse tracking + kitty keys
+        feed(&mut t, b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1h\x1b[>1u");
+        assert_eq!(t.mouse_proto, MouseProto::Normal);
+        assert!(t.mouse_sgr);
+        assert!(t.app_cursor_keys);
+        assert_eq!(t.kbd_flags(), 1);
+        // leaving the alt screen must drop them so a stray click can't print a
+        // mouse report and keys aren't kitty-encoded once the shell is back
+        feed(&mut t, b"\x1b[?1049l");
+        assert_eq!(t.mouse_proto, MouseProto::Off);
+        assert!(!t.mouse_sgr);
+        assert!(!t.app_cursor_keys);
+        assert_eq!(t.kbd_flags(), 0);
     }
 
     #[test]
