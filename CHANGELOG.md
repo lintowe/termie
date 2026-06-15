@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.9 — 2026-06-15
+
+### Fixes
+- **The tab bar no longer reads as a dark band above the content.** The bar was filled a shade darker than the terminal background, so against the lighter top of the window it looked like a dark stripe — and a full-screen app's first row (a banner, a logo) sitting right under it looked clipped or dimmed. The bar now matches the content background, divided by the same hairline trim as before.
+- **Full-screen apps get a little breathing room at the top.** Content drawn on the very first row is no longer jammed against the bottom of the tab bar; the top inset now matches the sides and bottom.
+- **No more garbled, stretched frame when restoring a minimized window.** Minimizing and then alt-tabbing back could briefly flash a huge, blurry, doubled image before the real screen appeared. termie no longer paints while minimized, so the last good frame is what shows on restore.
+- **No leftover mouse-tracking after a full-screen app exits.** If a program left without cleanly turning mouse reporting back off, stray sequences such as `^[[<0;29;17M` could appear at the prompt when you moved or clicked. termie now drops mouse, application-cursor and extended-key modes when an app leaves the alternate screen.
+- **The clickable-path underline is pinned to the real Ctrl key.** It now reads the physical key state, so a stale modifier can never leave the hover underline stuck on.
+
+### Rendering
+- **Block and box characters fill their cell completely.** Fractional blocks (`▁▂▃▄▅▆▇`, `▏▎▍▌▋▊▉`), the eighth-edges (`▔▕`) and the quadrant pieces (`▖▗▘▙▚▛▜▝▞▟`) now draw to the exact cell, so block-art and progress bars tile solid with no seams at any line height.
+
 ## 0.2.8 — 2026-06-14
 
 ### Packaging
