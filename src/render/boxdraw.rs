@@ -9,8 +9,9 @@
 /// An alpha-coverage bitmap `w`×`h` for box/block char `c`, or `None` to fall
 /// back to the font glyph. `stroke` is the light line thickness in pixels.
 pub fn coverage(c: char, w: usize, h: usize, stroke: f32) -> Option<Vec<u8>> {
-    // fast reject: only the box-drawing and (supported) block-element ranges
-    if !matches!(c, '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{2593}') {
+    // fast reject: only the box-drawing and block-element ranges (the latter now
+    // through U+259F so fractional + quadrant blocks are drawn to the cell too)
+    if !matches!(c, '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{259F}') {
         return None;
     }
     let w = w.max(1);
@@ -34,16 +35,36 @@ pub fn coverage(c: char, w: usize, h: usize, stroke: f32) -> Option<Vec<u8>> {
         }
     };
 
-    // ---- block elements & shades -------------------------------------------
+    // ---- block elements, fractional + quadrant blocks & shades -------------
+    // lower fractional blocks ▁▂▃▄▅▆▇ fill n eighths up from the bottom
+    if ('\u{2581}'..='\u{2587}').contains(&c) {
+        let n = c as i32 - 0x2580; // 1..=7
+        rect(&mut buf, 0, ih - n * ih / 8, iw, ih, 255);
+        return Some(buf);
+    }
+    // left fractional blocks ▉▊▋▌▍▎▏ fill from the left (eighths, wide to narrow)
+    if ('\u{2589}'..='\u{258F}').contains(&c) {
+        let k = c as i32 - 0x2588; // 1..=7  → ▉ (7/8) .. ▏ (1/8)
+        rect(&mut buf, 0, 0, (8 - k) * iw / 8, ih, 255);
+        return Some(buf);
+    }
     match c {
-        '\u{2588}' => { rect(&mut buf, 0, 0, iw, ih, 255); return Some(buf); } // █ full block
-        '\u{2580}' => { rect(&mut buf, 0, 0, iw, cy, 255); return Some(buf); } // ▀ upper half
-        '\u{2584}' => { rect(&mut buf, 0, cy, iw, ih, 255); return Some(buf); } // ▄ lower half
-        '\u{258C}' => { rect(&mut buf, 0, 0, cx, ih, 255); return Some(buf); } // ▌ left half
-        '\u{2590}' => { rect(&mut buf, cx, 0, iw, ih, 255); return Some(buf); } // ▐ right half
-        '\u{2591}' => { rect(&mut buf, 0, 0, iw, ih, 64); return Some(buf); }  // ░ light shade
-        '\u{2592}' => { rect(&mut buf, 0, 0, iw, ih, 128); return Some(buf); } // ▒ medium shade
-        '\u{2593}' => { rect(&mut buf, 0, 0, iw, ih, 191); return Some(buf); } // ▓ dark shade
+        '\u{2588}' => { rect(&mut buf, 0, 0, iw, ih, 255); return Some(buf); }       // █ full block
+        '\u{2580}' => { rect(&mut buf, 0, 0, iw, cy, 255); return Some(buf); }       // ▀ upper half
+        '\u{2590}' => { rect(&mut buf, cx, 0, iw, ih, 255); return Some(buf); }      // ▐ right half
+        '\u{2594}' => { rect(&mut buf, 0, 0, iw, ih / 8, 255); return Some(buf); }   // ▔ upper 1/8
+        '\u{2595}' => { rect(&mut buf, iw - iw / 8, 0, iw, ih, 255); return Some(buf); } // ▕ right 1/8
+        '\u{2591}' => { rect(&mut buf, 0, 0, iw, ih, 64); return Some(buf); }        // ░ light shade
+        '\u{2592}' => { rect(&mut buf, 0, 0, iw, ih, 128); return Some(buf); }       // ▒ medium shade
+        '\u{2593}' => { rect(&mut buf, 0, 0, iw, ih, 191); return Some(buf); }       // ▓ dark shade
+        // quadrant blocks ▖▗▘▙▚▛▜▝▞▟ — fill whichever quarters are lit
+        '\u{2596}'..='\u{259F}' => {
+            if matches!(c, '\u{2598}' | '\u{2599}' | '\u{259A}' | '\u{259B}' | '\u{259C}') { rect(&mut buf, 0, 0, cx, cy, 255); }   // top-left
+            if matches!(c, '\u{259B}' | '\u{259C}' | '\u{259D}' | '\u{259E}' | '\u{259F}') { rect(&mut buf, cx, 0, iw, cy, 255); }  // top-right
+            if matches!(c, '\u{2596}' | '\u{2599}' | '\u{259B}' | '\u{259E}' | '\u{259F}') { rect(&mut buf, 0, cy, cx, ih, 255); }  // bottom-left
+            if matches!(c, '\u{2597}' | '\u{2599}' | '\u{259A}' | '\u{259C}' | '\u{259F}') { rect(&mut buf, cx, cy, iw, ih, 255); } // bottom-right
+            return Some(buf);
+        }
         _ => {}
     }
 
@@ -173,5 +194,39 @@ mod tests {
         let cy = h / 2;
         assert!(b[cy * w] > 0, "left end of horizontal stem must be lit");
         assert!(b[cy * w + (w - 1)] > 0, "right end must be lit");
+    }
+
+    #[test]
+    fn quadrant_blocks_fill_the_right_quarters() {
+        let (w, h) = (8usize, 16usize);
+        let at = |b: &[u8], x: usize, y: usize| b[y * w + x];
+        // ▗ lower-right only
+        let b = coverage('\u{2597}', w, h, 1.0).unwrap();
+        assert_eq!(at(&b, w - 1, h - 1), 255, "bottom-right lit");
+        assert_eq!(at(&b, 0, 0), 0, "top-left dark");
+        // ▘ upper-left only
+        let b = coverage('\u{2598}', w, h, 1.0).unwrap();
+        assert_eq!(at(&b, 0, 0), 255, "top-left lit");
+        assert_eq!(at(&b, w - 1, h - 1), 0, "bottom-right dark");
+        // ▚ upper-left + lower-right (diagonal)
+        let b = coverage('\u{259A}', w, h, 1.0).unwrap();
+        assert_eq!(at(&b, 0, 0), 255);
+        assert_eq!(at(&b, w - 1, h - 1), 255);
+        assert_eq!(at(&b, w - 1, 0), 0, "top-right dark on ▚");
+    }
+
+    #[test]
+    fn fractional_blocks_fill_to_the_edge() {
+        let (w, h) = (8usize, 16usize);
+        // ▁ lower one-eighth: bottom row lit, top row dark, full width at the bottom
+        let b = coverage('\u{2581}', w, h, 1.0).unwrap();
+        assert_eq!(b[(h - 1) * w], 255, "bottom-left lit");
+        assert_eq!(b[(h - 1) * w + (w - 1)], 255, "bottom-right lit");
+        assert_eq!(b[0], 0, "top dark");
+        // ▏ left one-eighth: leftmost column lit top-to-bottom
+        let b = coverage('\u{258F}', w, h, 1.0).unwrap();
+        assert_eq!(b[0], 255, "top-left lit");
+        assert_eq!(b[(h - 1) * w], 255, "bottom-left lit");
+        assert_eq!(b[w - 1], 0, "right dark");
     }
 }
