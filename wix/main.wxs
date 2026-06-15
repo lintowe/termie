@@ -30,6 +30,14 @@
     <Property Id="ARPHELPLINK" Value="https://github.com/lintowe/termie" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/lintowe/termie" />
 
+    <!-- find a leftover per-user (Inno) install; its uninstall key lives in HKCU
+         and records the install dir, which we use to run its uninstaller -->
+    <Property Id="LEGACYINNODIR" Secure="yes">
+      <RegistrySearch Id="FindLegacyInno" Root="HKCU"
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{47F9CB96-4F69-487E-911F-C94B7B93F27D}_is1"
+                      Name="InstallLocation" Type="directory" />
+    </Property>
+
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLDIR" Name="termie">
@@ -44,7 +52,14 @@
 
     <DirectoryRef Id="INSTALLDIR">
       <Component Id="C_termie_exe" Guid="*">
-        <File Id="termie.exe" Source="target\release\termie.exe" KeyPath="yes" />
+        <File Id="termie.exe" Source="target\release\termie.exe" KeyPath="yes">
+          <Shortcut Id="S_startmenu" Directory="ProgramMenuFolder" Name="termie"
+                    Description="GPU terminal multiplexer" Icon="termie.ico"
+                    WorkingDirectory="INSTALLDIR" Advertise="yes" />
+          <Shortcut Id="S_desktop" Directory="DesktopFolder" Name="termie"
+                    Description="GPU terminal multiplexer" Icon="termie.ico"
+                    WorkingDirectory="INSTALLDIR" Advertise="yes" />
+        </File>
       </Component>
 
       <!-- add the install dir to the machine PATH so `termie` works in any shell -->
@@ -82,28 +97,6 @@
       </Component>
     </DirectoryRef>
 
-    <!-- non-advertised shortcuts live in their own components with an HKCU
-         keypath (the WiX pattern that satisfies ICE43/ICE57), targeting the
-         installed exe by file id -->
-    <DirectoryRef Id="ProgramMenuFolder">
-      <Component Id="C_shortcut_startmenu" Guid="*">
-        <Shortcut Id="S_startmenu" Name="termie" Target="[#termie.exe]"
-                  Description="GPU terminal multiplexer" Icon="termie.ico"
-                  WorkingDirectory="INSTALLDIR" />
-        <RegistryValue Root="HKCU" Key="SOFTWARE\termie" Name="startmenu"
-                       Type="integer" Value="1" KeyPath="yes" />
-      </Component>
-    </DirectoryRef>
-    <DirectoryRef Id="DesktopFolder">
-      <Component Id="C_shortcut_desktop" Guid="*">
-        <Shortcut Id="S_desktop" Name="termie" Target="[#termie.exe]"
-                  Description="GPU terminal multiplexer" Icon="termie.ico"
-                  WorkingDirectory="INSTALLDIR" />
-        <RegistryValue Root="HKCU" Key="SOFTWARE\termie" Name="desktop"
-                       Type="integer" Value="1" KeyPath="yes" />
-      </Component>
-    </DirectoryRef>
-
     <!-- bundled Maple Mono Nerd Font (loaded at runtime from assets\fonts).
          one component per file: the .ttf files are versioned, so they cannot
          share an auto-GUID component -->
@@ -133,8 +126,6 @@
       <ComponentRef Id="C_path" />
       <ComponentRef Id="C_apppaths" />
       <ComponentRef Id="C_ctxmenu" />
-      <ComponentRef Id="C_shortcut_startmenu" />
-      <ComponentRef Id="C_shortcut_desktop" />
       <ComponentRef Id="C_font_regular" />
       <ComponentRef Id="C_font_bold" />
       <ComponentRef Id="C_font_italic" />
@@ -142,5 +133,18 @@
       <ComponentRef Id="C_font_license" />
       <ComponentRef Id="C_font_ofl" />
     </Feature>
+
+    <!-- remove a leftover per-user (Inno) install during install, so it can't
+         shadow this one through PATH order or stale shortcuts. runs as the user
+         (the legacy install is per-user) and is best-effort: failures are
+         ignored so they never block the install -->
+    <SetProperty Id="LEGACYUNINS" Value="[LEGACYINNODIR]unins000.exe"
+                 Sequence="execute" Before="RemoveLegacyInno" />
+    <CustomAction Id="RemoveLegacyInno" Property="LEGACYUNINS"
+                  ExeCommand="/VERYSILENT /NORESTART /SUPPRESSMSGBOXES"
+                  Execute="immediate" Return="ignore" Impersonate="yes" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveLegacyInno" Before="InstallInitialize">LEGACYINNODIR</Custom>
+    </InstallExecuteSequence>
   </Product>
 </Wix>

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.8 — 2026-06-14
+
+### Packaging
+- **The installer's Start-menu and desktop shortcuts now actually install.** The previous MSI registered them in a way that silently skipped them on a per-machine install, so the only shortcuts were whatever an older installer had left behind.
+- **Installing now removes a leftover per-user install from older (pre-MSI) builds.** A copy from the old installer could sit earlier in `PATH` and own your taskbar/Start shortcuts, so launching termie kept running the old version even after the MSI installed the new one. The MSI now uninstalls that legacy copy as part of installing.
+
 ## 0.2.7 — 2026-06-14
 
 ### Fixes
