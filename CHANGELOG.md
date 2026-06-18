@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.10 — 2026-06-18
+
+### Fixes
+- **Ctrl+C now copies the selection.** When text is selected, Ctrl+C copies it (and clears the selection) the way Windows Terminal does; with nothing selected it still passes through as the interrupt the shell expects. Ctrl+Shift+C remains the always-copy chord, and right-click now has a Copy entry too.
+
+### Scrollback
+- **The scrollbar is now grabbable.** The thin thumb on the right edge can be clicked and dragged to scroll through history, and clicking the track jumps to that spot. It also shows when you hover the right edge, so you can grab it from the live bottom — not only once you've already scrolled up.
+
 ## 0.2.9 — 2026-06-15
 
 ### Fixes
