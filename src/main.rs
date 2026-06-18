@@ -1742,6 +1742,10 @@ struct App {
     pool: Vec<Pane>,
     selection: Option<Sel>,
     selecting: bool,
+    /// dragging the scroll thumb: (pane id, pointer-y offset from the thumb top)
+    sb_drag: Option<(usize, f32)>,
+    /// pane whose scrollbar zone the pointer is over (so the bar shows to grab)
+    sb_hover: Option<usize>,
     last_click: Option<(Instant, f64, f64)>,
     // consecutive click count in a pane's content for word/line select cycling
     click_seq: u32,
@@ -1881,6 +1885,8 @@ impl App {
             pool: Vec::new(),
             selection: None,
             selecting: false,
+            sb_drag: None,
+            sb_hover: None,
             last_click: None,
             click_seq: 0,
             taskbar_sent: (0, 0),
@@ -2558,6 +2564,63 @@ impl App {
         })
     }
 
+    /// the pane whose scroll-thumb grab strip is under (cx, cy), with its thumb
+    /// geometry, or None. the strip is the thin bar plus a few px of slop so the
+    /// 2px thumb is still easy to grab
+    fn scrollbar_hit(&self, cx: f32, cy: f32) -> Option<(usize, render::ScrollThumb)> {
+        let r = self.pw.renderer.as_ref()?;
+        let root = self.pw.tabs.get(self.pw.active_tab)?.root.as_ref()?;
+        for (id, rect) in &self.pw.layout_cache {
+            let Some(p) = find_pane(root, *id) else { continue };
+            let g = &p.term.grid;
+            let Some(t) = r.scrollbar_for(*rect, g.scrollback.len(), g.view_offset) else {
+                continue;
+            };
+            let slop = 8.0;
+            if cx >= t.track_x - slop
+                && cx <= t.track_x + t.track_w + slop
+                && cy >= t.track_y
+                && cy <= t.track_y + t.track_h
+            {
+                return Some((*id, t));
+            }
+        }
+        None
+    }
+
+    /// set pane `id`'s scroll offset from a pointer-y, honouring the grab offset
+    /// recorded when the thumb was first pressed
+    fn apply_scrollbar_drag(&mut self, id: usize, cy: f32) {
+        let grab_dy = match self.sb_drag {
+            Some((p, dy)) if p == id => dy,
+            _ => 0.0,
+        };
+        let Some(rect) = self.pw.layout_cache.iter().find(|(i, _)| *i == id).map(|(_, r)| *r) else {
+            return;
+        };
+        let scrollback = match self
+            .pw.tabs
+            .get(self.pw.active_tab)
+            .and_then(|t| t.root.as_ref())
+            .and_then(|root| find_pane(root, id))
+        {
+            Some(p) => p.term.grid.scrollback.len(),
+            None => return,
+        };
+        let Some(off) = self
+            .pw.renderer
+            .as_ref()
+            .map(|r| r.scroll_offset_at(rect, scrollback, cy - grab_dy))
+        else {
+            return;
+        };
+        if let Some(root) = self.pw.tabs.get_mut(self.pw.active_tab).and_then(|t| t.root.as_mut())
+            && let Some(p) = find_pane_mut(root, id)
+        {
+            p.term.grid.view_offset = off.min(p.term.grid.scrollback.len());
+        }
+    }
+
     fn copy_selection(&mut self) {
         let Some(sel) = self.selection else {
             return;
@@ -2730,6 +2793,8 @@ impl App {
             pw,
             selection,
             link,
+            sb_drag,
+            sb_hover,
             ..
         } = self;
         let PaneWindow {
@@ -2766,6 +2831,8 @@ impl App {
                                         })
                                         .unwrap_or(0.0),
                                     link: if *id == tab.focused { *link } else { None },
+                                    sb_active: sb_drag.map(|(p, _)| p) == Some(*id)
+                                        || *sb_hover == Some(*id),
                                 })
                             })
                             .collect()
@@ -3973,14 +4040,19 @@ impl App {
     }
 
     /// run a pane context-menu item (index into render::PANE_MENU_ITEMS:
-    /// 0 split vertical, 1 split horizontal, 2 pop out, 3 close pane, 4 paste)
+    /// 0 copy, 1 split vertical, 2 split horizontal, 3 pop out, 4 close pane,
+    /// 5 paste). copy is a no-op when nothing is selected
     fn pane_menu_action(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         match idx {
-            0 => self.split_focused(Dir::Vertical),
-            1 => self.split_focused(Dir::Horizontal),
-            2 => self.pop_out_focused(event_loop),
-            3 => self.close_focused_pane(event_loop),
-            4 => self.paste(),
+            0 => {
+                self.copy_selection();
+                self.selection = None;
+            }
+            1 => self.split_focused(Dir::Vertical),
+            2 => self.split_focused(Dir::Horizontal),
+            3 => self.pop_out_focused(event_loop),
+            4 => self.close_focused_pane(event_loop),
+            5 => self.paste(),
             _ => {}
         }
     }
@@ -4354,6 +4426,9 @@ impl App {
     // underline every hovered path until the next real key event
     fn release_held_input(&mut self) {
         self.mods = ModifiersState::empty();
+        // a drag in flight must not survive losing focus, or it would resume the
+        // next time the pointer moves over the window
+        self.sb_drag = None;
         if self.link.take().is_some() {
             self.set_pointer(CursorIcon::Default);
         }
@@ -4371,6 +4446,13 @@ impl App {
                 m.hovered = h;
                 self.redraw();
             }
+            return;
+        }
+        // dragging the scroll thumb: map pointer-y to a scroll offset and skip
+        // every other motion handler while the thumb is held
+        if let Some((id, _)) = self.sb_drag {
+            self.apply_scrollbar_drag(id, py);
+            self.redraw();
             return;
         }
         // mouse-tracking motion (1002 drag / 1003 any-motion)
@@ -4420,6 +4502,13 @@ impl App {
                 if r.set_hovered(hovered) {
                     self.redraw();
                 }
+            }
+            // reveal the scroll thumb while the pointer is over its grab strip so
+            // it can be grabbed even from the live bottom (not only when scrolled)
+            let sbh = self.scrollbar_hit(px, py).map(|(id, _)| id);
+            if sbh != self.sb_hover {
+                self.sb_hover = sbh;
+                self.redraw();
             }
             // ctrl-hover a url: underline it and show a hand (click opens). read
             // the real ctrl key, not tracked mods, so a missed release can't
@@ -4544,6 +4633,28 @@ impl App {
                     if state == ElementState::Pressed {
                         self.market_click(cx, cy);
                     }
+                    return;
+                }
+                // scroll-thumb drag: a press on the thumb (or its track) grabs it
+                // and takes priority over selection / TUI mouse forwarding; the
+                // matching release just ends the drag
+                if state == ElementState::Released && self.sb_drag.take().is_some() {
+                    self.redraw();
+                    return;
+                }
+                if state == ElementState::Pressed
+                    && let Some((id, t)) = self.scrollbar_hit(cx, cy)
+                {
+                    // grab the thumb where pressed; a press on the bare track jumps
+                    // the thumb so its centre lands under the pointer, then drags
+                    let grab_dy = if cy >= t.thumb_y && cy <= t.thumb_y + t.thumb_h {
+                        cy - t.thumb_y
+                    } else {
+                        t.thumb_h / 2.0
+                    };
+                    self.sb_drag = Some((id, grab_dy));
+                    self.apply_scrollbar_drag(id, cy);
+                    self.redraw();
                     return;
                 }
                 let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
@@ -4941,6 +5052,26 @@ impl App {
                 // that key falls through to the program unchanged
                 return self.run_action(a, event_loop);
             }
+        }
+        // ctrl+c with an active selection copies it (and clears the selection) the
+        // way windows terminal does; with no selection it falls through so the
+        // shell still receives the interrupt. ctrl+shift+c stays the unconditional
+        // copy chord
+        if self.market.is_none()
+            && self.find.is_none()
+            && self.palette.is_none()
+            && !self.pw.settings_open
+            && !self.pw.pane_mode
+            && self.mods.control_key()
+            && !self.mods.shift_key()
+            && !self.mods.alt_key()
+            && self.selection.is_some()
+            && key_matches(&event.logical_key, &Key::Character("c".into()))
+        {
+            self.copy_selection();
+            self.selection = None;
+            self.redraw();
+            return true;
         }
         // the plugins marketplace overlay captures keys while open
         if self.market.is_some() && self.market_input(&event.logical_key) {

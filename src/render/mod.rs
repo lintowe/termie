@@ -127,6 +127,9 @@ pub struct PaneView<'a> {
     pub flash: f32,
     /// hovered url to underline: (viewport row, col_start, col_end exclusive)
     pub link: Option<(usize, usize, usize)>,
+    /// the scrollbar is being hovered or dragged, so draw it even at the bottom
+    /// and a touch brighter (otherwise it only shows while scrolled into history)
+    pub sb_active: bool,
 }
 
 /// command-palette display state
@@ -144,8 +147,8 @@ pub struct PaneMenuView {
     pub hovered: Option<usize>,
 }
 
-pub const PANE_MENU_ITEMS: [&str; 5] =
-    ["split vertical", "split horizontal", "pop out to window", "close pane", "paste"];
+pub const PANE_MENU_ITEMS: [&str; 6] =
+    ["copy", "split vertical", "split horizontal", "pop out to window", "close pane", "paste"];
 
 /// find-in-scrollback overlay display state. `matches` are on-screen rects
 /// (viewport row, col, len, is_current) for the focused pane
@@ -228,6 +231,18 @@ pub enum Hit {
     TitleBar,
     Resize(ResizeDirection),
     Content,
+}
+
+/// scroll thumb + track rectangle for a pane, in window pixels. shared by the
+/// painter and the input hit-test so the grabbable strip is exactly what's drawn
+#[derive(Clone, Copy)]
+pub struct ScrollThumb {
+    pub track_x: f32,
+    pub track_y: f32,
+    pub track_w: f32,
+    pub track_h: f32,
+    pub thumb_y: f32,
+    pub thumb_h: f32,
 }
 
 /// read-only mirror of the App-owned settings so the renderer can label them;
@@ -1351,6 +1366,73 @@ impl Renderer {
         (col, row)
     }
 
+    /// cursor-beam / scroll-thumb width in pixels (kept in one place so the
+    /// painter and the scrollbar hit-test agree)
+    fn beam_w(&self) -> f32 {
+        (2.0 * self.scale).round().max(1.0)
+    }
+
+    /// scroll thumb geometry for a pane grid, or None when there is nothing to
+    /// scroll. `ox`/`oy` are the pane's content origin (from pane_metrics)
+    #[allow(clippy::too_many_arguments)]
+    fn scrollbar_geom(
+        ox: f32,
+        oy: f32,
+        cols: usize,
+        rows: usize,
+        cell_w: f32,
+        cell_h: f32,
+        beam_w: f32,
+        scrollback_len: usize,
+        view_offset: usize,
+    ) -> Option<ScrollThumb> {
+        let total = scrollback_len + rows;
+        if total <= rows {
+            return None;
+        }
+        let track_h = rows as f32 * cell_h;
+        let track_w = (2.0 * beam_w).max(2.0);
+        let track_x = ox + cols as f32 * cell_w - track_w;
+        let thumb_h = (track_h * rows as f32 / total as f32).max(cell_h);
+        let top_line = (total - rows - view_offset) as f32;
+        let thumb_y = oy + (track_h - thumb_h) * (top_line / (total - rows) as f32);
+        Some(ScrollThumb { track_x, track_y: oy, track_w, track_h, thumb_y, thumb_h })
+    }
+
+    /// public scroll-thumb geometry for the pane at `rect` given its grid's
+    /// history depth and current scroll offset (used by the input hit-test)
+    pub fn scrollbar_for(
+        &self,
+        rect: (f32, f32, f32, f32),
+        scrollback_len: usize,
+        view_offset: usize,
+    ) -> Option<ScrollThumb> {
+        let m = self.atlas.metrics(FontId::Content);
+        let (ox, oy, cols, rows) = self.pane_metrics(rect);
+        Self::scrollbar_geom(ox, oy, cols, rows, m.cell_w, m.cell_h, self.beam_w(), scrollback_len, view_offset)
+    }
+
+    /// map a window-y to the view_offset that puts the thumb top there, for a
+    /// pane at `rect` with `scrollback_len` lines of history. clamps to range
+    pub fn scroll_offset_at(
+        &self,
+        rect: (f32, f32, f32, f32),
+        scrollback_len: usize,
+        thumb_top_y: f32,
+    ) -> usize {
+        let (_, _, _, rows) = self.pane_metrics(rect);
+        // geom at offset 0 gives the track/thumb size (independent of offset)
+        let Some(g) = self.scrollbar_for(rect, scrollback_len, 0) else {
+            return 0;
+        };
+        let span = (g.track_h - g.thumb_h).max(1.0);
+        let frac = ((thumb_top_y - g.track_y) / span).clamp(0.0, 1.0);
+        let scroll_span = scrollback_len; // total - rows == scrollback_len
+        let top_line = (frac * scroll_span as f32).round() as usize;
+        let _ = rows;
+        scroll_span.saturating_sub(top_line)
+    }
+
     pub fn set_hovered(&mut self, h: Option<Hot>) -> bool {
         let changed = self.hovered != h;
         if changed {
@@ -2406,6 +2488,7 @@ impl Renderer {
         link: Option<(usize, usize, usize)>,
         matches: &[(usize, usize, usize, bool)],
         bold_as_bright: bool,
+        sb_active: bool,
     ) {
         let sel_col = palette.sel;
         let m = atlas.metrics(FontId::Content);
@@ -2588,22 +2671,17 @@ impl Renderer {
             });
         }
 
-        // scroll position indicator: a thin thumb on the pane's right edge,
-        // shown only while scrolled into history, sized + positioned to the
-        // viewport's slice of total (scrollback + screen) lines
-        if scrolled {
-            let total = grid.scrollback.len() + grid.rows;
-            if total > grid.rows {
-                let track_h = grid.rows as f32 * cell_h;
-                let tw = (2.0 * beam_w).max(2.0);
-                let track_x = ox + grid.cols as f32 * cell_w - tw;
-                let thumb_h = (track_h * grid.rows as f32 / total as f32).max(cell_h);
-                // viewport top line within total; (total-rows) = live bottom
-                let top_line = (total - grid.rows - grid.view_offset) as f32;
-                let thumb_y = oy + (track_h - thumb_h) * (top_line / (total - grid.rows) as f32);
-                Self::push_rect(out, track_x, oy, tw, track_h, palette.mute, 0.18);
-                Self::push_rect(out, track_x, thumb_y, tw, thumb_h, palette.mute, 0.8);
-            }
+        // scroll thumb on the pane's right edge, sized + positioned to the
+        // viewport's slice of total (scrollback + screen) lines. shown while
+        // scrolled into history, or while the user is hovering/dragging it so it
+        // can be grabbed from the live bottom too
+        if (scrolled || sb_active)
+            && let Some(t) =
+                Self::scrollbar_geom(ox, oy, grid.cols, grid.rows, cell_w, cell_h, beam_w, grid.scrollback.len(), grid.view_offset)
+        {
+            let thumb_a = if sb_active { 0.95 } else { 0.8 };
+            Self::push_rect(out, t.track_x, t.track_y, t.track_w, t.track_h, palette.mute, 0.18);
+            Self::push_rect(out, t.track_x, t.thumb_y, t.track_w, t.thumb_h, palette.mute, thumb_a);
         }
     }
 
@@ -2729,6 +2807,7 @@ impl Renderer {
                     pv.link,
                     fmatches,
                     bold_as_bright,
+                    pv.sb_active,
                 );
             }
         }
