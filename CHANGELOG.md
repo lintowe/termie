@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.11-rc1 — 2026-06-25
+
+### Resiliency
+- **COM API resource cleanup**: Implemented an RAII `ComGuard` structure to balance successful COM initializations on the main GUI thread, preventing resource/reference count leaks when querying Explorer directories.
+- **Robust plugin installation**: The directory move fallback now performs transactional cleanups. If the copy operation fails when installing a plugin across filesystem volumes, the partial folder is deleted to prevent a corrupted installation.
+
+### Security
+- **Plugin IPC message length limits**: Implemented a 256 KB message length limit on the reader thread for plugin stdout streams. Any line exceeding the limit is safely logged, discarded, and resynchronized, avoiding memory inflation or OOM crash vectors from rogue plugins.
+
+### Diagnostics
+- **Color override warnings**: Added console/log warnings in `colors.conf` parsing to report missing `=` signs or unparseable colors, making theme troubleshooting straightforward.
+
 ## 0.2.10 — 2026-06-18
 
 ### Fixes
