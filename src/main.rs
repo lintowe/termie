@@ -457,10 +457,13 @@ fn load_color_overrides() -> Vec<(String, color::Rgb)> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=')
-            && let Some(c) = parse_color(v)
-        {
-            out.push((k.trim().to_string(), c));
+        let Some((k, v)) = line.split_once('=') else {
+            log::warn!("colors.conf: no '=' in line: {line}");
+            continue;
+        };
+        match parse_color(v) {
+            Some(c) => out.push((k.trim().to_string(), c)),
+            None => log::warn!("colors.conf: unparseable color '{}' for key '{}'", v.trim(), k.trim()),
         }
     }
     out

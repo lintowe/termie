@@ -22,6 +22,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 
 /// a message surfaced from a plugin to the event loop (mirrors PtyMsg)
+#[derive(Debug)]
 pub enum PluginMsg {
     Cmd(PluginCmd),
     Exited,
@@ -124,14 +125,22 @@ impl Plugin {
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
+            const MAX_LINE_LIMIT: u64 = 262_144; // 256 kb
             loop {
                 line.clear();
-                match reader.read_line(&mut line) {
+                let mut chunk = reader.by_ref().take(MAX_LINE_LIMIT);
+                match chunk.read_line(&mut line) {
                     Ok(0) => {
                         on_msg(PluginMsg::Exited);
                         break;
                     }
-                    Ok(_) => {
+                    Ok(n) => {
+                        if n as u64 >= MAX_LINE_LIMIT && !line.ends_with('\n') {
+                            log::warn!("plugin {id}: line exceeds maximum length limit, discarding line");
+                            let mut drop_buf = Vec::new();
+                            let _ = reader.read_until(b'\n', &mut drop_buf);
+                            continue;
+                        }
                         if line.trim().is_empty() {
                             continue;
                         }
@@ -177,5 +186,36 @@ mod tests {
         let line = ev.to_line();
         assert!(!line.contains('\n'));
         assert!(crate::plugin::json::Json::parse(&line).is_some());
+    }
+
+    #[test]
+    fn start_reader_drops_overlarge_lines() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut payload = vec![b'a'; 300_000];
+        payload.push(b'\n');
+        payload.extend_from_slice(r#"{"t":"notify","text":"hello"}"#.as_bytes());
+        payload.push(b'\n');
+
+        let (tx, rx) = mpsc::channel();
+        let stdout: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(payload));
+
+        Plugin::start_reader(
+            "test_plugin".to_string(),
+            stdout,
+            move |msg| {
+                let _ = tx.send(msg);
+            },
+        );
+
+        let first = rx.recv_timeout(Duration::from_millis(500)).expect("recv first");
+        match first {
+            PluginMsg::Cmd(PluginCmd::Notify { text }) => assert_eq!(text, "hello"),
+            other => panic!("expected Notify, got {:?}", other),
+        }
+
+        let second = rx.recv_timeout(Duration::from_millis(500)).expect("recv second");
+        assert!(matches!(second, PluginMsg::Exited));
     }
 }

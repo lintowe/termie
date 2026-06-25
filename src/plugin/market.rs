@@ -208,7 +208,10 @@ fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    copy_dir(from, to)?;
+    if let Err(e) = copy_dir(from, to) {
+        let _ = std::fs::remove_dir_all(to);
+        return Err(e);
+    }
     std::fs::remove_dir_all(from)
 }
 

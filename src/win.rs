@@ -411,6 +411,33 @@ pub fn foreground_window() -> isize {
     0
 }
 
+struct ComGuard {
+    needs_uninit: bool,
+}
+
+impl ComGuard {
+    fn new() -> Self {
+        unsafe {
+            let needs_uninit = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+            .is_ok();
+            Self { needs_uninit }
+        }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.needs_uninit {
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
+}
+
 /// if `hwnd` is an explorer file window, the folder it is showing as a `file://`
 /// url; None otherwise. used to recover the launch folder when the explorer
 /// address bar starts a bare `termie` with no working dir of its own. a
@@ -420,7 +447,7 @@ pub fn foreground_window() -> isize {
 pub fn explorer_dir_for(hwnd: isize) -> Option<String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CLSCTX_ALL, CoCreateInstance,
     };
     use windows::Win32::System::Variant::VARIANT;
     use windows::Win32::UI::Shell::{IShellWindows, IWebBrowser2, ShellWindows};
@@ -439,10 +466,8 @@ pub fn explorer_dir_for(hwnd: isize) -> Option<String> {
     if class != "CabinetWClass" && class != "ExploreWClass" {
         return None;
     }
+    let _com_guard = ComGuard::new();
     unsafe {
-        // winit already put this (main) thread in an STA; S_FALSE / RPC_E_CHANGED_MODE
-        // are both fine to ignore, exactly like the taskbar-progress path does
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let shell_windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL).ok()?;
         let count = shell_windows.Count().ok()?;
         for i in 0..count {
