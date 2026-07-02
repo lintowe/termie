@@ -4815,6 +4815,20 @@ impl App {
                         Some(Hit::Button(h)) => self.pressed = Some(h),
                         Some(Hit::Content) => {
                             self.focus_pane_at(cx, cy);
+                            // shift-click extends an existing selection in the
+                            // clicked pane to that cell (the usual anchor-extend)
+                            if self.mods.shift_key()
+                                && let Some((row, col)) = self.cell_in_focused(cx, cy)
+                                && let Some(sel) = self
+                                    .selection
+                                    .as_mut()
+                                    .filter(|s| Some(s.pane) == self.pw.tabs.get(self.pw.active_tab).map(|t| t.focused))
+                            {
+                                sel.end = (row, col);
+                                self.selecting = true;
+                                self.redraw();
+                                return;
+                            }
                             let now = Instant::now();
                             // cycle 1=char, 2=word, 3=line on rapid clicks in place
                             let consecutive = self
