@@ -14,7 +14,7 @@ A fast, lightweight GPU terminal multiplexer for Windows — tabs, split panes, 
 
 GPU-rendered (wgpu glyph-atlas), a ~7.6 MB binary, and a lean dependency tree. A pre-warmed shell pool keeps a started PowerShell ready, so new tabs and splits feel instant and the window appears before any shell finishes spawning.
 
-Tabs and recursive split panes — split vertically or horizontally, drag dividers, swap panes, tear a pane off into its own window, and broadcast input to every pane in a tab. Splits and "new tab here" open in the focused pane's directory; pick a per-tab shell (`pwsh` / `cmd` / `wsl`) from the command palette.
+Tabs and recursive split panes — split vertically or horizontally, drag dividers, swap panes, tear a pane off into its own window, and broadcast input to every pane in a tab. Splits and "new tab here" open in the focused pane's directory; pick a per-tab shell (`pwsh` / `cmd` / `wsl`) from the command palette. A bell in a background tab dots that tab, and a bell while the window is unfocused flashes the taskbar — so a finished agent or build finds you, not the other way around.
 
 Real terminal emulation: a [vte](https://github.com/alacritty/vte)-based parser, alt screen, scroll regions, mouse reporting, bracketed paste, OSC 7 cwd (tab labels + window title), reflow on resize, the kitty keyboard protocol (so `Shift+Enter` inserts a newline in TUIs), OSC 8 hyperlinks, OSC 52 clipboard writes, OSC 4/10/11/12 color queries, OSC 9;4 taskbar progress, underline styles, strikethrough, blink, and DEC 2026 synchronized output for tear-free frames.
 

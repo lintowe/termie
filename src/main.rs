@@ -124,6 +124,9 @@ struct Tab {
     zoom: Option<usize>,
     /// user-given name overriding the cwd-derived label (persisted)
     title: Option<String>,
+    /// a bell rang here while the tab was in the background (or the window
+    /// unfocused); draws a dot on the tab until it is viewed. transient
+    attention: bool,
 }
 
 /// a torn-off pane living in its own OS-decorated window. its pty reader still
@@ -2117,6 +2120,7 @@ impl App {
             root: Some(Node::Leaf(pane)),
             zoom: None,
             title: None,
+            attention: false,
         });
         self.pw.active_tab = 0;
         self.relayout_all();
@@ -2924,6 +2928,12 @@ impl App {
     }
 
     fn sync_tabs(&mut self) {
+        // viewing a tab in a focused window acknowledges its bell
+        if self.pw.focused
+            && let Some(t) = self.pw.tabs.get_mut(self.pw.active_tab)
+        {
+            t.attention = false;
+        }
         let labels: Vec<String> = self
             .pw.tabs
             .iter()
@@ -2940,6 +2950,7 @@ impl App {
                 cwd_label(cwd)
             })
             .collect();
+        let attention: Vec<bool> = self.pw.tabs.iter().map(|t| t.attention).collect();
         let active = self.pw.active_tab;
         let cwd: Option<String> = self
             .pw.tabs
@@ -2953,6 +2964,7 @@ impl App {
         }
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_tabs(labels, active);
+            r.set_tab_attention(attention);
         }
         // sync_tabs runs after every structural / focus / cwd change (never per
         // frame), so it's the chokepoint to schedule a debounced session write
@@ -3077,6 +3089,7 @@ impl App {
                 root: Some(Node::Leaf(pane)),
                 zoom: None,
                 title: None,
+                attention: false,
             });
             self.pw.active_tab = self.pw.tabs.len() - 1;
             self.relayout_all();
@@ -4024,7 +4037,7 @@ impl App {
                 .copied()
                 .or_else(|| leaf_ids.first().copied())
                 .unwrap_or(0);
-            self.pw.tabs.push(Tab { focused, root: Some(root), zoom: None, title: tab.title.clone() });
+            self.pw.tabs.push(Tab { focused, root: Some(root), zoom: None, title: tab.title.clone(), attention: false });
         }
         if self.pw.tabs.is_empty() {
             return;
@@ -4134,6 +4147,7 @@ impl App {
                 root: Some(Node::Leaf(pane)),
                 zoom: None,
                 title: None,
+                attention: false,
             }],
             active_tab: 0,
             layout_cache: Vec::new(),
@@ -4270,6 +4284,10 @@ impl App {
                     self.pw.ime_composing = false;
                     self.release_held_input();
                 }
+                // coming back acknowledges the active tab's bell dot
+                if f && self.pw.tabs.get(self.pw.active_tab).is_some_and(|t| t.attention) {
+                    self.sync_tabs();
+                }
                 self.paint();
             }
             // torn-off windows get the same mouse handling as the main window —
@@ -4294,7 +4312,7 @@ impl App {
     /// re-attach a loose pane as a new tab (used if a satellite window won't open)
     fn dock_loose_pane(&mut self, pane: Pane) {
         let fid = pane.id;
-        self.pw.tabs.push(Tab { focused: fid, root: Some(Node::Leaf(pane)), zoom: None, title: None });
+        self.pw.tabs.push(Tab { focused: fid, root: Some(Node::Leaf(pane)), zoom: None, title: None, attention: false });
         self.pw.active_tab = self.pw.tabs.len() - 1;
         self.relayout_all();
         self.sync_tabs();
@@ -5258,9 +5276,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut found = false;
                 let mut in_sync = false;
                 let mut rang = false;
+                let mut rang_tab: Option<usize> = None;
                 let mut newly_ready = false;
                 let mut cwd_changed = false;
-                for tab in &mut self.pw.tabs {
+                for (ti, tab) in self.pw.tabs.iter_mut().enumerate() {
                     if let Some(root) = tab.root.as_mut()
                         && let Some(p) = find_pane_mut(root, id) {
                             pump_bytes(p, &bytes);
@@ -5288,6 +5307,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 p.term.bell = false;
                                 p.flash = Some(Instant::now());
                                 rang = true;
+                                rang_tab = Some(ti);
                             }
                             found = true;
                             break;
@@ -5308,7 +5328,8 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut sat_ready = false;
                     let mut sat_cwd = false;
                     let mut sat_rang = false;
-                    for tab in self.pw.tabs.iter_mut() {
+                    let mut sat_rang_tab: Option<usize> = None;
+                    for (ti, tab) in self.pw.tabs.iter_mut().enumerate() {
                         if let Some(root) = tab.root.as_mut()
                             && let Some(p) = find_pane_mut(root, id)
                         {
@@ -5334,6 +5355,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 p.term.bell = false;
                                 p.flash = Some(Instant::now());
                                 sat_rang = true;
+                                sat_rang_tab = Some(ti);
                             }
                             break;
                         }
@@ -5364,6 +5386,24 @@ impl ApplicationHandler<UserEvent> for App {
                     if sat_cwd {
                         self.sync_tabs();
                     }
+                    // same bell routing as the main window, scoped to this
+                    // satellite's tabs and taskbar button via the swap
+                    if let Some(ti) = sat_rang_tab {
+                        if ti != self.pw.active_tab
+                            && let Some(t) = self.pw.tabs.get_mut(ti)
+                            && !t.attention
+                        {
+                            t.attention = true;
+                            self.sync_tabs();
+                        }
+                        if !self.pw.focused
+                            && let Some(w) = self.pw.window.as_ref()
+                            && let Ok(handle) = w.window_handle()
+                            && let RawWindowHandle::Win32(h) = handle.as_raw()
+                        {
+                            win::flash_taskbar(h.hwnd.get());
+                        }
+                    }
                     if let Some(w) = self.pw.window.as_ref() {
                         w.request_redraw();
                     }
@@ -5380,6 +5420,25 @@ impl ApplicationHandler<UserEvent> for App {
                 // let plugins react to the bell (host -> plugin event direction)
                 if rang && !self.plugins.is_empty() {
                     self.plugins_broadcast(&plugin::HostEvent::Bell { pane: id as u64 });
+                }
+                // route the bell to the user: dot a background tab, flash the
+                // taskbar of an unfocused window (viewing the tab clears both)
+                if let Some(ti) = rang_tab {
+                    if ti != self.pw.active_tab
+                        && let Some(t) = self.pw.tabs.get_mut(ti)
+                        && !t.attention
+                    {
+                        t.attention = true;
+                        self.sync_tabs();
+                        self.redraw();
+                    }
+                    if !self.pw.focused
+                        && let Some(w) = self.pw.window.as_ref()
+                        && let Ok(handle) = w.window_handle()
+                        && let RawWindowHandle::Win32(h) = handle.as_raw()
+                    {
+                        win::flash_taskbar(h.hwnd.get());
+                    }
                 }
                 if !found {
                     // route to a warm pool shell; first output means it's started,
@@ -5618,6 +5677,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if !f {
                     self.pw.ime_composing = false;
                     self.release_held_input();
+                }
+                // coming back acknowledges the active tab's bell dot
+                if f && self.pw.tabs.get(self.pw.active_tab).is_some_and(|t| t.attention) {
+                    self.sync_tabs();
                 }
                 // a held drag can't survive losing focus: release it so the TUI
                 // doesn't see a stuck button

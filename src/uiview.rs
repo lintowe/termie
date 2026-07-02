@@ -35,6 +35,10 @@ pub fn maybe_run() -> bool {
         "hover" => {
             r.set_hovered(Some(Hot::SplitV));
         }
+        "attention" => {
+            // a bell rang in the two background tabs
+            r.set_tab_attention(vec![false, true, true]);
+        }
         "gear" => {
             r.set_hovered(Some(Hot::Gear));
         }

@@ -100,6 +100,29 @@ pub fn set_taskbar_progress(hwnd_handle: isize, state: u8, pct: u8) {
 #[cfg(not(windows))]
 pub fn set_taskbar_progress(_hwnd_handle: isize, _state: u8, _pct: u8) {}
 
+/// flash the window's taskbar button until it regains the foreground — the
+/// standard "needs attention" signal for a bell in an unfocused window
+#[cfg(windows)]
+pub fn flash_taskbar(hwnd_handle: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FlashWindowEx, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+    };
+    let fi = FLASHWINFO {
+        cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+        hwnd: HWND(hwnd_handle as *mut core::ffi::c_void),
+        dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+        uCount: 0,
+        dwTimeout: 0,
+    };
+    unsafe {
+        let _ = FlashWindowEx(&fi);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn flash_taskbar(_hwnd_handle: isize) {}
+
 #[cfg(windows)]
 pub fn local_hm() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;

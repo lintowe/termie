@@ -276,8 +276,8 @@ type TabEntry = (usize, Rect, Rect);
 /// resolved per-pane paint origin: (origin x, origin y, focused, pane rect)
 type PaneInfo = (f32, f32, bool, Rect);
 /// snapshot of a tab row for painting: index, tab rect, close rect, label,
-/// active, hovered, close-hovered
-type TabItem = (usize, Rect, Rect, String, bool, bool, bool);
+/// active, hovered, close-hovered, attention (bell in a background tab)
+type TabItem = (usize, Rect, Rect, String, bool, bool, bool, bool);
 
 /// GPU backend choice for compatibility; persisted + applied at startup
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -556,6 +556,8 @@ pub struct Renderer {
     gradient_key: (u32, u32, ThemeId),
     pane_mode: bool,
     tabs: Vec<String>,
+    /// parallel to `tabs`: true = a bell rang there while backgrounded
+    tab_attention: Vec<bool>,
     active_tab: usize,
     status_git: Option<String>,
     status_clock: String,
@@ -1214,6 +1216,7 @@ impl Renderer {
             settings_view: SettingsView::default(),
             pane_mode: false,
             tabs: Vec::new(),
+            tab_attention: Vec::new(),
             active_tab: 0,
             status_git: None,
             status_clock: String::new(),
@@ -1736,6 +1739,12 @@ impl Renderer {
             self.recompute_grid_size();
         }
         (self.cols, self.rows)
+    }
+
+    /// per-tab bell markers, parallel to `tabs`; a background tab whose shell
+    /// rang shows a dot where its close icon would sit
+    pub fn set_tab_attention(&mut self, attention: Vec<bool>) {
+        self.tab_attention = attention;
     }
 
     pub fn set_tabs(&mut self, tabs: Vec<String>, active: usize) {
@@ -2887,6 +2896,7 @@ impl Renderer {
                         *i == active_tab,
                         self.hovered == Some(Hot::Tab(*i)),
                         self.hovered == Some(Hot::TabClose(*i)),
+                        self.tab_attention.get(*i).copied().unwrap_or(false),
                     )
                 })
                 .collect();
@@ -2894,7 +2904,7 @@ impl Renderer {
         let newtab_hover = self.hovered == Some(Hot::NewTab);
         let he = self.hover_ease();
 
-        for (_, rect, close, label, active, hov, close_hov) in &tab_items {
+        for (_, rect, close, label, active, hov, close_hov, attn) in &tab_items {
             let (tx, _ty, tw, _th) = *rect;
             if *active {
                 Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_4, 1.0);
@@ -2934,6 +2944,14 @@ impl Renderer {
                 let _ = Self::draw_text(
                     &mut self.atlas, &mut out, FontId::Chrome, cgx, cy.round(), "\u{f00d}", cc, 1.0, track,
                 );
+            } else if *attn {
+                // bell dot in the close icon's slot, so it never shifts the
+                // label; hovering swaps it back for the close icon
+                let d = (5.0 * self.scale).round().max(3.0);
+                let (cx, _cy, ccw, _cch) = *close;
+                let dx = (cx + (ccw - d) / 2.0).round();
+                let dy = ((self.title_bar_h - d) / 2.0).round();
+                Self::push_rect(&mut out, dx, dy, d, d, PAPER, 1.0);
             }
         }
 
