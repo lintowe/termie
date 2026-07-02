@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-07-02
 
 ### Installing & updating
 - **A native installer replaces the WiX wizard.** `termie-<version>-setup.exe` is a single small window in termie's own instrument style — install path, four checkboxes, one INSTALL button. It installs per-user with **no admin prompt**, migrates an old MSI install (asking first), registers everything the MSI did (PATH, shortcuts, "Open in termie", Add/Remove Programs), and carries its own uninstaller. The MSI remains attached to releases for scripted installs.
