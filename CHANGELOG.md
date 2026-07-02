@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixes
+- **Rounded box corners are round again.** TUIs drawing `╭─╮` frames (lazygit, gh-dash, many Rust and Go tools) were getting hard square corners: the GPU cell-filling path claimed the rounded-corner characters but can only draw rectangles. They now render through the quarter-arc rasterizer that was built for them, still filling the exact cell so borders connect at any line height.
 - **The mouse wheel scrolls pagers now.** `less`, `man`, `git log`, and other full-screen apps without mouse reporting used to sit dead under the wheel (the alternate screen has no scrollback to scroll). The wheel now translates to arrow keys there — the "alternate scroll" behavior other terminals ship by default.
 - **Slow touchpad scrolling works.** A gentle two-finger scroll delivers a few pixels per event, which rounded to zero lines and went nowhere; the fractional remainder now accumulates so precision touchpads scroll smoothly at any speed.
 - **A tmux/neovim keyboard probe no longer corrupts colors.** The `CSI > 4;2 m` modifyOtherKeys negotiation was mis-read as SGR 4;2 and painted dim underlined text; sequences with a `>`/`?` marker are now kept out of the styling path.

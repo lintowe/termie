@@ -2387,10 +2387,14 @@ impl Renderer {
             '\u{2501}' => (2, 2, 0, 0),
             '\u{2502}' => (0, 0, 1, 1),
             '\u{2503}' => (0, 0, 2, 2),
-            '\u{250C}' | '\u{256D}' => (0, 1, 0, 1),
-            '\u{2510}' | '\u{256E}' => (1, 0, 0, 1),
-            '\u{2514}' | '\u{2570}' => (0, 1, 1, 0),
-            '\u{2518}' | '\u{256F}' => (1, 0, 1, 0),
+            // the rounded corners ╭╮╰╯ (U+256D-2570) are deliberately NOT here:
+            // this procedural path can only draw square rects, so they fall
+            // through to the atlas where boxdraw's quarter-arc coverage keeps
+            // them round while still filling the exact cell
+            '\u{250C}' => (0, 1, 0, 1),
+            '\u{2510}' => (1, 0, 0, 1),
+            '\u{2514}' => (0, 1, 1, 0),
+            '\u{2518}' => (1, 0, 1, 0),
             '\u{251C}' => (0, 1, 1, 1),
             '\u{2524}' => (1, 0, 1, 1),
             '\u{252C}' => (1, 1, 0, 1),
