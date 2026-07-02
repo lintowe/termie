@@ -20,7 +20,7 @@ Real terminal emulation: a [vte](https://github.com/alacritty/vte)-based parser,
 
 Inline images via the kitty graphics protocol (raw RGB / RGBA / PNG) and full-color emoji, both packed into a dedicated RGBA atlas beside the glyph cache. IME composition, a screen-reader path via AccessKit, and session restore (tab + split layout) with crash recovery.
 
-A command palette (`Ctrl+Shift+P`) for fuzzy access to every action. Three built-in themes, a bundled Maple Mono Nerd Font, adjustable font size / padding / cursor / opacity, and per-user `colors.conf` and `keybindings.conf`. An optional Quake-style drop-down (`quake_key`).
+A command palette (`Ctrl+P`) for fuzzy access to every action. Three built-in themes, a bundled Maple Mono Nerd Font, adjustable font size / padding / cursor / opacity, and per-user `colors.conf` and `keybindings.conf`. An optional Quake-style drop-down (`quake_key`).
 
 A plugin system: plugins run as separate processes over a small JSON protocol, render widgets in a side dock (text or drawn graphics), talk over an in-process bus, and can be confined to a Windows AppContainer. An in-app marketplace browses and installs them.
 
@@ -35,7 +35,8 @@ Download `termie-<version>-windows-x64.msi` from the [latest release](https://gi
 | `Ctrl+T` / `Ctrl+W` | new / close tab |
 | `Ctrl+Tab` / `Ctrl+1`..`9` | next / nth tab |
 | `Ctrl+Shift+E` / `Ctrl+Shift+O` | split vertical / horizontal |
-| `Ctrl+Shift+P` | command palette |
+| `Ctrl+P` | command palette |
+| `Ctrl+Shift+P` | pane mode (move / resize / zoom / close) |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste (also `Ctrl+Insert` / `Shift+Insert`) |
 | `Ctrl+Shift+F` | find in scrollback |
 | `Ctrl+Shift+B` | broadcast input to every pane |
