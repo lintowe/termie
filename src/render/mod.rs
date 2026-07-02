@@ -390,7 +390,7 @@ struct SettingsGeom {
     op_inc: Rect,
     cursor_btn: Rect,
     blink_btn: Rect,
-    theme_chips: [Rect; 3],
+    theme_chips: [Rect; crate::color::ThemeId::ALL.len()],
     sb_dec: Rect,
     sb_inc: Rect,
     copysel_btn: Rect,
@@ -2014,7 +2014,8 @@ impl Renderer {
         let theme_label_l = y;
         y += lh;
         let theme_chip_l = y;
-        y += chip_h + 10.0 * s;
+        // two rows of four chips
+        y += (chip_h + 8.0 * s) * 2.0 + 2.0 * s;
         y += sec_gap;
         let sec_beh = y;
         y += hdr_adv;
@@ -2076,13 +2077,18 @@ impl Renderer {
             .collect();
 
         let chip_gap = 8.0 * s;
-        let chip_w = ((content_w - chip_gap * 2.0) / 3.0).floor();
-        let chip_y = ay(theme_chip_l);
-        let theme_chips = [
-            (content_x, chip_y, chip_w, chip_h),
-            (content_x + chip_w + chip_gap, chip_y, chip_w, chip_h),
-            (content_x + (chip_w + chip_gap) * 2.0, chip_y, chip_w, chip_h),
-        ];
+        let chip_w = ((content_w - chip_gap * 3.0) / 4.0).floor();
+        let mut theme_chips = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); ThemeId::ALL.len()];
+        for (i, chip) in theme_chips.iter_mut().enumerate() {
+            let col = (i % 4) as f32;
+            let row_i = (i / 4) as f32;
+            *chip = (
+                content_x + (chip_w + chip_gap) * col,
+                ay(theme_chip_l) + (chip_h + chip_gap) * row_i,
+                chip_w,
+                chip_h,
+            );
+        }
 
         let mut controls = vec![
             (Hot::FontDec, font_dec),
@@ -2094,9 +2100,6 @@ impl Renderer {
             (Hot::OpacityInc, op_inc),
             (Hot::CursorCycle, cursor_btn),
             (Hot::CursorBlink, blink_btn),
-            (Hot::ThemeSet(ThemeId::Instrument), theme_chips[0]),
-            (Hot::ThemeSet(ThemeId::Koi), theme_chips[1]),
-            (Hot::ThemeSet(ThemeId::Paper), theme_chips[2]),
             (Hot::ScrollbackDec, sb_dec),
             (Hot::ScrollbackInc, sb_inc),
             (Hot::CopyOnSelect, copysel_btn),
@@ -2108,6 +2111,9 @@ impl Renderer {
         ];
         for (i, (_, _, rect, _)) in plugin_rows.iter().enumerate() {
             controls.push((Hot::PluginToggle(i), *rect));
+        }
+        for (i, id) in ThemeId::ALL.into_iter().enumerate() {
+            controls.push((Hot::ThemeSet(id), theme_chips[i]));
         }
 
         SettingsGeom {
@@ -3408,8 +3414,7 @@ impl Renderer {
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.blink_y), "CURSOR BLINK", MUTE, 1.0, wide);
         self.toggle_btn(out, g.blink_btn, blink, Hot::CursorBlink, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.theme_label_y), "THEME", MUTE, 1.0, wide);
-        let themes = [ThemeId::Instrument, ThemeId::Koi, ThemeId::Paper];
-        for (i, id) in themes.into_iter().enumerate() {
+        for (i, id) in ThemeId::ALL.into_iter().enumerate() {
             self.theme_chip(out, g.theme_chips[i], id, theme == id, track);
         }
 

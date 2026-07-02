@@ -23,6 +23,7 @@
 - **Kitty graphics cell-box sizing** (`c=` / `r=`): an image sent with a requested column/row box now draws scaled to that box instead of at its native pixel size — one axis alone keeps the aspect ratio, per the protocol. This is how `icat`-style tools fit a picture to your pane width.
 
 ### Rendering
+- **Four new built-in themes: Catppuccin Mocha, Gruvbox, Tokyo Night, and Nord** — the schemes people actually ask a terminal for, each with a matched chrome ladder (tab bar, status bar, rules) so the whole window wears the theme, not just the cells. The settings panel's theme row grew into a two-row gallery with live swatches, and `colors.conf` still overrides any of them per-key.
 - **Dim text (SGR 2) is legible now** — it was multiplied to roughly a fifth of its linear brightness and read as near-invisible; it now sits at the conventional "clearly dimmer, still readable" level.
 - **The unfocused pane's cursor is a hollow block** instead of a translucent fill, so the character under it stays readable across a cockpit of panes — the same convention Windows Terminal and Ghostty use.
 

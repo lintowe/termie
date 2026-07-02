@@ -59,15 +59,26 @@ pub enum ThemeId {
     Instrument,
     Koi,
     Paper,
+    Catppuccin,
+    Gruvbox,
+    TokyoNight,
+    Nord,
 }
 
 impl ThemeId {
+    pub const ALL: [ThemeId; 7] = [
+        ThemeId::Instrument,
+        ThemeId::Koi,
+        ThemeId::Paper,
+        ThemeId::Catppuccin,
+        ThemeId::Gruvbox,
+        ThemeId::TokyoNight,
+        ThemeId::Nord,
+    ];
+
     pub fn next(self) -> Self {
-        match self {
-            ThemeId::Instrument => ThemeId::Koi,
-            ThemeId::Koi => ThemeId::Paper,
-            ThemeId::Paper => ThemeId::Instrument,
-        }
+        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
     }
 
     pub fn name(self) -> &'static str {
@@ -75,6 +86,10 @@ impl ThemeId {
             ThemeId::Instrument => "instrument",
             ThemeId::Koi => "koi",
             ThemeId::Paper => "paper",
+            ThemeId::Catppuccin => "catppuccin",
+            ThemeId::Gruvbox => "gruvbox",
+            ThemeId::TokyoNight => "tokyo night",
+            ThemeId::Nord => "nord",
         }
     }
 
@@ -82,6 +97,10 @@ impl ThemeId {
         match s {
             "koi" => ThemeId::Koi,
             "paper" => ThemeId::Paper,
+            "catppuccin" => ThemeId::Catppuccin,
+            "gruvbox" => ThemeId::Gruvbox,
+            "tokyo night" | "tokyonight" => ThemeId::TokyoNight,
+            "nord" => ThemeId::Nord,
             _ => ThemeId::Instrument,
         }
     }
@@ -114,6 +133,10 @@ impl Palette {
             ThemeId::Instrument => Self::instrument(),
             ThemeId::Koi => Self::koi(),
             ThemeId::Paper => Self::paper(),
+            ThemeId::Catppuccin => Self::catppuccin(),
+            ThemeId::Gruvbox => Self::gruvbox(),
+            ThemeId::TokyoNight => Self::tokyo_night(),
+            ThemeId::Nord => Self::nord(),
         }
     }
 
@@ -300,6 +323,165 @@ impl Palette {
             bg2: Rgb::new(0xde, 0xd7, 0xc6),
             cursor: Rgb::new(0xb5, 0x53, 0x2a),
             sel: Rgb::new(0x9a, 0xb0, 0xd2),
+            ansi: fill_ansi(base16),
+        }
+    }
+}
+
+impl Palette {
+    fn catppuccin() -> Self {
+        // catppuccin mocha, the canonical terminal mapping: surfaces for the
+        // dim pair, subtext for white, lavender as the accent
+        let base16 = [
+            Rgb::new(0x45, 0x47, 0x5a),
+            Rgb::new(0xf3, 0x8b, 0xa8),
+            Rgb::new(0xa6, 0xe3, 0xa1),
+            Rgb::new(0xf9, 0xe2, 0xaf),
+            Rgb::new(0x89, 0xb4, 0xfa),
+            Rgb::new(0xf5, 0xc2, 0xe7),
+            Rgb::new(0x94, 0xe2, 0xd5),
+            Rgb::new(0xba, 0xc2, 0xde),
+            Rgb::new(0x58, 0x5b, 0x70),
+            Rgb::new(0xf3, 0x8b, 0xa8),
+            Rgb::new(0xa6, 0xe3, 0xa1),
+            Rgb::new(0xf9, 0xe2, 0xaf),
+            Rgb::new(0x89, 0xb4, 0xfa),
+            Rgb::new(0xf5, 0xc2, 0xe7),
+            Rgb::new(0x94, 0xe2, 0xd5),
+            Rgb::new(0xa6, 0xad, 0xc8),
+        ];
+        Palette {
+            ink0: Rgb::new(0x11, 0x11, 0x1b), // crust
+            ink1: Rgb::new(0x18, 0x18, 0x25), // mantle
+            ink3: Rgb::new(0x31, 0x32, 0x44), // surface0
+            ink4: Rgb::new(0x45, 0x47, 0x5a), // surface1
+            rule: Rgb::new(0x31, 0x32, 0x44),
+            rule2: Rgb::new(0x45, 0x47, 0x5a),
+            mute: Rgb::new(0x6c, 0x70, 0x86), // overlay0
+            text2: Rgb::new(0xcd, 0xd6, 0xf4),
+            paper: Rgb::new(0xb4, 0xbe, 0xfe), // lavender
+            fg: Rgb::new(0xcd, 0xd6, 0xf4),
+            bg: Rgb::new(0x1e, 0x1e, 0x2e),
+            bg2: Rgb::new(0x18, 0x18, 0x25),
+            cursor: Rgb::new(0xf5, 0xe0, 0xdc), // rosewater
+            sel: Rgb::new(0x58, 0x5b, 0x70),
+            ansi: fill_ansi(base16),
+        }
+    }
+
+    fn gruvbox() -> Self {
+        // gruvbox dark medium; the orange accent is the theme's signature
+        let base16 = [
+            Rgb::new(0x28, 0x28, 0x28),
+            Rgb::new(0xcc, 0x24, 0x1d),
+            Rgb::new(0x98, 0x97, 0x1a),
+            Rgb::new(0xd7, 0x99, 0x21),
+            Rgb::new(0x45, 0x85, 0x88),
+            Rgb::new(0xb1, 0x62, 0x86),
+            Rgb::new(0x68, 0x9d, 0x6a),
+            Rgb::new(0xa8, 0x99, 0x84),
+            Rgb::new(0x92, 0x83, 0x74),
+            Rgb::new(0xfb, 0x49, 0x34),
+            Rgb::new(0xb8, 0xbb, 0x26),
+            Rgb::new(0xfa, 0xbd, 0x2f),
+            Rgb::new(0x83, 0xa5, 0x98),
+            Rgb::new(0xd3, 0x86, 0x9b),
+            Rgb::new(0x8e, 0xc0, 0x7c),
+            Rgb::new(0xeb, 0xdb, 0xb2),
+        ];
+        Palette {
+            ink0: Rgb::new(0x14, 0x16, 0x17),
+            ink1: Rgb::new(0x1d, 0x20, 0x21), // bg0_h
+            ink3: Rgb::new(0x32, 0x30, 0x2f), // bg1
+            ink4: Rgb::new(0x3c, 0x38, 0x36), // bg2
+            rule: Rgb::new(0x3c, 0x38, 0x36),
+            rule2: Rgb::new(0x50, 0x49, 0x45),
+            mute: Rgb::new(0x92, 0x83, 0x74),
+            text2: Rgb::new(0xfb, 0xf1, 0xc7),
+            paper: Rgb::new(0xfe, 0x80, 0x19), // orange
+            fg: Rgb::new(0xeb, 0xdb, 0xb2),
+            bg: Rgb::new(0x28, 0x28, 0x28),
+            bg2: Rgb::new(0x1f, 0x21, 0x21),
+            cursor: Rgb::new(0xeb, 0xdb, 0xb2),
+            sel: Rgb::new(0x50, 0x49, 0x45),
+            ansi: fill_ansi(base16),
+        }
+    }
+
+    fn tokyo_night() -> Self {
+        // tokyo night (storm-leaning darks for the chrome ladder)
+        let base16 = [
+            Rgb::new(0x15, 0x16, 0x1e),
+            Rgb::new(0xf7, 0x76, 0x8e),
+            Rgb::new(0x9e, 0xce, 0x6a),
+            Rgb::new(0xe0, 0xaf, 0x68),
+            Rgb::new(0x7a, 0xa2, 0xf7),
+            Rgb::new(0xbb, 0x9a, 0xf7),
+            Rgb::new(0x7d, 0xcf, 0xff),
+            Rgb::new(0xa9, 0xb1, 0xd6),
+            Rgb::new(0x41, 0x48, 0x68),
+            Rgb::new(0xf7, 0x76, 0x8e),
+            Rgb::new(0x9e, 0xce, 0x6a),
+            Rgb::new(0xe0, 0xaf, 0x68),
+            Rgb::new(0x7a, 0xa2, 0xf7),
+            Rgb::new(0xbb, 0x9a, 0xf7),
+            Rgb::new(0x7d, 0xcf, 0xff),
+            Rgb::new(0xc0, 0xca, 0xf5),
+        ];
+        Palette {
+            ink0: Rgb::new(0x0f, 0x0f, 0x17),
+            ink1: Rgb::new(0x16, 0x16, 0x1e), // bg_dark
+            ink3: Rgb::new(0x1f, 0x23, 0x35),
+            ink4: Rgb::new(0x29, 0x2e, 0x42),
+            rule: Rgb::new(0x29, 0x2e, 0x42),
+            rule2: Rgb::new(0x3b, 0x42, 0x61),
+            mute: Rgb::new(0x56, 0x5f, 0x89),
+            text2: Rgb::new(0xc0, 0xca, 0xf5),
+            paper: Rgb::new(0x7a, 0xa2, 0xf7), // the signature blue
+            fg: Rgb::new(0xc0, 0xca, 0xf5),
+            bg: Rgb::new(0x1a, 0x1b, 0x26),
+            bg2: Rgb::new(0x16, 0x16, 0x1e),
+            cursor: Rgb::new(0xc0, 0xca, 0xf5),
+            sel: Rgb::new(0x33, 0x46, 0x7c),
+            ansi: fill_ansi(base16),
+        }
+    }
+
+    fn nord() -> Self {
+        // nord: polar night ground, snow storm text, frost accent
+        let base16 = [
+            Rgb::new(0x3b, 0x42, 0x52),
+            Rgb::new(0xbf, 0x61, 0x6a),
+            Rgb::new(0xa3, 0xbe, 0x8c),
+            Rgb::new(0xeb, 0xcb, 0x8b),
+            Rgb::new(0x81, 0xa1, 0xc1),
+            Rgb::new(0xb4, 0x8e, 0xad),
+            Rgb::new(0x88, 0xc0, 0xd0),
+            Rgb::new(0xe5, 0xe9, 0xf0),
+            Rgb::new(0x4c, 0x56, 0x6a),
+            Rgb::new(0xbf, 0x61, 0x6a),
+            Rgb::new(0xa3, 0xbe, 0x8c),
+            Rgb::new(0xeb, 0xcb, 0x8b),
+            Rgb::new(0x81, 0xa1, 0xc1),
+            Rgb::new(0xb4, 0x8e, 0xad),
+            Rgb::new(0x8f, 0xbc, 0xbb),
+            Rgb::new(0xec, 0xef, 0xf4),
+        ];
+        Palette {
+            ink0: Rgb::new(0x23, 0x28, 0x31),
+            ink1: Rgb::new(0x2a, 0x2f, 0x3a),
+            ink3: Rgb::new(0x3b, 0x42, 0x52),
+            ink4: Rgb::new(0x43, 0x4c, 0x5e),
+            rule: Rgb::new(0x3b, 0x42, 0x52),
+            rule2: Rgb::new(0x4c, 0x56, 0x6a),
+            mute: Rgb::new(0x61, 0x6e, 0x88),
+            text2: Rgb::new(0xe5, 0xe9, 0xf0),
+            paper: Rgb::new(0x88, 0xc0, 0xd0), // frost
+            fg: Rgb::new(0xd8, 0xde, 0xe9),
+            bg: Rgb::new(0x2e, 0x34, 0x40),
+            bg2: Rgb::new(0x29, 0x2e, 0x39),
+            cursor: Rgb::new(0xd8, 0xde, 0xe9),
+            sel: Rgb::new(0x43, 0x4c, 0x5e),
             ansi: fill_ansi(base16),
         }
     }

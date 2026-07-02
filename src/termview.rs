@@ -65,11 +65,7 @@ pub fn maybe_run() -> bool {
     }
 
     if let Some(path) = val("--png") {
-        let theme = match val("--theme").as_deref() {
-            Some("koi") => crate::color::ThemeId::Koi,
-            Some("paper") => crate::color::ThemeId::Paper,
-            _ => crate::color::ThemeId::Instrument,
-        };
+        let theme = crate::color::ThemeId::from_name(val("--theme").as_deref().unwrap_or(""));
         let pt = val("--pt").and_then(|v| v.parse().ok()).unwrap_or(16.0f32);
         let scale = val("--scale").and_then(|v| v.parse().ok()).unwrap_or(2.0f32);
         // --system-fonts loads installed fonts so CJK/emoji fall back like the app
