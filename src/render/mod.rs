@@ -1360,6 +1360,13 @@ impl Renderer {
         (ox, oy, cols, rows)
     }
 
+    /// content cell size in physical pixels, fed to each terminal so the
+    /// XTWINOPS pixel reports (CSI 14/16 t) can answer honestly
+    pub fn cell_px(&self) -> (u16, u16) {
+        let m = self.atlas.metrics(FontId::Content);
+        (m.cell_w.round().max(1.0) as u16, m.cell_h.round().max(1.0) as u16)
+    }
+
     /// the (col, row) cell at a pixel position within a pane rect, clamped
     pub fn cell_at(&self, rect: (f32, f32, f32, f32), x: f32, y: f32) -> (usize, usize) {
         let m = self.atlas.metrics(FontId::Content);

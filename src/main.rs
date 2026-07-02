@@ -2877,8 +2877,10 @@ impl App {
         // MAIN window draws from the shared pool, so don't resize it to a
         // torn-off window's size while a satellite is swapped into self.pw
         // (that would ping-pong the pool and lose the warm-open size match)
+        let (cell_w, cell_h) = r.cell_px();
         if self.cur_sat.is_none() {
             for sp in &mut self.pool {
+                sp.term.set_cell_px(cell_w, cell_h);
                 if sp.ready && (sp.term.grid.cols != pool_cols || sp.term.grid.rows != pool_rows) {
                     sp.resize(pool_rows, pool_cols);
                 }
@@ -2903,6 +2905,7 @@ impl App {
             for (id, rect) in &rects {
                 let (_, _, cols, rows) = r.pane_metrics(*rect);
                 if let Some(p) = find_pane_mut(root, *id) {
+                    p.term.set_cell_px(cell_w, cell_h);
                     // skip redundant resizes, and never resize a shell that hasn't
                     // produced output yet — resizing pwsh mid-PSReadLine-startup
                     // wedges it (same guard the warm pool already uses above)

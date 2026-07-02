@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Terminal fidelity
+- **XTWINOPS size reports** (`CSI 14t` / `16t` / `18t`): programs can now ask for the text area's pixel size, the cell size, and the cell count. Image tools (`imgcat`, `chafa`, `timg`, kitty's `icat`) size inline graphics from these — nothing can ioctl a pixel size through ConPTY, so without them termie's kitty-graphics support was hard for real tools to discover and scale to. The pixel reports answer with the renderer's true cell geometry (they stay silent rather than guess if it isn't known yet).
+
 ### Workflow
 - **A bell in a background tab now shows a dot on that tab.** Run an agent or a long build in another tab and the tab marks itself the moment its shell rings the bell (`BEL` — Claude Code and most CI-ish tools ring it when they finish or need input), so you can see *which* tab wants you instead of cycling through them. Viewing the tab clears the dot; while a tab is hovered the dot yields to the close button.
 - **A bell while the window is unfocused flashes the taskbar button** (until you refocus, the standard Windows attention signal) — so an agent finishing in a minimized or covered termie still reaches you. Torn-off pane windows get the same treatment, scoped to their own taskbar button and tabs.

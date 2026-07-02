@@ -100,6 +100,9 @@ pub struct Terminal {
     last_print: Option<char>,
     /// decoded kitty graphics images for this pane
     pub images: crate::image::ImageStore,
+    /// cell size in physical pixels, fed by the renderer; (0,0) = unknown and
+    /// the pixel-size XTWINOPS reports stay silent rather than lie
+    cell_px: (u16, u16),
 }
 
 impl Terminal {
@@ -130,7 +133,15 @@ impl Terminal {
             gl: 0,
             last_print: None,
             images: crate::image::ImageStore::default(),
+            cell_px: (0, 0),
         }
+    }
+
+    /// let the renderer feed the content cell size so XTWINOPS 14/16 can
+    /// report pixel geometry — image tools size kitty graphics from those,
+    /// since nothing can ioctl a pixel size through ConPTY
+    pub fn set_cell_px(&mut self, w: u16, h: u16) {
+        self.cell_px = (w, h);
     }
 
     fn map_charset(&self, c: char) -> char {
@@ -681,6 +692,33 @@ impl Perform for Terminal {
                 self.responses
                     .extend_from_slice(format!("\x1b[?{};{}$y", m, state).as_bytes());
             }
+            // XTWINOPS size reports; the resize/iconify/title-stack ops are
+            // deliberately ignored
+            't' if !private => match param_at(params, 0, 0) {
+                // text area in pixels: reply CSI 4 ; height ; width t
+                14 => {
+                    let (cw, ch) = self.cell_px;
+                    if cw > 0 && ch > 0 {
+                        let w = self.grid.cols * cw as usize;
+                        let h = self.grid.rows * ch as usize;
+                        self.responses.extend_from_slice(format!("\x1b[4;{};{}t", h, w).as_bytes());
+                    }
+                }
+                // cell size in pixels: reply CSI 6 ; height ; width t
+                16 => {
+                    let (cw, ch) = self.cell_px;
+                    if cw > 0 && ch > 0 {
+                        self.responses.extend_from_slice(format!("\x1b[6;{};{}t", ch, cw).as_bytes());
+                    }
+                }
+                // text area in cells: reply CSI 8 ; rows ; cols t
+                18 => {
+                    self.responses.extend_from_slice(
+                        format!("\x1b[8;{};{}t", self.grid.rows, self.grid.cols).as_bytes(),
+                    );
+                }
+                _ => {}
+            },
             _ => {}
         }
         self.dirty = true;
@@ -1030,6 +1068,26 @@ mod tests {
         // CSI 4 SP q -> underline
         feed(&mut t, b"\x1b[4 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn xtwinops_reports_sizes() {
+        let mut t = Terminal::new(24, 80);
+        // cell count needs no pixel knowledge: CSI 8 ; rows ; cols t
+        feed(&mut t, b"\x1b[18t");
+        assert_eq!(t.responses, b"\x1b[8;24;80t");
+        t.responses.clear();
+        // pixel reports stay silent until the renderer feeds a cell size
+        feed(&mut t, b"\x1b[14t\x1b[16t");
+        assert!(t.responses.is_empty());
+        t.set_cell_px(9, 20);
+        // text area px: CSI 4 ; height ; width t — 24*20 x 80*9
+        feed(&mut t, b"\x1b[14t");
+        assert_eq!(t.responses, b"\x1b[4;480;720t");
+        t.responses.clear();
+        // cell px: CSI 6 ; height ; width t
+        feed(&mut t, b"\x1b[16t");
+        assert_eq!(t.responses, b"\x1b[6;20;9t");
     }
 
     #[test]
