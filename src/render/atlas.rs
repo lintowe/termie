@@ -39,7 +39,8 @@ pub struct FontMetrics {
     pub cell_w: f32,
     pub cell_h: f32,
     pub ascent: f32,
-    px: f32,
+    /// font size in physical pixels (the em), for baseline-anchored decorations
+    pub px: f32,
     line_height: f32,
     family: &'static str,
 }
@@ -276,7 +277,10 @@ impl GlyphAtlas {
         if let Some(run) = self.buffer.layout_runs().next() {
             m.ascent = run.line_y;
             if let Some(g) = run.glyphs.first() {
-                m.cell_w = g.w;
+                // whole-pixel column pitch: a fractional advance lands every
+                // column on a different subpixel phase, which reads as uneven
+                // glyph weight and box-stem wobble across the grid
+                m.cell_w = g.w.round().max(1.0);
             }
         }
         m.cell_h = m.line_height;

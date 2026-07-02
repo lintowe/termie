@@ -24,6 +24,10 @@ pub struct Attrs {
     pub strike: bool,
     pub hidden: bool,
     pub blink: bool,
+    /// SGR 53 overline
+    pub overline: bool,
+    /// SGR 58/59 underline color; Default = draw decorations in the cell's fg
+    pub ul: crate::color::Color,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

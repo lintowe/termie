@@ -48,7 +48,12 @@ pub fn render_png(
             let mut fg = pal.resolve_fg(fg_c);
             let cbg = pal.resolve_bg(bg_c);
             if cell.attrs.dim {
-                fg = Rgb::new(fg.r / 2, fg.g / 2, fg.b / 2);
+                // keep in step with the renderer's 2/3 srgb dim
+                fg = Rgb::new(
+                    (fg.r as u16 * 2 / 3) as u8,
+                    (fg.g as u16 * 2 / 3) as u8,
+                    (fg.b as u16 * 2 / 3) as u8,
+                );
             }
             let x0 = c * cw;
             let y0 = r * chh;
@@ -111,20 +116,39 @@ pub fn render_png(
                 }
             }
 
-            // decorations use the shared geometry so they match the renderer
-            super::underline_rects(cell.attrs.underline, cw as f32, chh as f32, t as f32, |rx, ry, rw, rh| {
-                fill(
-                    &mut fb,
-                    (iw, ih),
-                    x0 + rx.max(0.0) as usize,
-                    y0 + ry.max(0.0) as usize,
-                    (rw.ceil() as usize).max(1),
-                    (rh.ceil() as usize).max(1),
-                    fgl,
-                );
-            });
+            // decorations use the shared geometry so they match the renderer,
+            // including the SGR 58 underline color
+            let deco = if cell.attrs.ul == crate::color::Color::Default {
+                fgl
+            } else {
+                lin3(pal.resolve_fg(cell.attrs.ul))
+            };
+            super::underline_rects(
+                cell.attrs.underline,
+                cw as f32,
+                chh as f32,
+                ascent.round(),
+                m.px,
+                t as f32,
+                |rx, ry, rw, rh| {
+                    fill(
+                        &mut fb,
+                        (iw, ih),
+                        x0 + rx.max(0.0) as usize,
+                        y0 + ry.max(0.0) as usize,
+                        (rw.ceil() as usize).max(1),
+                        (rh.ceil() as usize).max(1),
+                        deco,
+                    );
+                },
+            );
             if cell.attrs.strike {
-                fill(&mut fb, (iw, ih), x0, y0 + chh / 2, cw, t, fgl);
+                let sy = (ascent.round() - m.px * 0.26).round().max(0.0) as usize;
+                fill(&mut fb, (iw, ih), x0, y0 + sy, cw, t, deco);
+            }
+            if cell.attrs.overline {
+                let oy = (ascent.round() - m.px * 0.88).round().max(0.0) as usize;
+                fill(&mut fb, (iw, ih), x0, y0 + oy, cw, t, deco);
             }
         }
     }

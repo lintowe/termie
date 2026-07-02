@@ -356,7 +356,8 @@ impl Terminal {
                     match code {
                         38 => cur.fg = color,
                         48 => cur.bg = color,
-                        _ => {}
+                        // 58: underline color (git-delta, LSP squiggles)
+                        _ => cur.attrs.ul = color,
                     }
                 }
                 i += 1;
@@ -404,20 +405,23 @@ impl Terminal {
                 39 => cur.fg = Color::Default,
                 40..=47 => cur.bg = Color::Indexed((code - 40) as u8),
                 49 => cur.bg = Color::DefaultBg,
+                53 => cur.attrs.overline = true,
+                55 => cur.attrs.overline = false,
+                59 => cur.attrs.ul = Color::Default,
                 90..=97 => cur.fg = Color::Indexed((code - 90 + 8) as u8),
                 100..=107 => cur.bg = Color::Indexed((code - 100 + 8) as u8),
-                38 | 48 => {
+                38 | 48 | 58 => {
+                    let set = |cur: &mut crate::grid::Cursor, color: Color| match code {
+                        38 => cur.fg = color,
+                        48 => cur.bg = color,
+                        _ => cur.attrs.ul = color,
+                    };
                     // semicolon form: read following groups
                     let kind = groups.get(i + 1).and_then(|g| g.first().copied());
                     match kind {
                         Some(5) => {
                             if let Some(n) = groups.get(i + 2).and_then(|g| g.first().copied()) {
-                                let color = Color::Indexed(n as u8);
-                                if code == 38 {
-                                    cur.fg = color;
-                                } else {
-                                    cur.bg = color;
-                                }
+                                set(cur, Color::Indexed(n as u8));
                                 i += 3;
                                 continue;
                             }
@@ -427,12 +431,7 @@ impl Terminal {
                             let gr = groups.get(i + 3).and_then(|g| g.first().copied());
                             let b = groups.get(i + 4).and_then(|g| g.first().copied());
                             if let (Some(r), Some(gn), Some(b)) = (r, gr, b) {
-                                let color = Color::Rgb(r as u8, gn as u8, b as u8);
-                                if code == 38 {
-                                    cur.fg = color;
-                                } else {
-                                    cur.bg = color;
-                                }
+                                set(cur, Color::Rgb(r as u8, gn as u8, b as u8));
                                 i += 5;
                                 continue;
                             }
@@ -1143,6 +1142,27 @@ mod tests {
         // CSI 4 SP q -> underline
         feed(&mut t, b"\x1b[4 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn sgr_underline_color_and_overline() {
+        let mut t = Terminal::new(2, 20);
+        // colon form 58:2::r:g:b (kitty/foot emit the colorspace slot)
+        feed(&mut t, b"\x1b[4m\x1b[58:2::255:0:0mx");
+        assert_eq!(t.grid.lines[0][0].attrs.ul, Color::Rgb(255, 0, 0));
+        // semicolon form 58;5;n and the 59 reset
+        feed(&mut t, b"\x1b[58;5;33my\x1b[59mz");
+        assert_eq!(t.grid.lines[0][1].attrs.ul, Color::Indexed(33));
+        assert_eq!(t.grid.lines[0][2].attrs.ul, Color::Default);
+        // overline set/clear
+        feed(&mut t, b"\x1b[53mo\x1b[55mp");
+        assert!(t.grid.lines[0][3].attrs.overline);
+        assert!(!t.grid.lines[0][4].attrs.overline);
+        // SGR 0 clears both
+        feed(&mut t, b"\x1b[53;58;5;1m\x1b[0mq");
+        let a = t.grid.lines[0][5].attrs;
+        assert!(!a.overline);
+        assert_eq!(a.ul, Color::Default);
     }
 
     #[test]

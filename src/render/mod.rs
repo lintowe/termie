@@ -414,22 +414,27 @@ fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
 }
 
 /// emit the rects (cell-local x,y,w,h) that draw an underline of the given
-/// style; shared by the GPU renderer and the dev PNG preview so they match
+/// style; shared by the GPU renderer and the dev PNG preview so they match.
+/// `ascent`/`px` anchor the line to the font's baseline — at line heights
+/// above 1.0 the cell bottom floats in the leading, well clear of the text
 fn underline_rects(
     style: crate::grid::UnderlineStyle,
     cell_w: f32,
     cell_h: f32,
+    ascent: f32,
+    px: f32,
     t: f32,
     mut emit: impl FnMut(f32, f32, f32, f32),
 ) {
     use crate::grid::UnderlineStyle as U;
-    let yb = cell_h - t;
+    // just under the baseline (~10% of an em), clamped inside the cell
+    let yb = (ascent + 0.10 * px).round().min(cell_h - t).max(0.0);
     match style {
         U::None => {}
         U::Single => emit(0.0, yb, cell_w, t),
         U::Double => {
             emit(0.0, yb, cell_w, t);
-            emit(0.0, yb - t * 2.0, cell_w, t);
+            emit(0.0, (yb + t * 2.0).min(cell_h - t), cell_w, t);
         }
         U::Dotted => {
             let step = (t * 2.0).max(2.0);
@@ -448,13 +453,20 @@ fn underline_rects(
             }
         }
         U::Curly => {
-            let amp = t;
-            let cy = yb - amp;
+            // a connected per-pixel-column wave: each column's segment spans
+            // to the next column's phase, so a steep slope can't leave the
+            // vertical gaps the old fixed-height dots did
+            let amp = (t * 1.25).max(1.5);
+            let cy = (yb + amp).min(cell_h - amp - t).max(amp);
             let cols = cell_w.max(1.0) as i32;
+            let phase =
+                |dx: f32| ((dx / cell_w) * std::f32::consts::TAU).sin() * amp;
             for i in 0..cols {
                 let dx = i as f32;
-                let yoff = ((dx / cell_w) * std::f32::consts::TAU).sin() * amp;
-                emit(dx, cy + yoff, 1.0, t);
+                let y0 = phase(dx);
+                let y1 = phase(dx + 1.0);
+                let top = y0.min(y1);
+                emit(dx, cy + top, 1.0, (y0.max(y1) - top) + t);
             }
         }
     }
@@ -2531,7 +2543,9 @@ impl Renderer {
     ) {
         let sel_col = palette.sel;
         let m = atlas.metrics(FontId::Content);
-        let (cell_w, cell_h, ascent) = (m.cell_w, m.cell_h, m.ascent);
+        // whole-pixel baseline so glyph rasters land on the same subpixel
+        // phase in every row
+        let (cell_w, cell_h, ascent, em_px) = (m.cell_w, m.cell_h, m.ascent.round(), m.px);
         let grid = &term.grid;
         let scrolled = grid.view_offset > 0;
         let cur = grid.cursor;
@@ -2695,15 +2709,27 @@ impl Renderer {
                         }
                     }
                 }
-                // underline / strikethrough decorations, drawn in the cell's fg
-                // so they also show on blank underlined cells
+                // underline / overline / strikethrough decorations, anchored
+                // to the font baseline and drawn in the SGR 58 underline color
+                // when one is set (LSP squiggles color independently of text)
                 if !blink_hidden {
                     let t = (cell_h * 0.06).max(1.0);
-                    underline_rects(cell.attrs.underline, cell_w, cell_h, t, |rx, ry, rw, rh| {
-                        Self::push_rect(out, x + rx, y + ry, rw, rh, fg, 1.0);
+                    let deco = if cell.attrs.ul == crate::color::Color::Default {
+                        fg
+                    } else {
+                        palette.resolve_fg(cell.attrs.ul)
+                    };
+                    underline_rects(cell.attrs.underline, cell_w, cell_h, ascent, em_px, t, |rx, ry, rw, rh| {
+                        Self::push_rect(out, x + rx, y + ry, rw, rh, deco, 1.0);
                     });
                     if cell.attrs.strike {
-                        Self::push_rect(out, x, (y + cell_h * 0.5).round(), cell_w, t, fg, 1.0);
+                        // through the middle of the x-height, not the cell box
+                        let sy = (ascent - em_px * 0.26).round().max(0.0);
+                        Self::push_rect(out, x, y + sy, cell_w, t, deco, 1.0);
+                    }
+                    if cell.attrs.overline {
+                        let oy_l = (ascent - em_px * 0.88).round().max(0.0);
+                        Self::push_rect(out, x, y + oy_l, cell_w, t, deco, 1.0);
                     }
                 }
             }

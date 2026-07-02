@@ -46,8 +46,9 @@ fn srgb_linear_lut() -> &'static [f32; 256] {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Color {
+    #[default]
     Default,
     DefaultBg,
     Indexed(u8),
