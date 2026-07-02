@@ -638,7 +638,10 @@ impl Perform for Terminal {
             }
             'S' => self.grid.scroll_up(param_at(params, 0, 1) as usize),
             'T' => self.grid.scroll_down(param_at(params, 0, 1) as usize),
-            'm' => {
+            // a leading > or ? marks XTMODKEYS/XTQMODKEYS, not SGR — swallowing
+            // them keeps a tmux/neovim modifyOtherKeys probe from being applied
+            // as dim+underline attribute garbage
+            'm' if intermediates.is_empty() => {
                 // borrow the param groups into a stack array (no per-sequence heap
                 // alloc on the parse hot path); 32 covers any real SGR run
                 let mut groups: [&[u16]; 32] = [&[]; 32];
@@ -1121,6 +1124,20 @@ mod tests {
         // CSI 4 SP q -> underline
         feed(&mut t, b"\x1b[4 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn xtmodkeys_is_not_applied_as_sgr() {
+        let mut t = Terminal::new(2, 10);
+        // tmux/neovim probe modifyOtherKeys with CSI > 4;2 m — it must not
+        // land as SGR 4 (underline) + SGR 2 (dim)
+        feed(&mut t, b"\x1b[>4;2mx");
+        assert_eq!(t.grid.lines[0][0].c, 'x');
+        assert_eq!(t.grid.lines[0][0].attrs.underline, UnderlineStyle::None);
+        assert!(!t.grid.lines[0][0].attrs.dim);
+        // plain SGR still applies
+        feed(&mut t, b"\x1b[4my");
+        assert_ne!(t.grid.lines[0][1].attrs.underline, UnderlineStyle::None);
     }
 
     #[test]
