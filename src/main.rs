@@ -1180,7 +1180,7 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
                 term.images.transmit(cmd.id, cmd.format, cmd.width, cmd.height, cmd.more, &cmd.payload)
             {
                 if cmd.action == b'T' {
-                    term.grid.place_image(id);
+                    term.grid.place_image(id, cmd.cols.min(500) as u16, cmd.rows.min(500) as u16);
                 }
                 // ack with the resolved id (an i=0 transmit gets an auto id)
                 if cmd.quiet == 0 {
@@ -1190,7 +1190,7 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
         }
         b'p' => {
             if term.images.get(cmd.id).is_some() {
-                term.grid.place_image(cmd.id);
+                term.grid.place_image(cmd.id, cmd.cols.min(500) as u16, cmd.rows.min(500) as u16);
                 if cmd.quiet == 0 {
                     kitty_ok(term, cmd.id);
                 }
@@ -6521,19 +6521,23 @@ mod tests {
     #[test]
     fn handle_kitty_transmit_display_and_delete_all() {
         let mut term = term::Terminal::new(4, 8);
-        // a=T transmits + displays a 1x1 RGBA image and (quiet 0) queues an OK ack
+        // a=T transmits + displays a 1x1 RGBA image scaled to a 3x2 cell box
+        // and (quiet 0) queues an OK ack
         let cmd = apc::KittyCmd {
             action: b'T',
             format: 32,
             width: 1,
             height: 1,
             id: 5,
+            cols: 3,
+            rows: 2,
             more: false,
             quiet: 0,
             payload: vec![1, 2, 3, 4],
         };
         handle_kitty(&mut term, &cmd);
         assert_eq!(term.grid.placements().len(), 1);
+        assert_eq!((term.grid.placements()[0].cols, term.grid.placements()[0].rows), (3, 2));
         assert!(!term.responses.is_empty(), "OK ack should be queued");
         // bare a=d (no id) deletes all placements
         let del = apc::KittyCmd {
@@ -6542,6 +6546,8 @@ mod tests {
             width: 0,
             height: 0,
             id: 0,
+            cols: 0,
+            rows: 0,
             more: false,
             quiet: 0,
             payload: vec![],

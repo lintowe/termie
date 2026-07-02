@@ -5,6 +5,7 @@
 ### Terminal fidelity
 - **XTVERSION** (`CSI > 0 q`): termie now identifies itself (`termie <version>`) to programs that probe terminal identity the standard way, instead of staying silent.
 - **XTWINOPS size reports** (`CSI 14t` / `16t` / `18t`): programs can now ask for the text area's pixel size, the cell size, and the cell count. Image tools (`imgcat`, `chafa`, `timg`, kitty's `icat`) size inline graphics from these — nothing can ioctl a pixel size through ConPTY, so without them termie's kitty-graphics support was hard for real tools to discover and scale to. The pixel reports answer with the renderer's true cell geometry (they stay silent rather than guess if it isn't known yet).
+- **Kitty graphics cell-box sizing** (`c=` / `r=`): an image sent with a requested column/row box now draws scaled to that box instead of at its native pixel size — one axis alone keeps the aspect ratio, per the protocol. This is how `icat`-style tools fit a picture to your pane width.
 
 ### Workflow
 - **A bell in a background tab now shows a dot on that tab.** Run an agent or a long build in another tab and the tab marks itself the moment its shell rings the bell (`BEL` — Claude Code and most CI-ish tools ring it when they finish or need input), so you can see *which* tab wants you instead of cycling through them. Viewing the tab clears the dot; while a tab is hovered the dot yields to the close button.

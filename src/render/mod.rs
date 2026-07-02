@@ -2668,17 +2668,31 @@ impl Renderer {
             let Some(g) = atlas.get_image(img.key, &img.rgba, img.width, img.height) else {
                 continue;
             };
+            // a client-requested cell box (kitty c=/r=) scales the image; one
+            // axis alone keeps the aspect ratio, per the protocol
+            let (disp_w, disp_h) = match (p.cols, p.rows) {
+                (0, 0) => (g.width, g.height),
+                (c, 0) => {
+                    let w = c as f32 * cell_w;
+                    (w, w * g.height / g.width.max(1.0))
+                }
+                (0, r) => {
+                    let h = r as f32 * cell_h;
+                    (h * g.width / g.height.max(1.0), h)
+                }
+                (c, r) => (c as f32 * cell_w, r as f32 * cell_h),
+            };
             // crop the quad to the pane's visible rows so an image taller than the
             // remaining space doesn't bleed into a sibling pane or the status bar,
             // and a placement scrolled partly above the top shows its lower rows
             let top_y = grid.screen_row_signed(p.abs_line) as f32 * cell_h;
-            let Some((vis_top, vis_h, uf0, uf1)) = clip_image_v(top_y, g.height, content_h) else {
+            let Some((vis_top, vis_h, uf0, uf1)) = clip_image_v(top_y, disp_h, content_h) else {
                 continue;
             };
             let uspan = g.uv_max[1] - g.uv_min[1];
             out.push(Instance {
                 pos: [ox + p.col as f32 * cell_w, oy + vis_top],
-                size: [g.width, vis_h],
+                size: [disp_w, vis_h],
                 uv_min: [g.uv_min[0], g.uv_min[1] + uspan * uf0],
                 uv_max: [g.uv_max[0], g.uv_min[1] + uspan * uf1],
                 color: [0.0, 0.0, 0.0, 1.0],

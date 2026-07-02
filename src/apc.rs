@@ -120,6 +120,10 @@ pub struct KittyCmd {
     pub width: u32,
     pub height: u32,
     pub id: u32,
+    /// c=/r=: display the image scaled to this many cell columns/rows
+    /// (0 = natural pixel size)
+    pub cols: u32,
+    pub rows: u32,
     /// m=1: more chunks of this image follow
     pub more: bool,
     /// q: 0 = all responses, 1 = errors only, 2 = silent
@@ -143,6 +147,8 @@ impl KittyCmd {
             width: 0,
             height: 0,
             id: 0,
+            cols: 0,
+            rows: 0,
             more: false,
             quiet: 0,
             payload: Vec::new(),
@@ -161,6 +167,8 @@ impl KittyCmd {
                 b"s" => cmd.width = vs.parse().ok()?,
                 b"v" => cmd.height = vs.parse().ok()?,
                 b"i" => cmd.id = vs.parse().ok()?,
+                b"c" => cmd.cols = vs.parse().ok()?,
+                b"r" => cmd.rows = vs.parse().ok()?,
                 b"m" => cmd.more = vs == "1",
                 b"q" => cmd.quiet = vs.parse().unwrap_or(0),
                 _ => {}

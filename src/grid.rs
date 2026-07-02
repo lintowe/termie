@@ -54,12 +54,15 @@ impl Default for Cell {
 
 /// a placed kitty image: anchored to an absolute line (col, abs_line) so it
 /// scrolls with the text. image_id indexes the owning Terminal's ImageStore;
-/// the image draws at its native pixel size from that cell
+/// the image draws at its native pixel size from that cell, unless the client
+/// asked to fit it to a cell box (kitty c=/r= keys; 0 = natural size)
 #[derive(Clone, Copy)]
 pub struct Placement {
     pub image_id: u32,
     pub abs_line: u64,
     pub col: usize,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1104,13 +1107,16 @@ impl Grid {
     }
 
     /// place a kitty image at the cursor, anchored to the current absolute line
-    /// so it scrolls with the surrounding text
-    pub fn place_image(&mut self, image_id: u32) {
+    /// so it scrolls with the surrounding text. cols/rows = the client's
+    /// requested cell box (kitty c=/r=), 0 = draw at native pixel size
+    pub fn place_image(&mut self, image_id: u32, cols: u16, rows: u16) {
         let abs_line = self.total_scrolled + self.cursor.row as u64;
         self.placements.push(Placement {
             image_id,
             abs_line,
             col: self.cursor.col,
+            cols,
+            rows,
         });
         if self.placements.len() > 1024 {
             self.placements.remove(0);
@@ -1300,14 +1306,17 @@ mod tests {
     fn placements_anchor_remove_and_clear() {
         let mut g = Grid::new(4, 8);
         g.put_char('x'); // cursor advances to col 1
-        g.place_image(7);
+        g.place_image(7, 0, 0);
         let p = g.placements();
         assert_eq!(p.len(), 1);
         assert_eq!((p[0].image_id, p[0].abs_line, p[0].col), (7, 0, 1));
+        // natural size unless the client asked for a cell box
+        assert_eq!((p[0].cols, p[0].rows), (0, 0));
         // on-screen line (no scroll, no view offset): signed row == abs_line
         assert_eq!(g.screen_row_signed(0), 0);
         // id-scoped removal keeps the others
-        g.place_image(9);
+        g.place_image(9, 10, 5);
+        assert_eq!((g.placements()[1].cols, g.placements()[1].rows), (10, 5));
         g.remove_placements(7);
         assert_eq!(g.placements().iter().map(|p| p.image_id).collect::<Vec<_>>(), vec![9]);
         // clear-all empties them
@@ -1319,7 +1328,7 @@ mod tests {
     fn reflow_clears_stale_placements() {
         let mut g = Grid::new(4, 8);
         g.put_char('x');
-        g.place_image(1);
+        g.place_image(1, 0, 0);
         assert_eq!(g.placements().len(), 1);
         g.resize(4, 12); // width change reflows -> placement anchors are now stale
         assert!(g.placements().is_empty());
