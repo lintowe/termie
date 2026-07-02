@@ -645,6 +645,12 @@ impl Perform for Terminal {
                     self.responses.extend_from_slice(b"\x1b[?6c");
                 }
             }
+            // XTVERSION (CSI > q): report name + version as DCS > | text ST
+            'q' if intermediates.first() == Some(&b'>') => {
+                self.responses.extend_from_slice(
+                    concat!("\x1bP>|termie ", env!("CARGO_PKG_VERSION"), "\x1b\\").as_bytes(),
+                );
+            }
             'q' if intermediates.first() == Some(&b' ') => {
                 // DECSCUSR (CSI Ps SP q) cursor shape. read the raw param: 0 and 1
                 // are both "blinking block" per spec, 2 steady block, 3/4
@@ -1079,6 +1085,14 @@ mod tests {
         // CSI 4 SP q -> underline
         feed(&mut t, b"\x1b[4 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn xtversion_reports_name_and_version() {
+        let mut t = Terminal::new(2, 10);
+        feed(&mut t, b"\x1b[>0q");
+        let want = format!("\x1bP>|termie {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        assert_eq!(t.responses, want.as_bytes());
     }
 
     #[test]

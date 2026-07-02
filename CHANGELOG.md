@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Terminal fidelity
+- **XTVERSION** (`CSI > 0 q`): termie now identifies itself (`termie <version>`) to programs that probe terminal identity the standard way, instead of staying silent.
 - **XTWINOPS size reports** (`CSI 14t` / `16t` / `18t`): programs can now ask for the text area's pixel size, the cell size, and the cell count. Image tools (`imgcat`, `chafa`, `timg`, kitty's `icat`) size inline graphics from these — nothing can ioctl a pixel size through ConPTY, so without them termie's kitty-graphics support was hard for real tools to discover and scale to. The pixel reports answer with the renderer's true cell geometry (they stay silent rather than guess if it isn't known yet).
 
 ### Workflow
