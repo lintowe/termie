@@ -6,9 +6,12 @@ use std::thread;
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-// a prompt hook that emits OSC-7 (cwd) before the prompt text; single-quoted
-// pwsh + string concatenation so the command line carries no double quotes
-const PWSH_OSC7_PROMPT: &str = r#"function prompt { $p=$PWD.ProviderPath; [char]27+']7;file:///'+($p -replace '\\','/')+[char]27+'\PS '+$p+'> ' }"#;
+// a prompt hook that emits OSC-133;A (prompt mark, drives ctrl+up/down jump
+// nav) and OSC-7 (cwd) before the prompt text. it wraps whatever prompt is
+// already defined — the pwsh default, or the profile's starship/oh-my-posh
+// when load_profile is on — instead of replacing it. single-quoted pwsh +
+// string concatenation so the command line carries no double quotes
+const PWSH_PROMPT_HOOK: &str = r#"$global:__termie_prompt = $function:prompt; function prompt { $p=$PWD.ProviderPath; [char]27+']133;A'+[char]27+'\'+[char]27+']7;file:///'+($p -replace '\\','/')+[char]27+'\'+(& $global:__termie_prompt) }"#;
 
 /// which shell a new pane should launch
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,7 +116,7 @@ impl Pty {
                     }
                     c.arg("-NoExit");
                     c.arg("-Command");
-                    c.arg(PWSH_OSC7_PROMPT);
+                    c.arg(PWSH_PROMPT_HOOK);
                 }
                 if lower.ends_with("wsl.exe") {
                     // launch a specific distro when one is configured (else the
