@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Fixes
+- **Copying soft-wrapped text no longer breaks it.** A long URL or command that wrapped across rows used to gain hard newlines at every wrap point when copied; the selection now copies the logical line unbroken (real newlines still break, and alt+drag block copies stay one line per row).
+- **Apps asking for a steady cursor get one.** DECSCUSR's steady variants (`CSI 2/4/6 SP q` — vim's `guicursor`, many shells) were treated as their blinking siblings; the blink bit is now honored both ways, overriding the configured default until the app resets it.
+- **`clear` can really clear now**: ED 3 (`ESC[3J`) erases the scrollback buffer as xterm defines, instead of only blanking the screen.
+- **A crafted clipboard can't break out of a bracketed paste**: an embedded end-bracket sequence in pasted text is stripped so the remainder can't run as keystrokes.
 - **Rounded box corners are round again.** TUIs drawing `╭─╮` frames (lazygit, gh-dash, many Rust and Go tools) were getting hard square corners: the GPU cell-filling path claimed the rounded-corner characters but can only draw rectangles. They now render through the quarter-arc rasterizer that was built for them, still filling the exact cell so borders connect at any line height.
 - **The mouse wheel scrolls pagers now.** `less`, `man`, `git log`, and other full-screen apps without mouse reporting used to sit dead under the wheel (the alternate screen has no scrollback to scroll). The wheel now translates to arrow keys there — the "alternate scroll" behavior other terminals ship by default.
 - **Slow touchpad scrolling works.** A gentle two-finger scroll delivers a few pixels per event, which rounded to zero lines and went nowhere; the fractional remainder now accumulates so precision touchpads scroll smoothly at any speed.

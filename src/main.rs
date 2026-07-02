@@ -2174,13 +2174,15 @@ impl App {
         let Some(r) = self.pw.renderer.as_ref() else {
             return false;
         };
-        if !r.cursor_blink() {
-            return false;
-        }
+        let cfg = r.cursor_blink();
         self.pw.tabs
             .get(self.pw.active_tab)
             .and_then(|t| t.root.as_ref().and_then(|root| find_pane(root, t.focused)))
-            .map(|p| p.term.grid.cursor.visible && p.term.grid.view_offset == 0)
+            .map(|p| {
+                let cur = &p.term.grid.cursor;
+                // an app's DECSCUSR blink bit overrides the configured default
+                cur.shape_blink.unwrap_or(cfg) && cur.visible && p.term.grid.view_offset == 0
+            })
             .unwrap_or(false)
     }
 
@@ -2678,8 +2680,11 @@ impl App {
             .unwrap_or(false);
         let mut bytes = Vec::new();
         if bracketed {
+            // a crafted clipboard carrying its own end-bracket could close the
+            // paste early and run the rest as keystrokes; strip the sequence
+            let sanitized = normalized.replace("\x1b[201~", "");
             bytes.extend_from_slice(b"\x1b[200~");
-            bytes.extend_from_slice(normalized.as_bytes());
+            bytes.extend_from_slice(sanitized.as_bytes());
             bytes.extend_from_slice(b"\x1b[201~");
         } else {
             bytes.extend_from_slice(normalized.as_bytes());

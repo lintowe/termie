@@ -169,6 +169,7 @@ impl Terminal {
         self.grid.set_scroll_region(0, self.grid.rows - 1);
         self.grid.origin_mode = false;
         self.grid.cursor.shape_set = false;
+        self.grid.cursor.shape_blink = None;
         // DECSTR turns the text cursor back on (DECTCEM)
         self.grid.cursor.visible = true;
     }
@@ -703,6 +704,8 @@ impl Perform for Terminal {
                     _ => CursorShape::Block,
                 };
                 self.grid.cursor.shape_set = true;
+                // odd params (and 0) are the blinking variants, even the steady
+                self.grid.cursor.shape_blink = Some(matches!(n, 0 | 1 | 3 | 5));
             }
             's' => self.grid.save_cursor(),
             'u' => match intermediates.first() {
@@ -1115,9 +1118,15 @@ mod tests {
         feed(&mut t, b"\x1b[2 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Block);
         assert!(t.grid.cursor.shape_set);
+        // the steady variant pins the blink off; the blinking variant pins it on
+        assert_eq!(t.grid.cursor.shape_blink, Some(false));
         // CSI 5 SP q -> bar
         feed(&mut t, b"\x1b[5 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Bar);
+        assert_eq!(t.grid.cursor.shape_blink, Some(true));
+        // DECSTR releases the override back to the configured default
+        feed(&mut t, b"\x1b[!p");
+        assert_eq!(t.grid.cursor.shape_blink, None);
         // CSI 0 SP q -> default, which is a block (this was dead code before)
         feed(&mut t, b"\x1b[0 q");
         assert_eq!(t.grid.cursor.shape, CursorShape::Block);

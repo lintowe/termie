@@ -2514,6 +2514,7 @@ impl Renderer {
         oy: f32,
         focused: bool,
         blink_on: bool,
+        blink_phase: bool,
         beam_w: f32,
         style: CursorShape,
         sel: Option<SelSpan>,
@@ -2588,8 +2589,16 @@ impl Renderer {
                     Self::push_rect(out, x, y, cell_w, cell_h, sel_col, 0.9);
                 }
                 if is_cursor {
+                    // DECSCUSR's steady variants force a solid cursor; its
+                    // blinking variants follow the clock even when the
+                    // configured default is steady
+                    let cur_on = match cur.shape_blink {
+                        Some(true) => blink_phase,
+                        Some(false) => true,
+                        None => blink_on,
+                    };
                     let alpha = if focused {
-                        if blink_on {
+                        if cur_on {
                             1.0
                         } else {
                             0.0
@@ -2806,8 +2815,11 @@ impl Renderer {
         let h = self.config.height as f32;
         let hair = self.scale.max(1.0);
         let track = (0.06 * self.atlas.metrics(FontId::Chrome).cell_w).max(0.5);
-        // slow blink ~1.06s period, on for the first ~600ms
-        let blink_on = !self.cursor_blink || (self.start.elapsed().as_millis() % 1060) < 600;
+        // slow blink ~1.06s period, on for the first ~600ms. the raw phase is
+        // kept separate so a DECSCUSR blinking-variant cursor can follow the
+        // clock even when the configured default is steady
+        let blink_phase = (self.start.elapsed().as_millis() % 1060) < 600;
+        let blink_on = !self.cursor_blink || blink_phase;
         let beam_w = (2.0 * self.scale).round().max(1.0);
 
         // reuse the persistent scratch buffer: keeps its capacity across frames
@@ -2857,6 +2869,7 @@ impl Renderer {
                     info.1,
                     pv.focused && focused,
                     blink_on,
+                    blink_phase,
                     beam_w,
                     cursor_style,
                     pv.sel,

@@ -84,6 +84,9 @@ pub struct Cursor {
     /// true once an app set the shape via DECSCUSR; until then the renderer
     /// uses the user's configured default shape
     pub shape_set: bool,
+    /// DECSCUSR's blink bit: Some(false) for the steady variants (2/4/6),
+    /// Some(true) for the blinking ones; None = follow the configured default
+    pub shape_blink: Option<bool>,
     /// deferred wrap: cursor sits past the last column until the next print
     pub wrap_pending: bool,
     /// active OSC 8 hyperlink id applied to printed cells; 0 = none
@@ -101,6 +104,7 @@ impl Default for Cursor {
             visible: true,
             shape: CursorShape::Block,
             shape_set: false,
+            shape_blink: None,
             wrap_pending: false,
             link: 0,
         }
@@ -449,11 +453,18 @@ impl Grid {
                     s.push(cell.c);
                 }
             }
-            while s.ends_with(' ') {
-                s.pop();
+            // a soft-wrapped row flows straight into the next: the break was
+            // the terminal's, not the text's, so copy it unbroken and keep its
+            // exact cells (trimming could eat spaces mid-logical-line). block
+            // mode is a column extract — every row stays its own line there
+            let wrapped = !block && line.wrapped && row != b.0;
+            if !wrapped {
+                while s.ends_with(' ') {
+                    s.pop();
+                }
             }
             out.push_str(&s);
-            if row != b.0 {
+            if row != b.0 && !wrapped {
                 out.push('\n');
             }
         }
@@ -929,6 +940,13 @@ impl Grid {
                 }
                 // a full screen clear also removes any image placements
                 self.placements.clear();
+                // ED 3 (xterm) additionally erases the saved-lines buffer —
+                // `clear`, `printf '\e[3J'`, and shell clear-scrollback rely on it
+                if mode == 3 {
+                    self.scrollback.clear();
+                    self.view_offset = 0;
+                    self.prune_prompts();
+                }
             }
             _ => {}
         }
@@ -1456,6 +1474,45 @@ mod tests {
         // forward brings the view back down toward the live screen
         assert!(g.jump_prompt(true));
         assert!(g.view_offset < v2);
+    }
+
+    #[test]
+    fn copy_joins_soft_wrapped_lines() {
+        let mut g = Grid::new(3, 4);
+        // 6 chars into a 4-col grid: "abcd" soft-wraps into "ef"
+        for c in "abcdef".chars() {
+            g.put_char(c);
+        }
+        assert!(g.lines[0].wrapped);
+        // the soft wrap is the terminal's, not the text's: copy unbroken
+        assert_eq!(g.selected_text((0, 0), (1, 3), false), "abcdef");
+        // a real newline still breaks
+        g.linefeed();
+        g.carriage_return();
+        for c in "gh".chars() {
+            g.put_char(c);
+        }
+        assert_eq!(g.selected_text((0, 0), (2, 3), false), "abcdef\ngh");
+        // block mode keeps one line per row (a column extract)
+        assert_eq!(g.selected_text((0, 0), (1, 1), true), "ab\nef");
+    }
+
+    #[test]
+    fn ed3_clears_scrollback_but_ed2_keeps_it() {
+        let mut g = Grid::new(2, 4);
+        for line in ["aa", "bb", "cc", "dd"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        assert!(!g.scrollback.is_empty());
+        g.erase_in_display(2);
+        assert!(!g.scrollback.is_empty(), "ED 2 clears the screen only");
+        g.erase_in_display(3);
+        assert!(g.scrollback.is_empty(), "ED 3 erases saved lines");
+        assert_eq!(g.view_offset, 0);
     }
 
     #[test]
