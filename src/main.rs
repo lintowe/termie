@@ -291,6 +291,10 @@ enum ConfirmAction {
     PasteBytes { pane: usize, bytes: Vec<u8> },
     /// close a tab that holds more than one pane
     CloseTab { tab: usize },
+    /// quit the app (main window X / Alt+F4 / the quit action) with live panes
+    Quit,
+    /// close the current torn-off window and its panes
+    CloseWindow,
 }
 
 /// tab-rename text field overlay: which tab is being renamed + the current input
@@ -2787,6 +2791,60 @@ impl App {
         match action {
             ConfirmAction::PasteBytes { pane, bytes } => self.send_paste_bytes(pane, &bytes),
             ConfirmAction::CloseTab { tab } => self.do_close_tab(tab, event_loop),
+            ConfirmAction::Quit => self.quit_app(event_loop),
+            ConfirmAction::CloseWindow => {
+                // kill + empty the swapped-in window's tabs; satellite_event's
+                // post-swap cleanup removes the now-empty window
+                for tab in &mut self.pw.tabs {
+                    if let Some(root) = tab.root.as_mut() {
+                        kill_all(root);
+                    }
+                }
+                self.pw.tabs.clear();
+            }
+        }
+    }
+
+    /// panes across every tab of the current window
+    fn window_pane_count(&self) -> usize {
+        let mut n = 0;
+        for tab in &self.pw.tabs {
+            if let Some(root) = tab.root.as_ref() {
+                each_pane(root, &mut |_| n += 1);
+            }
+        }
+        n
+    }
+
+    /// the actual shutdown: kill every shell, flush the session, exit
+    fn quit_app(&mut self, event_loop: &ActiveEventLoop) {
+        for tab in &mut self.pw.tabs {
+            if let Some(root) = tab.root.as_mut() {
+                kill_all(root);
+            }
+        }
+        self.flush_session_now();
+        self.kill_pool();
+        event_loop.exit();
+    }
+
+    /// quit, held behind a confirm when more than one pane or tab is alive —
+    /// the same count gate tab-close uses, so Alt+F4 can't silently take down
+    /// a window full of working agents
+    fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
+        let panes = self.window_pane_count();
+        if self.pw.tabs.len() > 1 || panes > 1 {
+            self.pw.confirm = Some(ConfirmState {
+                prompt: format!(
+                    "quit with {panes} panes across {} tabs?",
+                    self.pw.tabs.len()
+                ),
+                hint: "enter: quit \u{b7} esc: cancel".to_string(),
+                action: ConfirmAction::Quit,
+            });
+            self.redraw();
+        } else {
+            self.quit_app(event_loop);
         }
     }
 
@@ -3380,16 +3438,7 @@ impl App {
                 self.redraw();
                 self.save_config();
             }
-            PaletteAction::Quit => {
-                for tab in &mut self.pw.tabs {
-                    if let Some(root) = tab.root.as_mut() {
-                        kill_all(root);
-                    }
-                }
-                self.flush_session_now();
-                self.kill_pool();
-                event_loop.exit();
-            }
+            PaletteAction::Quit => self.request_quit(event_loop),
             PaletteAction::ToggleSettings => self.toggle_settings(),
             PaletteAction::FontInc => self.nudge_font(1.0),
             PaletteAction::FontDec => self.nudge_font(-1.0),
@@ -3879,7 +3928,18 @@ impl App {
                 } else if self.cur_sat.is_some() {
                     // a torn-off window's close button kills only that window's
                     // shells and empties it; satellite_event removes the now-empty
-                    // window after the swap-back (never exits the app)
+                    // window after the swap-back (never exits the app). more
+                    // than one pane gets the same count-gated confirm as quit
+                    let panes = self.window_pane_count();
+                    if panes > 1 {
+                        self.pw.confirm = Some(ConfirmState {
+                            prompt: format!("close this window's {panes} panes?"),
+                            hint: "enter: close \u{b7} esc: cancel".to_string(),
+                            action: ConfirmAction::CloseWindow,
+                        });
+                        self.redraw();
+                        return;
+                    }
                     for tab in &mut self.pw.tabs {
                         if let Some(root) = tab.root.as_mut() {
                             kill_all(root);
@@ -3887,14 +3947,7 @@ impl App {
                     }
                     self.pw.tabs.clear();
                 } else {
-                    for tab in &mut self.pw.tabs {
-                        if let Some(root) = tab.root.as_mut() {
-                            kill_all(root);
-                        }
-                    }
-                    self.flush_session_now();
-                    self.kill_pool();
-                    event_loop.exit();
+                    self.request_quit(event_loop);
                 }
             }
             Hot::Gear => self.toggle_settings(),
@@ -4345,6 +4398,27 @@ impl App {
     fn satellite_event(&mut self, idx: usize, event: WindowEvent, event_loop: &ActiveEventLoop) {
         if matches!(event, WindowEvent::CloseRequested) {
             if idx < self.satellites.len() {
+                // more than one pane gets the count-gated confirm (shown on the
+                // satellite's own window via the swap); a single pane closes
+                let mut panes = 0;
+                for tab in &self.satellites[idx].tabs {
+                    if let Some(root) = tab.root.as_ref() {
+                        each_pane(root, &mut |_| panes += 1);
+                    }
+                }
+                if panes > 1 {
+                    self.cur_sat = Some(idx);
+                    std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    self.pw.confirm = Some(ConfirmState {
+                        prompt: format!("close this window's {panes} panes?"),
+                        hint: "enter: close \u{b7} esc: cancel".to_string(),
+                        action: ConfirmAction::CloseWindow,
+                    });
+                    self.redraw();
+                    std::mem::swap(&mut self.pw, &mut self.satellites[idx]);
+                    self.cur_sat = None;
+                    return;
+                }
                 let mut sat = self.satellites.remove(idx);
                 for tab in sat.tabs.iter_mut() {
                     if let Some(root) = tab.root.as_mut() {
@@ -5863,16 +5937,7 @@ impl ApplicationHandler<UserEvent> for App {
             a.process_event(w, &event);
         }
         match event {
-            WindowEvent::CloseRequested => {
-                for tab in &mut self.pw.tabs {
-                    if let Some(root) = tab.root.as_mut() {
-                        kill_all(root);
-                    }
-                }
-                self.flush_session_now();
-                self.kill_pool();
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => self.request_quit(event_loop),
             WindowEvent::Focused(f) => {
                 self.pw.focused = f;
                 // losing focus mid-composition must clear the IME flag, or a
