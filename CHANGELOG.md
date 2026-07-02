@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixes
+- **Scrollback stays put while output streams.** Scrolling up to read history and having a build (or an agent) print one more line no longer yanks you back to the bottom — the view now stays anchored to the exact text you were reading as new lines flow underneath. Typing or pasting still snaps you back to the live prompt, which is the behavior every other modern terminal settled on.
 - **AltGr works on European layouts.** AltGr arrives as Ctrl+Alt on Windows, so typing `[` on a German layout (AltGr+8) was sent as `ESC [` — the start of an escape sequence — instead of a bracket, with the same corruption for `]`, `{`, `}`, `@`, `\`, `€` and every other AltGr character, in both the legacy and kitty keyboard encodings. Layout-translated text is now sent exactly as typed; a bare Ctrl+Alt chord keeps its escape encoding.
 
 ### Terminal fidelity

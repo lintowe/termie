@@ -2697,6 +2697,8 @@ impl App {
             && let Some(root) = tab.root.as_mut()
             && let Some(p) = find_pane_mut(root, pane)
         {
+            // pasting is input: snap a history-scrolled view to the bottom
+            p.term.grid.view_offset = 0;
             p.pty.write(bytes);
         }
     }
@@ -3019,9 +3021,15 @@ impl App {
         if let Some(tab) = self.pw.tabs.get_mut(self.pw.active_tab)
             && let Some(root) = tab.root.as_mut()
         {
+            // typing snaps a history-scrolled view back to the live bottom
+            // (output alone no longer does — it would yank the user mid-read)
             if self.broadcast {
-                each_pane_mut(root, &mut |p| p.pty.write(bytes));
+                each_pane_mut(root, &mut |p| {
+                    p.term.grid.view_offset = 0;
+                    p.pty.write(bytes);
+                });
             } else if let Some(p) = find_pane_mut(root, id) {
+                p.term.grid.view_offset = 0;
                 p.pty.write(bytes);
             }
         }

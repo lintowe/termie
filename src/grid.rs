@@ -620,6 +620,12 @@ impl Grid {
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
         }
+        // a view scrolled into history stays anchored to the text being read:
+        // each line entering scrollback pushes the offset up with it (typing
+        // snaps back to the live bottom — see the app's input path)
+        if self.view_offset > 0 {
+            self.view_offset = (self.view_offset + 1).min(self.scrollback.len());
+        }
         self.prune_prompts();
     }
 
@@ -711,7 +717,6 @@ impl Grid {
     }
 
     pub fn put_char(&mut self, c: char) {
-        self.view_offset = 0; // snap to bottom on new output
         let w = char_width(c);
         // zero-width (combining marks, ZWJ, variation selectors): fold into the
         // previous cell's grapheme cluster instead of dropping
@@ -776,7 +781,6 @@ impl Grid {
 
     /// move down one line, scrolling the region if at the bottom (LF/IND)
     pub fn linefeed(&mut self) {
-        self.view_offset = 0;
         if self.cursor.row == self.region_bottom {
             self.scroll_up(1);
         } else if self.cursor.row + 1 < self.rows {
@@ -1452,6 +1456,34 @@ mod tests {
         // forward brings the view back down toward the live screen
         assert!(g.jump_prompt(true));
         assert!(g.view_offset < v2);
+    }
+
+    #[test]
+    fn scrolled_view_stays_anchored_while_output_streams() {
+        let mut g = Grid::new(2, 4);
+        for line in ["aa", "bb", "cc", "dd"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        // scroll up to read history: the oldest line is on screen
+        g.scroll_view(g.scrollback.len() as isize);
+        assert_eq!(g.line_at(0)[0].c, 'a');
+        let before = g.view_offset;
+        // new output must not yank the view off the text being read: the
+        // offset rides up with each line entering scrollback
+        for c in "ee".chars() {
+            g.put_char(c);
+        }
+        g.linefeed();
+        g.carriage_return();
+        assert_eq!(g.view_offset, before + 1);
+        assert_eq!(g.line_at(0)[0].c, 'a');
+        // returning to the live bottom still works
+        g.scroll_view(-(g.view_offset as isize));
+        assert_eq!(g.view_offset, 0);
     }
 
     #[test]
