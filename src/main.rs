@@ -756,6 +756,22 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
     v
 }
 
+/// jump-list tasks: a plain new window plus one per shell and custom profile.
+/// (title, exe arguments) pairs; a profile name with a quote is skipped rather
+/// than risk a mangled argv
+fn jumplist_entries() -> Vec<(String, String)> {
+    let mut v = vec![("new window".to_string(), String::new())];
+    for label in ["pwsh", "cmd", "wsl"] {
+        v.push((format!("new window: {label}"), format!("--shell {label}")));
+    }
+    for (name, _) in pty::profiles() {
+        if !name.contains('"') {
+            v.push((format!("new window: {name}"), format!("--shell \"{name}\"")));
+        }
+    }
+    v
+}
+
 /// resolve a keybindings.conf action label to an action — the palette entries
 /// plus the keybinding-only actions (copy/paste/find/font/select-tab/etc.)
 fn action_from_label(name: &str) -> Option<PaletteAction> {
@@ -1231,16 +1247,18 @@ fn spawn_plugin(
 #[derive(Clone, Default)]
 struct CliArgs {
     cwd: Option<String>,
+    /// shell label or custom profile name for the first tab (jump list, scripts)
+    shell: Option<String>,
     command: Option<Vec<String>>,
 }
 
 impl CliArgs {
     fn is_bare(&self) -> bool {
-        self.cwd.is_none() && self.command.is_none()
+        self.cwd.is_none() && self.shell.is_none() && self.command.is_none()
     }
 }
 
-/// parse `termie [--cwd DIR | -d DIR | --cwd=DIR] [-- COMMAND...]`. lenient and
+/// parse `termie [--cwd DIR | -d DIR | --cwd=DIR] [--shell NAME] [-- COMMAND...]`. lenient and
 /// silent: release is a windowed subsystem with no console to print help to, so
 /// unknown flags are ignored rather than erroring. `--` ends option parsing and
 /// the remainder is a command argv to run instead of the default shell
@@ -1260,6 +1278,12 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
             }
         } else if let Some(dir) = a.strip_prefix("--cwd=").or_else(|| a.strip_prefix("-d=")) {
             out.cwd = Some(dir.to_string());
+        } else if a == "--shell" {
+            if let Some(name) = it.next() {
+                out.shell = Some(name);
+            }
+        } else if let Some(name) = a.strip_prefix("--shell=") {
+            out.shell = Some(name.to_string());
         }
     }
     out
@@ -2412,10 +2436,11 @@ impl App {
         // falls through to restore + the warm-pool path below
         let first_cwd = if self.cli.is_bare() { launch_cwd(self.launch_fg) } else { self.cli.cwd.clone() };
         let command = self.cli.command.clone();
-        if command.is_some() || first_cwd.is_some() {
+        let first_shell = self.cli.shell.as_deref().map(ShellKind::from_label);
+        if command.is_some() || first_cwd.is_some() || first_shell.is_some() {
             self.session_ephemeral = true;
             let (cols, rows) = self.content_pane_size();
-            match self.spawn_pane(cols, rows, first_cwd, None, command.as_deref()) {
+            match self.spawn_pane(cols, rows, first_cwd, first_shell, command.as_deref()) {
                 Ok(pane) => self.install_first_tab(pane),
                 Err(e) => log::error!("failed to spawn the requested command: {e}"),
             }
@@ -2444,6 +2469,10 @@ impl App {
         timing("window shown");
         self.shown = true;
         window.request_redraw();
+        // populate the taskbar jump list off-thread; COM shell calls have no
+        // business on the startup render path
+        let entries = jumplist_entries();
+        std::thread::spawn(move || win::update_jumplist(&entries));
         Ok(())
     }
 
@@ -7249,6 +7278,9 @@ mod tests {
         assert_eq!(p(&["-d", "C:/y"]).cwd.as_deref(), Some("C:/y"));
         assert_eq!(p(&["--cwd=C:/z"]).cwd.as_deref(), Some("C:/z"));
         assert!(!p(&["--cwd", "C:/x"]).is_bare());
+        assert_eq!(p(&["--shell", "cmd"]).shell.as_deref(), Some("cmd"));
+        assert_eq!(p(&["--shell=wsl"]).shell.as_deref(), Some("wsl"));
+        assert!(!p(&["--shell", "cmd"]).is_bare());
         let cmd = p(&["--", "vim", "a.txt"]);
         assert_eq!(
             cmd.command.as_deref(),

@@ -128,6 +128,74 @@ pub fn set_taskbar_progress(hwnd_handle: isize, state: u8, pct: u8) {
 #[cfg(not(windows))]
 pub fn set_taskbar_progress(_hwnd_handle: isize, _state: u8, _pct: u8) {}
 
+/// populate the taskbar jump list: right-clicking the (pinned) icon offers a
+/// plain new window plus one per shell and custom profile, launching the exe
+/// with `--shell <name>`. failures are swallowed — the jump list is decoration,
+/// never worth blocking startup or crashing over
+#[cfg(windows)]
+pub fn update_jumplist(tasks: &[(String, String)]) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::Common::{IObjectArray, IObjectCollection};
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+    use windows::Win32::UI::Shell::{
+        DestinationList, EnumerableObjectCollection, ICustomDestinationList, IShellLinkW,
+        ShellLink,
+    };
+    use windows::core::{GUID, Interface, PCWSTR, PWSTR};
+    // System.Title — the string the jump list displays for a task
+    const PKEY_TITLE: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0xF29F85E0_4FF9_1068_AB91_08002B27B3D9),
+        pid: 2,
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let exe: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let result: windows::core::Result<()> = (|| unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let list: ICustomDestinationList =
+            CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)?;
+        let mut slots = 0u32;
+        let _removed: IObjectArray = list.BeginList(&mut slots)?;
+        let coll: IObjectCollection =
+            CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)?;
+        for (title, args) in tasks {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            link.SetPath(PCWSTR(exe.as_ptr()))?;
+            let args: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
+            link.SetArguments(PCWSTR(args.as_ptr()))?;
+            link.SetIconLocation(PCWSTR(exe.as_ptr()), 0)?;
+            let store: IPropertyStore = link.cast()?;
+            // VT_LPWSTR pointing at a live local buffer: SetValue copies the
+            // string, and this PROPVARIANT is plain data (no Drop), so nothing
+            // ever tries to CoTaskMemFree our Vec
+            let mut wtitle: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut pv = PROPVARIANT::default();
+            let inner = &mut *pv.Anonymous.Anonymous;
+            inner.vt = VT_LPWSTR;
+            inner.Anonymous.pwszVal = PWSTR(wtitle.as_mut_ptr());
+            store.SetValue(&PKEY_TITLE, &pv)?;
+            store.Commit()?;
+            coll.AddObject(&link)?;
+        }
+        list.AddUserTasks(&coll.cast::<IObjectArray>()?)?;
+        list.CommitList()?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log::debug!("jump list update failed: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn update_jumplist(_tasks: &[(String, String)]) {}
+
 /// flash the window's taskbar button until it regains the foreground — the
 /// standard "needs attention" signal for a bell in an unfocused window
 #[cfg(windows)]
