@@ -152,6 +152,8 @@ struct Sel {
 enum PaletteAction {
     NewTab,
     NewTabHere,
+    /// new tab with the focused pane's shell and cwd (Windows Terminal's Ctrl+Shift+D)
+    DuplicateTab,
     NewShell(ShellKind),
     SplitV,
     SplitH,
@@ -197,6 +199,7 @@ enum PaletteAction {
 const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("new tab", PaletteAction::NewTab),
     ("new tab here", PaletteAction::NewTabHere),
+    ("duplicate tab", PaletteAction::DuplicateTab),
     ("new tab: pwsh", PaletteAction::NewShell(ShellKind::Pwsh)),
     ("new tab: cmd", PaletteAction::NewShell(ShellKind::Cmd)),
     ("new tab: wsl", PaletteAction::NewShell(ShellKind::Wsl)),
@@ -588,6 +591,7 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
         (ctrl, chr("p"), A::OpenPalette),
         (ctrl, chr("t"), A::NewTab),
         (cs, chr("t"), A::NewTab),
+        (cs, chr("d"), A::DuplicateTab),
         (cs, chr("c"), A::Copy),
         (cs, chr("v"), A::Paste),
         // the classic conhost chords, kept by windows terminal too
@@ -3235,6 +3239,13 @@ impl App {
         cwd_path(p.term.cwd.as_deref())
     }
 
+    /// the shell kind the focused pane was spawned with
+    fn focused_shell(&self) -> Option<ShellKind> {
+        let id = self.active_focused_id()?;
+        let root = self.pw.tabs.get(self.pw.active_tab)?.root.as_ref()?;
+        Some(find_pane(root, id)?.shell)
+    }
+
     fn new_tab(&mut self) {
         self.new_tab_cwd(None, None);
     }
@@ -3448,6 +3459,11 @@ impl App {
             PaletteAction::NewTabHere => {
                 let cwd = self.focused_cwd();
                 self.new_tab_cwd(cwd, None);
+            }
+            PaletteAction::DuplicateTab => {
+                let cwd = self.focused_cwd();
+                let shell = self.focused_shell();
+                self.new_tab_cwd(cwd, shell);
             }
             PaletteAction::NewShell(s) => {
                 let cwd = self.focused_cwd();
@@ -6722,6 +6738,7 @@ mod tests {
             d.iter().any(|(mm, k, aa)| *mm == m && key_matches(&Key::Character(key.into()), k) && *aa == a)
         };
         assert!(has(ctrl, "t", PaletteAction::NewTab));
+        assert!(has(cs, "d", PaletteAction::DuplicateTab));
         assert!(has(cs, "e", PaletteAction::SplitV));
         assert!(has(ctrl, "1", PaletteAction::SelectTab(0)));
         assert!(has(ctrl, "9", PaletteAction::SelectTab(8)));

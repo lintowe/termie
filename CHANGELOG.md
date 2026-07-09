@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Workflow
+- **Duplicate tab** (`Ctrl+Shift+D`, and on the palette): opens a new tab running the focused pane's shell in its current directory — the same chord Windows Terminal uses. "New tab here" keeps opening the *default* shell there; duplicate carries the shell too, so a `cmd` or WSL tab duplicates as itself.
+
 ### Terminal fidelity
 - **XTGETTCAP capability queries** (`DCS + q`): answers the terminfo probes nvim and similar send when they can't trust `$TERM` (usually over ssh) — truecolor (`Tc`/`RGB`, `setrgbf`/`setrgbb`), styled underlines (`smulx`/`Su`), and color count — so those features light up without manual overrides. Unknown or malformed names get the standard failure reply instead of a hang.
 - **DECRQSS status requests** (`DCS $ q`): programs can now read back the SGR pen (the probe tmux and the truecolor-detection scripts use — set a color, query it, look for the echo), the scroll region, the cursor style, DECSCL, and DECSCA, instead of getting silence; anything else gets the standard invalid reply rather than a hang.

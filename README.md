@@ -35,6 +35,7 @@ termie checks for a newer release once a day and shows a small `UPDATE` chip on 
 | key | action |
 |---|---|
 | `Ctrl+T` / `Ctrl+W` | new / close tab |
+| `Ctrl+Shift+D` | duplicate tab (same shell and directory) |
 | `Ctrl+Tab` / `Ctrl+1`..`9` | next / nth tab |
 | `Ctrl+Shift+E` / `Ctrl+Shift+O` | split vertical / horizontal |
 | `Ctrl+P` | command palette |
