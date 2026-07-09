@@ -12,7 +12,7 @@ A fast, lightweight GPU terminal multiplexer for Windows — tabs, split panes, 
 
 ## features
 
-GPU-rendered (wgpu glyph-atlas), a ~7.6 MB binary, and a lean dependency tree. A pre-warmed shell pool keeps a started PowerShell ready, so new tabs and splits feel instant and the window appears before any shell finishes spawning.
+GPU-rendered (wgpu glyph-atlas), a ~8.8 MB binary, and a lean dependency tree. A pre-warmed shell pool keeps a started PowerShell ready, so new tabs and splits feel instant and the window appears before any shell finishes spawning.
 
 Tabs and recursive split panes — split vertically or horizontally, drag tabs to reorder them, drag dividers, swap panes, tear a pane off into its own window, and broadcast input to every pane in a tab. Splits and "new tab here" open in the focused pane's directory; pick a per-tab shell (`pwsh` / `cmd` / `wsl`) from the command palette. A bell in a background tab dots that tab, and a bell while the window is unfocused flashes the taskbar — so a finished agent or build finds you, not the other way around.
 
@@ -83,7 +83,7 @@ This builds in release, installs to `%LOCALAPPDATA%\Programs\termie`, bundles th
 cargo build            # debug
 cargo test             # unit tests (incl. golden snapshots)
 cargo clippy --all-targets
-cargo build --release  # optimized, ~7.6 MB
+cargo build --release  # optimized, ~8.8 MB
 ```
 
 ## plugins
