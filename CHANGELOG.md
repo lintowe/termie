@@ -9,6 +9,9 @@
 - **Old MSI leftovers can't survive a native install.** Removing the previous per-machine MSI now elevates via UAC when a quiet uninstall is not enough, then scrubs `Program Files\termie`, the all-users Start shortcut, and a machine PATH entry so Search never shows two termies side by side.
 
 ### Terminal fidelity
+- **Prompt navigation survives a resize.** Shell-integration prompt marks now
+  reflow with the text, so `Ctrl+Up` / `Ctrl+Down` keeps moving through command
+  history after changing the window width instead of silently losing every mark.
 - **Combined DECSET/DECRST applies every mode.** Sequences like `CSI ? 1000;1002;1003;1006 h` (how most full-screen apps enable mouse) used to take only the first parameter, so SGR mouse and any-event tracking never turned on together. Every `Ps` is applied now.
 - **X10 mouse never emits high-bit bytes.** When an app enables mouse without SGR (`1006`) and the cell is past column/row 223, the report falls back to SGR instead of clamping to `0xFF` — those clamped bytes were poisoning UTF-8 input parsers and filling TUI composers with garbage.
 - **Mouse motion is one report per cell.** Any-event tracking no longer re-emits the same CSI on every OS pointer sample while the cursor sits in one cell, which used to flood the child's input pipe under a moving mouse.

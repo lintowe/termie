@@ -559,9 +559,19 @@ impl Grid {
     fn reflow(&mut self, new_cols: usize) {
         let cur_abs = self.scrollback.len() + self.cursor.row;
         let cur_col = self.cursor.col;
+        let prompt_base = self.prompt_base();
         let mut physical: Vec<Line> = Vec::with_capacity(self.scrollback.len() + self.lines.len());
         physical.extend(self.scrollback.drain(..));
         physical.append(&mut self.lines);
+        // translate each retained prompt into its row in the old physical grid
+        // reflow turns that row into a logical-line offset, then back into a
+        // physical row at the new width
+        let prompt_rows: Vec<usize> = self
+            .prompts
+            .iter()
+            .filter_map(|&mark| mark.checked_sub(prompt_base))
+            .filter_map(|row| (row < physical.len() as u64).then_some(row as usize))
+            .collect();
 
         // drop blank lines below the content/cursor so empty screen space can't
         // push real content into scrollback when the width shrinks
@@ -574,12 +584,18 @@ impl Grid {
         // join physical lines into logical lines across soft-wraps; record the
         // cursor's logical line index + character offset within it
         let mut logical: Vec<Vec<Cell>> = Vec::new();
+        let mut prompt_offsets: Vec<(usize, usize)> = Vec::with_capacity(prompt_rows.len());
+        let mut next_prompt = 0usize;
         let (mut cur_logical, mut cur_offset, mut found) = (0usize, 0usize, false);
         let mut i = 0;
         while i < physical.len() {
             let li = logical.len();
             let mut cells: Vec<Cell> = Vec::new();
             loop {
+                while prompt_rows.get(next_prompt) == Some(&i) {
+                    prompt_offsets.push((li, cells.len()));
+                    next_prompt += 1;
+                }
                 if i == cur_abs && !found {
                     cur_logical = li;
                     cur_offset = cells.len() + cur_col;
@@ -607,6 +623,8 @@ impl Grid {
         // re-split each logical line at the new width
         let mut np: Vec<Line> = Vec::new();
         let mut new_cur_abs = 0usize;
+        let mut new_prompts = Vec::with_capacity(prompt_offsets.len());
+        let mut next_prompt = 0usize;
         for (li, cells) in logical.iter().enumerate() {
             let start = np.len();
             if cells.is_empty() {
@@ -620,6 +638,14 @@ impl Grid {
                     np.push(Line { cells: seg, wrapped: end < cells.len() });
                     j = end;
                 }
+            }
+            while let Some(&(prompt_li, offset)) = prompt_offsets.get(next_prompt) {
+                if prompt_li != li {
+                    break;
+                }
+                let segments = np.len() - start;
+                new_prompts.push((start + (offset / new_cols).min(segments - 1)) as u64);
+                next_prompt += 1;
             }
             if li == cur_logical {
                 new_cur_abs = start + cur_offset / new_cols;
@@ -643,13 +669,19 @@ impl Grid {
         self.cursor.col = (cur_offset % new_cols).min(new_cols - 1);
         self.cursor.wrap_pending = false;
         self.cols = new_cols;
+        let mut evicted = 0u64;
         while self.scrollback.len() > self.scrollback_limit {
             self.scrollback.pop_front();
+            evicted += 1;
         }
-        // prompt marks reference pre-reflow line indices; reset rather than mis-jump
         self.prompts.clear();
+        for mark in new_prompts.into_iter().filter_map(|mark| mark.checked_sub(evicted)) {
+            if self.prompts.last() != Some(&mark) {
+                self.prompts.push(mark);
+            }
+        }
         // image placements anchor on absolute line indices too; reset them with
-        // the prompts so they don't point at stale lines after the reindex
+        // the old physical rows so they don't point at stale lines after the reindex
         self.placements.clear();
         self.total_scrolled = self.scrollback.len() as u64;
         self.view_offset = 0;
@@ -1684,6 +1716,71 @@ mod tests {
         assert_eq!(collect_labels(&g), expect, "after narrow (each line wraps)");
         g.resize(4, 30);
         assert_eq!(collect_labels(&g), expect, "after re-widen");
+    }
+
+    #[test]
+    fn reflow_preserves_prompt_marks() {
+        let mut g = Grid::new(3, 10);
+        g.set_scrollback_limit(100);
+        for i in 0..5 {
+            g.mark_prompt();
+            for ch in format!("prompt-{i}").chars() {
+                g.put_char(ch);
+            }
+            g.carriage_return();
+            g.linefeed();
+        }
+        assert_eq!(g.prompts.len(), 5);
+
+        g.resize(3, 7);
+        assert_eq!(g.prompts.len(), 5);
+        assert!(g.prompts.iter().all(|&mark| mark >= g.prompt_base()));
+        for &mark in &g.prompts {
+            let row = (mark - g.prompt_base()) as usize;
+            let line = if row < g.scrollback.len() {
+                &g.scrollback[row]
+            } else {
+                &g.lines[row - g.scrollback.len()]
+            };
+            assert_eq!(line.iter().take(7).map(|cell| cell.c).collect::<String>(), "prompt-");
+        }
+
+        assert!(g.jump_prompt(false));
+        let first_jump = g.view_offset;
+        assert!(first_jump > 0);
+        assert!(g.jump_prompt(false));
+        assert!(g.view_offset > first_jump);
+
+        g.resize(3, 14);
+        assert_eq!(g.prompts.len(), 5);
+        assert!(g.jump_prompt(false));
+    }
+
+    #[test]
+    fn reflow_prunes_prompt_marks_evicted_by_limit() {
+        let mut g = Grid::new(3, 10);
+        g.set_scrollback_limit(4);
+        for i in 0..5 {
+            g.mark_prompt();
+            for ch in format!("prompt-{i}").chars() {
+                g.put_char(ch);
+            }
+            g.carriage_return();
+            g.linefeed();
+        }
+
+        g.resize(3, 7);
+        assert_eq!(g.prompts.len(), 3);
+        assert!(g.prompts.iter().all(|&mark| mark >= g.prompt_base()));
+        for &mark in &g.prompts {
+            let row = (mark - g.prompt_base()) as usize;
+            let line = if row < g.scrollback.len() {
+                &g.scrollback[row]
+            } else {
+                &g.lines[row - g.scrollback.len()]
+            };
+            assert_eq!(line.iter().take(7).map(|cell| cell.c).collect::<String>(), "prompt-");
+        }
     }
 
     #[test]
