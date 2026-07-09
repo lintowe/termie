@@ -52,6 +52,34 @@ pub fn apply_window_effects(hwnd_handle: isize) {
 #[cfg(not(windows))]
 pub fn apply_window_effects(_hwnd_handle: isize) {}
 
+/// opt the window into the Win11 system backdrop (Mica) so the desktop shows
+/// through the chrome. cosmetic only: on Win10 and early Win11 the attribute
+/// is unknown and the call fails, which is ignored — the window keeps its
+/// rounded corners and flat opacity
+#[cfg(windows)]
+pub fn apply_backdrop(hwnd_handle: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWINDOWATTRIBUTE};
+
+    // DWMWA_SYSTEMBACKDROP_TYPE (38) with DWMSBT_MAINWINDOW (2, mica); the
+    // attribute number is spelled raw because not every windows-rs release
+    // exports the enum
+    const DWMWA_SYSTEMBACKDROP_TYPE: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(38);
+    let backdrop: i32 = 2;
+    let hwnd = HWND(hwnd_handle as *mut core::ffi::c_void);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &backdrop as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn apply_backdrop(_hwnd_handle: isize) {}
+
 /// reflect OSC 9;4 progress on the window's taskbar button. state: 0 clear,
 /// 1 normal (green), 2 error (red), 3 indeterminate (pulse), 4 paused (yellow);
 /// pct is 0–100 and ignored for clear/indeterminate. failures are swallowed —

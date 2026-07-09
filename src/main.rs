@@ -1500,6 +1500,9 @@ struct Persisted {
     /// run plugins inside a windows appcontainer for privilege isolation
     /// (`plugin_sandbox=appcontainer`); off by default
     plugin_sandbox: bool,
+    /// win11 mica backdrop behind the window (`acrylic=true`, alias `mica`);
+    /// off by default, visible only when opacity is below 100
+    acrylic: bool,
     /// paint pty output inline instead of via the request_redraw hop, shaving up
     /// to a frame of input-to-photon latency and staying tear-free under Fifo
     /// vsync; on by default — set `inline_paint=false` to use the redraw hop
@@ -1537,6 +1540,7 @@ impl Default for Persisted {
             quake_key_raw: None,
             wsl_distro: None,
             plugin_sandbox: false,
+            acrylic: false,
             inline_paint: true,
             latency_hud: false,
             update_check: true,
@@ -1911,6 +1915,7 @@ fn parse_persisted(text: &str) -> Persisted {
                 }
             }
             "plugin_sandbox" => p.plugin_sandbox = v == "appcontainer" || v == "on" || v == "true",
+            "acrylic" | "mica" => p.acrylic = v == "true" || v == "on",
             "inline_paint" => p.inline_paint = v == "true" || v == "on",
             "latency_hud" => p.latency_hud = v == "true" || v == "on",
             "update_check" => p.update_check = v != "false" && v != "off",
@@ -2227,6 +2232,9 @@ impl App {
         if let Ok(handle) = window.window_handle()
             && let RawWindowHandle::Win32(h) = handle.as_raw() {
                 win::apply_window_effects(h.hwnd.get());
+                if self.persisted.acrylic {
+                    win::apply_backdrop(h.hwnd.get());
+                }
             }
 
         // overlap the slow first pwsh spawn with the ~300ms gpu init below: kick it
@@ -4425,6 +4433,9 @@ impl App {
         }
         if self.persisted.plugin_sandbox {
             let _ = writeln!(s, "plugin_sandbox=appcontainer");
+        }
+        if self.persisted.acrylic {
+            let _ = writeln!(s, "acrylic=true");
         }
         if self.persisted.term_program != "termie" {
             // default is termie; only persist an override so the file stays short
@@ -6915,6 +6926,12 @@ mod tests {
         assert_eq!(parse_persisted("wsl_distro=Ubuntu").wsl_distro.as_deref(), Some("Ubuntu"));
         // an empty value leaves the default (no distro pinned)
         assert_eq!(parse_persisted("wsl_distro=").wsl_distro, None);
+
+        // the win11 backdrop accepts both spellings, off by default
+        assert!(parse_persisted("acrylic=true").acrylic);
+        assert!(parse_persisted("mica=on").acrylic);
+        assert!(!parse_persisted("acrylic=false").acrylic);
+        assert!(!Persisted::default().acrylic);
     }
 
     #[test]
