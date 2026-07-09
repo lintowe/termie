@@ -14,6 +14,12 @@ static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 /// keep at most this many decoded images, evicting the oldest
 const MAX_IMAGES: usize = 32;
+/// cap on the summed decoded bytes across the store: the per-image and count
+/// caps alone still allowed 32 × 64 MB to be pinned by one hostile stream
+const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+/// cap on concurrent chunked (m=1) reassembly buffers; each may grow to
+/// MAX_IMAGE_BYTES, so unbounded ids would be an allocation amplifier
+const MAX_PENDING: usize = 4;
 
 pub struct Image {
     /// global atlas-cache key (unique per decoded image)
@@ -67,6 +73,14 @@ impl ImageStore {
         } else {
             id
         };
+        // refuse to open more reassembly buffers than the cap; continuing an
+        // existing transfer is always allowed
+        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING {
+            if anonymous {
+                self.anon = None;
+            }
+            return None;
+        }
         let p = self.pending.entry(id).or_insert(Pending {
             format: 32,
             width: 0,
@@ -123,10 +137,16 @@ impl ImageStore {
         if self.images.insert(id, img).is_none() {
             self.order.push(id);
         }
-        while self.order.len() > MAX_IMAGES {
+        while self.order.len() > MAX_IMAGES
+            || (self.order.len() > 1 && self.total_bytes() > MAX_TOTAL_BYTES)
+        {
             let old = self.order.remove(0);
             self.images.remove(&old);
         }
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.images.values().map(|i| i.rgba.len()).sum()
     }
 
     pub fn get(&self, id: u32) -> Option<&Image> {
@@ -326,5 +346,39 @@ mod tests {
         }
         assert!(s.get(1).is_none(), "the oldest image is evicted");
         assert!(s.get(n).is_some(), "the newest image is kept");
+    }
+
+    // summed decoded bytes stay under the total budget even when every image
+    // is individually legal — the count cap alone allowed 32 × 64 MB
+    #[test]
+    fn total_byte_budget_evicts_before_count_cap() {
+        let mut s = ImageStore::default();
+        // 5 images × 64 MB would be 320 MB; the 256 MB budget holds 4
+        let px = 4096u32; // 4096×4096 RGBA = 64 MB
+        let big = vec![0u8; (px * px * 4) as usize];
+        for i in 1..=5u32 {
+            s.transmit(i, 32, px, px, false, &big);
+        }
+        assert!(s.get(1).is_none(), "oldest evicted to stay inside the byte budget");
+        assert!(s.get(5).is_some());
+        assert!(s.total_bytes() <= MAX_TOTAL_BYTES);
+    }
+
+    // opening reassembly buffers beyond the cap is refused; finishing or
+    // continuing existing transfers still works
+    #[test]
+    fn pending_reassembly_buffers_are_capped() {
+        let mut s = ImageStore::default();
+        for i in 1..=MAX_PENDING as u32 {
+            assert!(s.transmit(i, 32, 1, 1, true, &[1, 2]).is_none());
+        }
+        // a fifth concurrent transfer is dropped outright
+        let over = MAX_PENDING as u32 + 1;
+        assert!(s.transmit(over, 32, 1, 1, true, &[1, 2]).is_none());
+        assert!(s.transmit(over, 0, 0, 0, false, &[3, 4]).is_none(), "rejected id never completes");
+        // the in-cap transfers all complete
+        for i in 1..=MAX_PENDING as u32 {
+            assert_eq!(s.transmit(i, 0, 0, 0, false, &[3, 4]), Some(i));
+        }
     }
 }
