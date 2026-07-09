@@ -168,6 +168,7 @@ pub fn maybe_run() -> bool {
             sel: None,
             flash: 0.0,
             link: None,
+            theme: None,
         })
         .collect();
 

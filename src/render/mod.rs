@@ -127,6 +127,10 @@ pub struct PaneView<'a> {
     pub flash: f32,
     /// hovered url to underline: (viewport row, col_start, col_end exclusive)
     pub link: Option<(usize, usize, usize)>,
+    /// per-profile theme override (`theme.<shell>=` in config): this pane
+    /// paints with that theme's palette while the window chrome keeps the
+    /// global theme; None follows the window
+    pub theme: Option<ThemeId>,
 }
 
 /// command-palette display state
@@ -516,6 +520,9 @@ pub struct Renderer {
 
     atlas: GlyphAtlas,
     palette: Palette,
+    /// palettes for panes whose profile overrides the window theme, built on
+    /// demand in build() and dropped when the color overrides change
+    pane_palettes: Vec<(ThemeId, Palette)>,
 
     scale: f32,
     pad: f32,
@@ -1199,6 +1206,7 @@ impl Renderer {
             pane_scratch: Vec::new(),
             atlas,
             palette: Palette::from_theme(ThemeId::Instrument),
+            pane_palettes: Vec::new(),
             theme: ThemeId::Instrument,
             color_overrides: Vec::new(),
             broadcast: false,
@@ -1541,6 +1549,8 @@ impl Renderer {
     pub fn set_color_overrides(&mut self, overrides: Vec<(String, Rgb)>) {
         self.color_overrides = overrides;
         self.palette = self.themed_palette();
+        // per-profile palettes bake the overrides in too — rebuild on demand
+        self.pane_palettes.clear();
         // overrides can arrive live (conf watcher), not just at boot: drop the
         // cached bg wash too — its (size, theme) key can't see a bg override
         self.atlas.dirty = true;
@@ -2946,13 +2956,40 @@ impl Renderer {
         }));
 
         // ---- terminal content (one grid per pane) ----
+        // resolve per-profile palettes (theme override + user color overrides)
+        // before the immutable borrows below; cached across frames and dropped
+        // when the overrides change
+        for pv in panes {
+            if let Some(id) = pv.theme
+                && id != self.theme
+                && !self.pane_palettes.iter().any(|(t, _)| *t == id)
+            {
+                let mut p = Palette::from_theme(id);
+                p.apply_overrides(&self.color_overrides);
+                self.pane_palettes.push((id, p));
+            }
+        }
         let cursor_style = self.cursor_style;
         let bold_as_bright = self.bold_as_bright;
         {
             let palette = &self.palette;
+            let pane_palettes = &self.pane_palettes;
+            let theme = self.theme;
             let atlas = &mut self.atlas;
             let find_view = self.find_view.as_ref();
             for (pv, info) in panes.iter().zip(&pane_info) {
+                let themed = pv.theme.filter(|&id| id != theme);
+                let pal = themed
+                    .and_then(|id| pane_palettes.iter().find(|(t, _)| *t == id))
+                    .map(|(_, p)| p)
+                    .unwrap_or(palette);
+                if themed.is_some() {
+                    // an overridden pane owns its background: draw_grid skips
+                    // default-bg cells, which would otherwise show the window
+                    // theme's wash behind this pane's content
+                    let (x, y, pw, ph) = pv.rect;
+                    Self::push_rect(&mut out, x, y, pw, ph, pal.bg, 1.0);
+                }
                 let fmatches: &[(usize, usize, usize, bool)] = if pv.focused {
                     find_view.map(|f| f.matches.as_slice()).unwrap_or(&[])
                 } else {
@@ -2960,7 +2997,7 @@ impl Renderer {
                 };
                 Self::draw_grid(
                     atlas,
-                    palette,
+                    pal,
                     &mut out,
                     pv.term,
                     info.0,

@@ -67,6 +67,11 @@ Any other shell works as a custom profile — add `profile.<name>=<command line>
 
 Each profile shows up on the palette as `new tab: <name>`, can be bound in `keybindings.conf` by that same label, restores with the session, and duplicates like the built-in shells. A profile name also works as the `shell` default.
 
+A shell or profile can carry its own theme — `theme.<name>=<theme>` paints that shell's panes with a different palette while the window chrome keeps the global theme, so a WSL split reads apart from your PowerShell pane at a glance:
+
+    theme.wsl=gruvbox
+    theme.git-bash=nord
+
 ## configuration
 
 Drop files in `%APPDATA%\termie\`:

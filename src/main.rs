@@ -1573,6 +1573,10 @@ struct Persisted {
     /// (so save_config re-emits the user's exact lines) and parsed as argv
     profiles_raw: Vec<(String, String)>,
     profiles: Vec<(String, Vec<String>)>,
+    /// per-profile themes (`theme.<shell-or-profile>=<theme name>`): panes
+    /// spawned as that shell/profile paint with that theme's palette while
+    /// the window chrome keeps the global theme
+    shell_themes: Vec<(String, color::ThemeId)>,
     /// paint pty output inline instead of via the request_redraw hop, shaving up
     /// to a frame of input-to-photon latency and staying tear-free under Fifo
     /// vsync; on by default — set `inline_paint=false` to use the redraw hop
@@ -1613,6 +1617,7 @@ impl Default for Persisted {
             acrylic: false,
             profiles_raw: Vec::new(),
             profiles: Vec::new(),
+            shell_themes: Vec::new(),
             inline_paint: true,
             latency_hud: false,
             update_check: true,
@@ -2082,7 +2087,13 @@ fn parse_persisted(text: &str) -> Persisted {
                 }
             }
             other => {
-                if let Some(name) = other.strip_prefix("profile.") {
+                if let Some(name) = other.strip_prefix("theme.") {
+                    if !name.is_empty() && !v.is_empty() {
+                        p.shell_themes.push((name.to_string(), color::ThemeId::from_name(v)));
+                    } else {
+                        log::warn!("config: per-profile theme line `{other}` needs a name and a theme");
+                    }
+                } else if let Some(name) = other.strip_prefix("profile.") {
                     let argv = split_cmdline(v);
                     if !name.is_empty() && !argv.is_empty() {
                         p.profiles_raw.push((name.to_string(), v.to_string()));
@@ -3473,6 +3484,7 @@ impl App {
             pw,
             selection,
             link,
+            persisted,
             ..
         } = self;
         let PaneWindow {
@@ -3509,6 +3521,11 @@ impl App {
                                         })
                                         .unwrap_or(0.0),
                                     link: if *id == tab.focused { *link } else { None },
+                                    theme: persisted
+                                        .shell_themes
+                                        .iter()
+                                        .find(|(n, _)| n == p.shell.label())
+                                        .map(|&(_, id)| id),
                                 })
                             })
                             .collect()
@@ -4756,6 +4773,11 @@ impl App {
         for (name, line) in &self.persisted.profiles_raw {
             // config-file-only like quake_key: re-emit exactly as written
             let _ = writeln!(s, "profile.{name}={line}");
+        }
+        for (name, id) in &self.persisted.shell_themes {
+            // config-file-only like profiles: panes of this shell/profile
+            // render with their own theme
+            let _ = writeln!(s, "theme.{name}={}", id.name());
         }
         if self.persisted.term_program != "termie" {
             // default is termie; only persist an override so the file stays short
@@ -7452,6 +7474,20 @@ mod tests {
         assert_eq!(p.profiles[1], ("nu".to_string(), vec!["nu.exe".to_string()]));
         // the raw lines round-trip for save_config
         assert_eq!(p.profiles_raw[1], ("nu".to_string(), "nu.exe".to_string()));
+    }
+
+    #[test]
+    fn config_parses_per_profile_themes() {
+        let p = parse_persisted("theme=paper\ntheme.cmd=nord\ntheme.git-bash=gruvbox\ntheme.=broken\ntheme.wsl=\n");
+        // the global theme key is untouched by the per-profile lines
+        assert_eq!(p.theme, color::ThemeId::Paper);
+        assert_eq!(
+            p.shell_themes,
+            [
+                ("cmd".to_string(), color::ThemeId::Nord),
+                ("git-bash".to_string(), color::ThemeId::Gruvbox)
+            ]
+        );
     }
 
     #[test]
