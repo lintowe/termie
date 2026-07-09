@@ -642,6 +642,35 @@ fn restore_viewer_tab(
     Some(idx.min(tabs_after - 1))
 }
 
+/// focus identity (active_tab, pane_id) after tab `closed` is removed.
+/// `pane_ids` is the focused pane id of each tab *before* the close, indexed
+/// by tab slot. mirrors do_close_tab's active_tab arithmetic so unit tests can
+/// drive the real find-follow decision without a window
+fn focus_identity_after_tab_close(
+    pane_ids: &[usize],
+    active: usize,
+    closed: usize,
+) -> Option<(usize, usize)> {
+    if pane_ids.is_empty() || closed >= pane_ids.len() || active >= pane_ids.len() {
+        return None;
+    }
+    let remaining: Vec<usize> = pane_ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != closed)
+        .map(|(_, p)| *p)
+        .collect();
+    if remaining.is_empty() {
+        return None;
+    }
+    let mut new_active = active;
+    if new_active > closed {
+        new_active -= 1;
+    }
+    new_active = new_active.min(remaining.len() - 1);
+    Some((new_active, remaining[new_active]))
+}
+
 /// the built-in keybindings, seeded before any user overrides. matching at the
 /// gate is exact-modifier (Ctrl+Alt+X is a different chord than Ctrl+X), so the
 /// shift-produced symbols '+' and '_' are seeded with Ctrl+Shift, the modifiers
@@ -3959,6 +3988,13 @@ impl App {
         if idx >= self.pw.tabs.len() {
             return;
         }
+        // capture *before* remove: after remove the active slot already points
+        // at a surviving tab (or is out of range), so a post-remove capture
+        // compares the new identity to itself and skips find recompute — leaving
+        // matches from the killed pane live
+        let before = self.focus_identity();
+        let pane_ids: Vec<usize> = self.pw.tabs.iter().map(|t| t.focused).collect();
+        let active = self.pw.active_tab;
         let mut tab = self.pw.tabs.remove(idx);
         if let Some(root) = tab.root.as_mut() {
             kill_all(root);
@@ -3972,11 +4008,12 @@ impl App {
             }
             return;
         }
-        let before = self.focus_identity();
-        if self.pw.active_tab > idx {
-            self.pw.active_tab -= 1;
+        // same arithmetic the unit tests drive: active index after the slot dies
+        if let Some((new_active, _)) = focus_identity_after_tab_close(&pane_ids, active, idx) {
+            self.pw.active_tab = new_active;
+        } else {
+            self.pw.active_tab = self.pw.active_tab.min(self.pw.tabs.len() - 1);
         }
-        self.pw.active_tab = self.pw.active_tab.min(self.pw.tabs.len() - 1);
         self.relayout_all();
         self.sync_tabs();
         self.after_focus_context_change(before);
@@ -6995,6 +7032,45 @@ mod tests {
         assert!(!find_must_follow_focus(true, Some((0, 1)), Some((0, 2)), true));
         // after hold clears, a real pane change still recomputes
         assert!(find_must_follow_focus(true, Some((0, 1)), Some((0, 2)), false));
+    }
+
+    #[test]
+    fn close_tab_capture_order_drives_find_follow() {
+        // pane ids per tab slot before close — do_close_tab must capture
+        // identity *before* remove; these cases assert the pure after-close
+        // identity against a pre-remove before, through find_must_follow_focus
+        let panes = [10usize, 20, 30];
+
+        // close active middle tab: before (1,20) → after lands on old tab 2's pane
+        let before = Some((1, panes[1]));
+        let after = focus_identity_after_tab_close(&panes, 1, 1);
+        assert_eq!(after, Some((1, 30)));
+        assert!(find_must_follow_focus(true, before, after, false));
+
+        // close active first tab: before (0,10) → after (0,20)
+        let before = Some((0, panes[0]));
+        let after = focus_identity_after_tab_close(&panes, 0, 0);
+        assert_eq!(after, Some((0, 20)));
+        assert!(find_must_follow_focus(true, before, after, false));
+
+        // close active last tab: before (2,30) → after (1,20)
+        let before = Some((2, panes[2]));
+        let after = focus_identity_after_tab_close(&panes, 2, 2);
+        assert_eq!(after, Some((1, 20)));
+        assert!(find_must_follow_focus(true, before, after, false));
+
+        // close a tab left of the viewer: same pane id, only tab index shifts
+        // — find must NOT recompute (cursor stays put on the live grid)
+        let before = Some((2, panes[2]));
+        let after = focus_identity_after_tab_close(&panes, 2, 0);
+        assert_eq!(after, Some((1, 30)));
+        assert!(!find_must_follow_focus(true, before, after, false));
+
+        // regression: if before were captured *after* remove while still
+        // pointing at the new occupant of the active slot, middle-active close
+        // would compare (1,30) to (1,30) and skip recompute — the bug 09a609e
+        // introduced. prove that same-after path does not force follow
+        assert!(!find_must_follow_focus(true, Some((1, 30)), Some((1, 30)), false));
     }
 
     #[test]
