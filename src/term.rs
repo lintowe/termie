@@ -614,11 +614,55 @@ enum Dcs {
     Sixel(Box<crate::sixel::SixelDecoder>),
     /// DECRQSS status request (DCS $ q); the payload names the setting
     Rqss(Vec<u8>),
+    /// XTGETTCAP (DCS + q); the payload is ';'-joined hex-encoded cap names
+    Tcap(Vec<u8>),
 }
 
 /// a DECRQSS request is at most two bytes; anything longer is garbage and
 /// only needs to stay bounded until the invalid reply
 const RQSS_CAP: usize = 8;
+/// XTGETTCAP requests are a handful of short names; bound a hostile stream
+const TCAP_CAP: usize = 512;
+
+/// terminfo capabilities XTGETTCAP answers — the set nvim and friends probe
+/// to detect truecolor and styled underlines when terminfo can't be trusted
+/// (e.g. over ssh). booleans report as a bare name, per xterm/kitty
+fn tcap_value(name: &[u8]) -> Option<&'static [u8]> {
+    match name {
+        b"TN" | b"name" => Some(b"xterm-256color"),
+        b"Co" | b"colors" => Some(b"256"),
+        // boolean truecolor flags (tmux's Tc, terminfo's RGB)
+        b"Tc" | b"RGB" | b"Su" => Some(b""),
+        b"smulx" => Some(b"\x1b[4:%p1%dm"),
+        b"setrgbf" => Some(b"\x1b[38:2:%p1%d:%p2%d:%p3%dm"),
+        b"setrgbb" => Some(b"\x1b[48:2:%p1%d:%p2%d:%p3%dm"),
+        _ => None,
+    }
+}
+
+fn hex_decode(s: &[u8]) -> Option<Vec<u8>> {
+    fn nib(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    s.chunks_exact(2).map(|p| Some(nib(p[0])? << 4 | nib(p[1])?)).collect()
+}
+
+fn hex_encode(s: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
 
 /// the DEC special-graphics set (ESC ( 0): maps ASCII into the box-drawing /
 /// line glyphs legacy curses apps draw with via SO/SI
@@ -1052,6 +1096,8 @@ impl Perform for Terminal {
             ('q', []) => Some(Dcs::Sixel(Box::default())),
             // DCS $ q — DECRQSS, the payload names the queried setting
             ('q', [b'$']) => Some(Dcs::Rqss(Vec::new())),
+            // DCS + q — XTGETTCAP terminfo capability query
+            ('q', [b'+']) => Some(Dcs::Tcap(Vec::new())),
             _ => None,
         };
     }
@@ -1061,6 +1107,11 @@ impl Perform for Terminal {
             Some(Dcs::Sixel(dec)) => dec.put(byte),
             Some(Dcs::Rqss(req)) => {
                 if req.len() < RQSS_CAP {
+                    req.push(byte);
+                }
+            }
+            Some(Dcs::Tcap(req)) => {
+                if req.len() < TCAP_CAP {
                     req.push(byte);
                 }
             }
@@ -1105,6 +1156,26 @@ impl Perform for Terminal {
                 let reply = match body {
                     Some(b) => format!("\x1bP1$r{b}\x1b\\"),
                     None => "\x1bP0$r\x1b\\".to_string(),
+                };
+                self.responses.extend_from_slice(reply.as_bytes());
+            }
+            Some(Dcs::Tcap(req)) => {
+                // hex names in, hex name=value pairs out; booleans echo the
+                // bare name. reply 1 when anything resolved, 0 otherwise
+                let mut parts: Vec<String> = Vec::new();
+                for name_hex in req.split(|&b| b == b';') {
+                    let Some(name) = hex_decode(name_hex) else { continue };
+                    let Some(val) = tcap_value(&name) else { continue };
+                    if val.is_empty() {
+                        parts.push(hex_encode(&name));
+                    } else {
+                        parts.push(format!("{}={}", hex_encode(&name), hex_encode(val)));
+                    }
+                }
+                let reply = if parts.is_empty() {
+                    "\x1bP0+r\x1b\\".to_string()
+                } else {
+                    format!("\x1bP1+r{}\x1b\\", parts.join(";"))
                 };
                 self.responses.extend_from_slice(reply.as_bytes());
             }
@@ -1728,6 +1799,27 @@ mod tests {
         let mut t = Terminal::new(4, 10);
         feed(&mut t, b"\x1bP+q544e\x1b\\\x1bP$qm\x1b\\");
         assert!(t.grid.placements().is_empty());
+    }
+
+    #[test]
+    fn xtgettcap_answers_the_caps_nvim_probes() {
+        let mut t = Terminal::new(4, 20);
+        // "RGB" (hex 524742) is a boolean: the reply echoes the bare name
+        feed(&mut t, b"\x1bP+q524742\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1+r524742\x1b\\");
+        t.responses.clear();
+        // "smulx" resolves to the styled-underline template; unknown "foo"
+        // is dropped from the same multi-cap request
+        feed(&mut t, b"\x1bP+q736d756c78;666f6f\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1+r736d756c78=1b5b343a25703125646d\x1b\\");
+        t.responses.clear();
+        // nothing known -> the standard failure reply, never silence
+        feed(&mut t, b"\x1bP+q666f6f\x1b\\");
+        assert_eq!(t.responses, b"\x1bP0+r\x1b\\");
+        t.responses.clear();
+        // odd-length hex is malformed, not a panic
+        feed(&mut t, b"\x1bP+q524\x1b\\");
+        assert_eq!(t.responses, b"\x1bP0+r\x1b\\");
     }
 
     #[test]

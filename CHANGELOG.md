@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Terminal fidelity
+- **XTGETTCAP capability queries** (`DCS + q`): answers the terminfo probes nvim and similar send when they can't trust `$TERM` (usually over ssh) — truecolor (`Tc`/`RGB`, `setrgbf`/`setrgbb`), styled underlines (`smulx`/`Su`), and color count — so those features light up without manual overrides. Unknown or malformed names get the standard failure reply instead of a hang.
 - **DECRQSS status requests** (`DCS $ q`): programs can now read back the SGR pen (the probe tmux and the truecolor-detection scripts use — set a color, query it, look for the echo), the scroll region, the cursor style, DECSCL, and DECSCA, instead of getting silence; anything else gets the standard invalid reply rather than a hang.
 - **Sixel graphics.** The other inline-image protocol — what `img2sixel`, `chafa --format sixels`, `lsix`, and gnuplot's `sixelgd` terminal emit — now decodes and draws through the same GPU image atlas as kitty graphics. The full drawing model is in: color registers with the VT340 default palette, RGB and DEC's blue-first HLS colorspaces, repeats, raster-attribute padding, and transparent holes. Images scroll inline with the text (cursor left on the line below, per DEC), DECSDM (mode 80) pins them to the top-left instead, and a hostile stream can't allocate past the same 64 MB budget the kitty path has. DA1 now answers `CSI ?62;4;22c` so tools discover sixel support the standard way, and XTSMGRAPHICS reports the color-register count and max geometry they size output from.
 
