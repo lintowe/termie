@@ -20,6 +20,8 @@ Real terminal emulation: a [vte](https://github.com/alacritty/vte)-based parser,
 
 Inline images via the kitty graphics protocol (raw RGB / RGBA / PNG) and sixel — `img2sixel`, `chafa`, `lsix`, and anything else that probes DA1 finds both — plus full-color emoji, all packed into a dedicated RGBA atlas beside the glyph cache. IME composition, a screen-reader path via AccessKit, and session restore (tab + split layout) with crash recovery.
 
+On Windows 11 termie can be the **default terminal**: run "default terminal" from the palette once, and console apps launched from the run box, the start menu, or a double-clicked script open in a termie window instead of the legacy console host. The same palette action turns it back off (your previous choice is restored), and so does uninstalling.
+
 A command palette (`Ctrl+P`) for fuzzy access to every action. Seven built-in themes — three house schemes plus Catppuccin Mocha, Gruvbox, Tokyo Night, and Nord — a bundled Maple Mono Nerd Font, adjustable font size / padding / cursor / opacity, and per-user `colors.conf` and `keybindings.conf`. An optional Quake-style drop-down (`quake_key`).
 
 A plugin system: plugins run as separate processes over a small JSON protocol, render widgets in a side dock (text or drawn graphics), talk over an in-process bus, and can be confined to a Windows AppContainer. An in-app marketplace browses and installs them.

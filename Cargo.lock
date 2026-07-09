@@ -2485,6 +2485,7 @@ dependencies = [
  "vte",
  "wgpu",
  "windows",
+ "windows-core",
  "winit",
 ]
 

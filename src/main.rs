@@ -4,6 +4,8 @@
 mod a11y;
 mod apc;
 mod color;
+#[cfg(windows)]
+mod defterm;
 mod fxhash;
 mod image;
 mod grid;
@@ -69,6 +71,9 @@ enum UserEvent {
     UpdateDownloaded(Result<std::path::PathBuf, String>),
     /// an accesskit adapter event (screen-reader tree request / action)
     Accessibility(accesskit_winit::Event),
+    /// a default-terminal console session handed to this running instance
+    #[cfg(windows)]
+    Handoff(defterm::Handoff),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -177,6 +182,8 @@ enum PaletteAction {
     PaneMode,
     /// keyboard selection: move a cursor through screen + scrollback and copy
     MarkMode,
+    /// toggle termie as the windows default terminal (console-app handoff)
+    DefaultTerminal,
     Quake,
     Theme,
     Plugins,
@@ -246,6 +253,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("clear scrollback", PaletteAction::ClearScrollback),
     ("export scrollback", PaletteAction::ExportScrollback),
     ("install update", PaletteAction::InstallUpdate),
+    ("default terminal", PaletteAction::DefaultTerminal),
     ("broadcast input", PaletteAction::ToggleBroadcast),
     ("close pane", PaletteAction::CloseFocusedPane),
     ("font increase", PaletteAction::FontInc),
@@ -2093,6 +2101,9 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     /// this process's parsed command line (always-new-window: one per process)
     cli: CliArgs,
+    /// an inbound default-terminal session waiting to become tab one
+    #[cfg(windows)]
+    handoff: Option<defterm::Handoff>,
     /// the foreground window at process start, captured before we create ours.
     /// when the explorer address bar launches a bare `termie` it passes no working
     /// dir (we inherit explorer's home dir), so this is how we recover the folder
@@ -2247,6 +2258,8 @@ impl App {
         App {
             proxy,
             cli: parse_args(std::env::args().skip(1)),
+            #[cfg(windows)]
+            handoff: None,
             // captured now, before any window of ours exists, so it still names the
             // explorer window we were launched from
             launch_fg: win::foreground_window(),
@@ -2437,7 +2450,30 @@ impl App {
         let first_cwd = if self.cli.is_bare() { launch_cwd(self.launch_fg) } else { self.cli.cwd.clone() };
         let command = self.cli.command.clone();
         let first_shell = self.cli.shell.as_deref().map(ShellKind::from_label);
-        if command.is_some() || first_cwd.is_some() || first_shell.is_some() {
+        // an inbound default-terminal session becomes tab one — ephemeral like
+        // an explicit cli launch, so it never overwrites the saved session
+        #[cfg(windows)]
+        let adopted = if let Some(h) = self.handoff.take() {
+            self.session_ephemeral = true;
+            let (cols, rows) = self.content_pane_size();
+            let title = h.title.clone();
+            let pane = self.spawn_handoff_pane(h, cols, rows);
+            self.install_first_tab(pane);
+            if !title.is_empty()
+                && let Some(t) = self.pw.tabs.first_mut()
+            {
+                t.title = Some(title);
+                self.sync_tabs();
+            }
+            true
+        } else {
+            false
+        };
+        #[cfg(not(windows))]
+        let adopted = false;
+        if adopted {
+            // tab one is the handed-off console session
+        } else if command.is_some() || first_cwd.is_some() || first_shell.is_some() {
             self.session_ephemeral = true;
             let (cols, rows) = self.content_pane_size();
             match self.spawn_pane(cols, rows, first_cwd, first_shell, command.as_deref()) {
@@ -2469,10 +2505,21 @@ impl App {
         timing("window shown");
         self.shown = true;
         window.request_redraw();
-        // populate the taskbar jump list off-thread; COM shell calls have no
-        // business on the startup render path
+        // populate the taskbar jump list and keep the default-terminal COM
+        // registration pointed at this exe, both off-thread; COM shell calls
+        // have no business on the startup render path
         let entries = jumplist_entries();
-        std::thread::spawn(move || win::update_jumplist(&entries));
+        std::thread::spawn(move || {
+            win::refresh_defterm_server_path();
+            win::update_jumplist(&entries);
+        });
+        // while this instance runs, serve default-terminal handoffs directly:
+        // a console app launched outside a terminal opens as a tab here
+        #[cfg(windows)]
+        if win::defterm_registered() {
+            let proxy = self.proxy.clone();
+            defterm::serve_running(move |h| proxy.send_event(UserEvent::Handoff(h)).is_ok());
+        }
         Ok(())
     }
 
@@ -2518,6 +2565,34 @@ impl App {
         )?;
         self.start_reader(&mut pane);
         Ok(pane)
+    }
+
+    /// adopt a default-terminal handoff session as a pane: the ConPTY already
+    /// runs inside the console host, so no shell is spawned — the pipes are
+    /// wrapped and the session resized to the real pane geometry
+    #[cfg(windows)]
+    fn spawn_handoff_pane(&mut self, h: defterm::Handoff, cols: usize, rows: usize) -> Pane {
+        let id = self.next_id;
+        self.next_id += 1;
+        let pty = Pty::from_handoff(h.reader, h.writer, h.signal, h.reference, h.server, h.client);
+        let (cw, ch) = self.pw.renderer.as_ref().map(|r| r.cell_px()).unwrap_or((0, 0));
+        let mut term = Terminal::new(rows, cols);
+        term.grid.set_scrollback_limit(self.config.scrollback);
+        term.set_cell_px(cw, ch);
+        let mut pane = Pane {
+            id,
+            term,
+            parser: Parser::new(),
+            pty,
+            shell: self.config.shell,
+            // the client is already running; resizing is safe from the start
+            ready: true,
+            flash: None,
+            apc: apc::ApcScanner::default(),
+        };
+        pane.resize(rows, cols);
+        self.start_reader(&mut pane);
+        pane
     }
 
     /// install a freshly-built pane (its reader already started) as the sole
@@ -3623,6 +3698,37 @@ impl App {
         self.new_tab_cwd(None, None);
     }
 
+    /// a default-terminal session arriving while termie runs opens as a new
+    /// tab in this window, the way windows terminal does it
+    #[cfg(windows)]
+    fn handoff_tab(&mut self, h: defterm::Handoff) {
+        log::info!("defterm: opening handoff tab (title={:?})", h.title);
+        if self.pw.renderer.is_none() {
+            return;
+        }
+        let before = self.focus_identity();
+        let (cols, rows) = self.content_pane_size();
+        let title = h.title.clone();
+        let pane = self.spawn_handoff_pane(h, cols, rows);
+        let fid = pane.id;
+        self.pw.tabs.push(Tab {
+            focused: fid,
+            root: Some(Node::Leaf(pane)),
+            zoom: None,
+            title: (!title.is_empty()).then_some(title),
+            attention: false,
+        });
+        self.pw.active_tab = self.pw.tabs.len() - 1;
+        self.relayout_all();
+        self.sync_tabs();
+        self.after_focus_context_change(before);
+        // the user just launched a console app; bring its window forward
+        if let Some(w) = &self.pw.window {
+            w.focus_window();
+        }
+        self.redraw();
+    }
+
     /// open a new tab; a Some(cwd) or Some(shell) spawns a fresh shell, while
     /// None/None grabs a warm pool shell for an instant default-shell home tab
     fn new_tab_cwd(&mut self, cwd: Option<String>, shell: Option<ShellKind>) {
@@ -3877,6 +3983,26 @@ impl App {
             PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
             PaletteAction::MarkMode => self.set_mark_mode(true),
+            PaletteAction::DefaultTerminal => {
+                let msg = if win::defterm_registered() {
+                    if win::unregister_defterm() {
+                        "termie is no longer the default terminal"
+                    } else {
+                        "could not update the default terminal"
+                    }
+                } else if win::register_defterm() {
+                    // start serving immediately so it works without a relaunch
+                    let proxy = self.proxy.clone();
+                    defterm::serve_running(move |h| {
+                        proxy.send_event(UserEvent::Handoff(h)).is_ok()
+                    });
+                    "termie is now the default terminal — console apps open here"
+                } else {
+                    "could not update the default terminal"
+                };
+                self.show_notice(msg);
+                self.redraw();
+            }
             PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {
                 if let Some(r) = self.pw.renderer.as_mut() {
@@ -6562,6 +6688,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ToggleQuake => self.toggle_quake(),
+            #[cfg(windows)]
+            UserEvent::Handoff(h) => self.handoff_tab(h),
             UserEvent::UpdateCheckDone(found, manual) => {
                 match found {
                     Some(u) => {
@@ -7099,10 +7227,37 @@ fn main() -> Result<()> {
     install_file_log();
     // stop child shells (esp. pool shells racing exit) from popping OS error dialogs
     win::suppress_child_error_dialogs();
+    // a COM `-Embedding` launch is the OS handing over a console session
+    // (default-terminal handoff); receive it before building any UI, and exit
+    // quietly if the activation never delivers one
+    #[cfg(windows)]
+    let is_embedding = std::env::args()
+        .skip(1)
+        .any(|a| a.eq_ignore_ascii_case("-embedding") || a.eq_ignore_ascii_case("/embedding"));
+    #[cfg(windows)]
+    let handoff = if is_embedding {
+        match defterm::serve_embedding() {
+            Some(h) => Some(h),
+            None => return Ok(()),
+        }
+    } else {
+        None
+    };
+    // when serving as the default terminal, lock in permissive COM security
+    // before winit initializes OLE — after that it's too late and OpenConsole
+    // can't reach our handoff class object
+    #[cfg(windows)]
+    if !is_embedding && win::defterm_registered() {
+        defterm::init_process_security();
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
+    #[cfg(windows)]
+    {
+        app.handoff = handoff;
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }

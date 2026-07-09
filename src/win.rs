@@ -265,6 +265,196 @@ pub fn open_url(url: &str) {
 #[cfg(not(windows))]
 pub fn open_url(_url: &str) {}
 
+/// small registry helpers for the default-terminal registration: read and
+/// write REG_SZ values under HKCU. every step is fallible and never panics
+#[cfg(windows)]
+mod reg {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    pub fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// read an HKCU REG_SZ value; None when the key/value is missing
+    pub fn read_sz(path: &str, value: &str) -> Option<String> {
+        let path = wide(path);
+        let value = wide(value);
+        unsafe {
+            let mut key = HKEY::default();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), Some(0), KEY_READ, &mut key)
+                != ERROR_SUCCESS
+            {
+                return None;
+            }
+            let mut buf = [0u16; 512];
+            let mut bytes = (buf.len() * 2) as u32;
+            let mut ty = REG_SZ;
+            let q = RegQueryValueExW(
+                key,
+                PCWSTR(value.as_ptr()),
+                None,
+                Some(&mut ty),
+                Some(buf.as_mut_ptr() as *mut u8),
+                Some(&mut bytes),
+            );
+            let _ = RegCloseKey(key);
+            if q != ERROR_SUCCESS || ty != REG_SZ {
+                return None;
+            }
+            let chars = (bytes as usize / 2).min(buf.len());
+            Some(String::from_utf16_lossy(&buf[..chars]).trim_end_matches('\0').to_string())
+        }
+    }
+
+    /// create-or-open an HKCU key and set a REG_SZ value ("" = default value)
+    pub fn write_sz(path: &str, value: &str, data: &str) -> bool {
+        let path = wide(path);
+        let value = wide(value);
+        let data = wide(data);
+        unsafe {
+            let mut key = HKEY::default();
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(path.as_ptr()),
+                None,
+                PWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_WRITE,
+                None,
+                &mut key,
+                None,
+            ) != ERROR_SUCCESS
+            {
+                return false;
+            }
+            let bytes: &[u8] = std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2);
+            let name = if value.len() <= 1 { PCWSTR::null() } else { PCWSTR(value.as_ptr()) };
+            let r = RegSetValueExW(key, name, None, REG_SZ, Some(bytes));
+            let _ = RegCloseKey(key);
+            r == ERROR_SUCCESS
+        }
+    }
+
+    /// delete an HKCU key and everything under it
+    pub fn delete_tree(path: &str) {
+        let path = wide(path);
+        unsafe {
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()));
+        }
+    }
+}
+
+/// where windows stores the default-terminal choice
+#[cfg(windows)]
+const DELEGATION_KEY: &str = "Console\\%%Startup";
+#[cfg(windows)]
+const CLSID_KEY: &str = "Software\\Classes\\CLSID\\{D6F7E8A1-3C52-4B0F-9E6A-71B2C0A4F3D9}";
+/// "let windows decide", the OS default when nothing is registered
+#[cfg(windows)]
+const DELEGATION_DEFAULT: &str = "{00000000-0000-0000-0000-000000000000}";
+
+#[cfg(windows)]
+fn termie_clsid_string() -> String {
+    format!("{{{:?}}}", crate::defterm::CLSID_TERMIE_HANDOFF)
+}
+
+/// true when the user's default terminal is termie
+#[cfg(windows)]
+pub fn defterm_registered() -> bool {
+    reg::read_sz(DELEGATION_KEY, "DelegationTerminal")
+        .map(|v| v.eq_ignore_ascii_case(&termie_clsid_string()))
+        .unwrap_or(false)
+}
+
+/// make termie the default terminal: register the COM local server for the
+/// handoff class and point the console delegation pair at OpenConsole + termie.
+/// the previous pair is stashed alongside so unregistering restores the user's
+/// old choice instead of guessing
+#[cfg(windows)]
+pub fn register_defterm() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let server = format!("\"{}\" -Embedding", exe.display());
+    let prev_console = reg::read_sz(DELEGATION_KEY, "DelegationConsole").unwrap_or_default();
+    let prev_terminal = reg::read_sz(DELEGATION_KEY, "DelegationTerminal").unwrap_or_default();
+    let ok = reg::write_sz(CLSID_KEY, "", "termie terminal handoff")
+        && reg::write_sz(&format!("{CLSID_KEY}\\LocalServer32"), "", &server)
+        && reg::write_sz(DELEGATION_KEY, "DelegationConsole", crate::defterm::CLSID_OPENCONSOLE)
+        && reg::write_sz(DELEGATION_KEY, "DelegationTerminal", &termie_clsid_string());
+    if ok && !prev_terminal.eq_ignore_ascii_case(&termie_clsid_string()) {
+        // remembered under our own key, harmless if it lingers
+        let _ = reg::write_sz(CLSID_KEY, "PrevDelegationConsole", &prev_console);
+        let _ = reg::write_sz(CLSID_KEY, "PrevDelegationTerminal", &prev_terminal);
+    }
+    ok
+}
+
+/// stop being the default terminal: restore the previous delegation pair (or
+/// the OS default) and drop the COM registration
+#[cfg(windows)]
+pub fn unregister_defterm() -> bool {
+    let prev_console = reg::read_sz(CLSID_KEY, "PrevDelegationConsole").filter(|s| !s.is_empty());
+    let prev_terminal = reg::read_sz(CLSID_KEY, "PrevDelegationTerminal").filter(|s| !s.is_empty());
+    let ok = reg::write_sz(
+        DELEGATION_KEY,
+        "DelegationConsole",
+        prev_console.as_deref().unwrap_or(DELEGATION_DEFAULT),
+    ) && reg::write_sz(
+        DELEGATION_KEY,
+        "DelegationTerminal",
+        prev_terminal.as_deref().unwrap_or(DELEGATION_DEFAULT),
+    );
+    reg::delete_tree(CLSID_KEY);
+    ok
+}
+
+/// keep the COM server path current: after an update or a moved install, the
+/// registration must point at the exe that is actually running
+#[cfg(windows)]
+pub fn refresh_defterm_server_path() {
+    if !defterm_registered() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let server = format!("\"{}\" -Embedding", exe.display());
+        let _ = reg::write_sz(&format!("{CLSID_KEY}\\LocalServer32"), "", &server);
+    }
+}
+
+// the CLSID appears twice — as a GUID for COM and as registry-path text — and
+// the two must never drift apart
+#[cfg(all(test, windows))]
+mod defterm_reg_tests {
+    #[test]
+    fn clsid_key_matches_the_guid() {
+        let key = super::CLSID_KEY.to_ascii_uppercase();
+        let clsid = super::termie_clsid_string().to_ascii_uppercase();
+        assert!(key.ends_with(&clsid), "{key} vs {clsid}");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn defterm_registered() -> bool {
+    false
+}
+#[cfg(not(windows))]
+pub fn register_defterm() -> bool {
+    false
+}
+#[cfg(not(windows))]
+pub fn unregister_defterm() -> bool {
+    false
+}
+#[cfg(not(windows))]
+pub fn refresh_defterm_server_path() {}
+
 /// the installed WSL distribution friendly-names, read from the registry
 /// (HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss), the same source
 /// Windows Terminal uses. empty on any failure or when WSL isn't installed —

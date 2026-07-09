@@ -352,6 +352,172 @@ fn resolve_shell(kind: ShellKind) -> String {
     }
 }
 
+#[cfg(windows)]
+impl Pty {
+    /// wrap a default-terminal handoff session (raw ConPTY pipes received over
+    /// COM) as a Pty, so the pane machinery treats it like any spawned shell.
+    /// resizes go down the ConPTY signal pipe; killing the pane terminates the
+    /// client. the reference/server handles ride along so the console session
+    /// stays alive exactly as long as this Pty
+    pub fn from_handoff(
+        reader: std::os::windows::io::OwnedHandle,
+        writer: std::os::windows::io::OwnedHandle,
+        signal: std::os::windows::io::OwnedHandle,
+        reference: std::os::windows::io::OwnedHandle,
+        server: std::os::windows::io::OwnedHandle,
+        client: std::os::windows::io::OwnedHandle,
+    ) -> Pty {
+        use std::fs::File;
+        let mut writer = File::from(writer);
+        let (writer_tx, writer_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || {
+            while let Ok(chunk) = writer_rx.recv() {
+                if writer.write_all(&chunk).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+        Pty {
+            master: Box::new(handoff_pty::HandoffMaster::new(signal, reference, server)),
+            writer_tx,
+            child: Box::new(handoff_pty::HandoffChild::new(client)),
+            reader: Some(Box::new(File::from(reader))),
+        }
+    }
+}
+
+// pty backend for default-terminal handoff sessions: no process is spawned
+// here — the ConPTY already exists in the console host, reachable only through
+// the handles COM delivered
+#[cfg(windows)]
+mod handoff_pty {
+    use super::*;
+    use portable_pty::{ChildKiller, ExitStatus};
+    use std::fs::File;
+    use std::io::Result as IoResult;
+    use std::os::windows::io::{AsRawHandle, OwnedHandle};
+    use std::sync::{Arc, Mutex};
+
+    /// ConPTY out-of-band resize packet id (winconpty.h PTY_SIGNAL_RESIZE_WINDOW)
+    const SIGNAL_RESIZE: u16 = 8;
+
+    pub struct HandoffMaster {
+        signal: Mutex<File>,
+        size: Mutex<PtySize>,
+        /// console driver reference + console host process: held for the
+        /// session's lifetime, released when the pane closes
+        _reference: OwnedHandle,
+        _server: OwnedHandle,
+    }
+
+    impl HandoffMaster {
+        pub fn new(signal: OwnedHandle, reference: OwnedHandle, server: OwnedHandle) -> Self {
+            HandoffMaster {
+                signal: Mutex::new(File::from(signal)),
+                size: Mutex::new(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 }),
+                _reference: reference,
+                _server: server,
+            }
+        }
+    }
+
+    impl MasterPty for HandoffMaster {
+        fn resize(&self, size: PtySize) -> anyhow::Result<()> {
+            let packet = [SIGNAL_RESIZE, size.cols, size.rows];
+            let mut f = self.signal.lock().unwrap();
+            f.write_all(bytemuck::cast_slice(&packet))?;
+            f.flush()?;
+            *self.size.lock().unwrap() = size;
+            Ok(())
+        }
+        fn get_size(&self) -> anyhow::Result<PtySize> {
+            Ok(*self.size.lock().unwrap())
+        }
+        // reader/writer were taken directly from the handoff pipes when the
+        // Pty was built; nothing should come back for a second copy
+        fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
+            anyhow::bail!("handoff pty reader is owned by the pane")
+        }
+        fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
+            anyhow::bail!("handoff pty writer is owned by the pane")
+        }
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<libc::pid_t> {
+            None
+        }
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
+            None
+        }
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    /// the already-running client application, addressed by process handle
+    #[derive(Debug)]
+    pub struct HandoffChild {
+        client: Arc<OwnedHandle>,
+    }
+
+    impl HandoffChild {
+        pub fn new(client: OwnedHandle) -> Self {
+            HandoffChild { client: Arc::new(client) }
+        }
+        fn handle(&self) -> windows::Win32::Foundation::HANDLE {
+            windows::Win32::Foundation::HANDLE(self.client.as_raw_handle())
+        }
+        fn exit_code(&self) -> Option<u32> {
+            use windows::Win32::Foundation::WAIT_OBJECT_0;
+            use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+            unsafe {
+                if WaitForSingleObject(self.handle(), 0) != WAIT_OBJECT_0 {
+                    return None;
+                }
+                let mut code = 0u32;
+                GetExitCodeProcess(self.handle(), &mut code).ok().map(|_| code)
+            }
+        }
+    }
+
+    impl ChildKiller for HandoffChild {
+        fn kill(&mut self) -> IoResult<()> {
+            use windows::Win32::System::Threading::TerminateProcess;
+            unsafe {
+                let _ = TerminateProcess(self.handle(), 1);
+            }
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(HandoffChild { client: self.client.clone() })
+        }
+    }
+
+    impl Child for HandoffChild {
+        fn try_wait(&mut self) -> IoResult<Option<ExitStatus>> {
+            Ok(self.exit_code().map(ExitStatus::with_exit_code))
+        }
+        fn wait(&mut self) -> IoResult<ExitStatus> {
+            use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+            unsafe {
+                WaitForSingleObject(self.handle(), INFINITE);
+            }
+            Ok(ExitStatus::with_exit_code(self.exit_code().unwrap_or(0)))
+        }
+        fn process_id(&self) -> Option<u32> {
+            use windows::Win32::System::Threading::GetProcessId;
+            match unsafe { GetProcessId(self.handle()) } {
+                0 => None,
+                pid => Some(pid),
+            }
+        }
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            Some(self.client.as_raw_handle())
+        }
+    }
+}
+
 #[cfg(test)]
 impl Pty {
     /// a no-op pty for tests: build a Pane without spawning a real shell
