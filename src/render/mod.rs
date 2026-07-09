@@ -1541,6 +1541,8 @@ impl Renderer {
     pub fn set_color_overrides(&mut self, overrides: Vec<(String, Rgb)>) {
         self.color_overrides = overrides;
         self.palette = self.themed_palette();
+        // overrides can arrive live (conf watcher), not just at boot
+        self.atlas.dirty = true;
     }
 
     pub fn set_theme(&mut self, id: ThemeId) {

@@ -64,6 +64,9 @@ enum UserEvent {
     Market(Result<Vec<plugin::market::Entry>, String>),
     /// the global quake hotkey fired (from the hotkey thread)
     ToggleQuake,
+    /// colors.conf or keybindings.conf changed on disk (watcher thread):
+    /// re-read both so hand edits apply live, without a restart
+    UserConfChanged,
     /// a release check finished (None = up to date / unreachable); bool =
     /// the user asked from the palette, so silence is worth a status notice
     UpdateCheckDone(Option<update::Update>, bool),
@@ -1701,6 +1704,37 @@ fn is_settings_hot(h: Hot) -> bool {
     )
 }
 
+/// poll the hand-edited conf files (colors.conf, keybindings.conf) once a
+/// second and post UserConfChanged when either differs — an edit applies live,
+/// no restart. stat-polling keeps it dependency-free; two stats a second is
+/// nothing. the config file is deliberately not watched: the app writes it
+/// itself on every settings change, which would echo straight back here
+fn spawn_conf_watcher(proxy: EventLoopProxy<UserEvent>) {
+    let Some(base) = std::env::var_os("APPDATA") else {
+        return;
+    };
+    let paths: Vec<std::path::PathBuf> = ["colors.conf", "keybindings.conf"]
+        .iter()
+        .map(|f| std::path::Path::new(&base).join("termie").join(f))
+        .collect();
+    std::thread::spawn(move || {
+        let stat = |p: &std::path::PathBuf| {
+            std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
+        };
+        let mut last: Vec<_> = paths.iter().map(stat).collect();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let cur: Vec<_> = paths.iter().map(stat).collect();
+            if cur != last {
+                last = cur;
+                if proxy.send_event(UserEvent::UserConfChanged).is_err() {
+                    return; // event loop is gone
+                }
+            }
+        }
+    });
+}
+
 /// %APPDATA%\termie\config — a simple key=value store for every setting
 fn config_path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")?;
@@ -2172,6 +2206,8 @@ struct App {
     quake_shown: bool,
     /// the global quake hotkey thread has been spawned (once per process)
     quake_hotkey_spawned: bool,
+    /// the colors.conf/keybindings.conf watcher thread has been spawned
+    conf_watch_spawned: bool,
     /// persisted settings loaded at startup; renderer-owned ones applied in boot
     persisted: Persisted,
     /// broadcast input: typed keys go to every pane in the active tab
@@ -2354,6 +2390,7 @@ impl App {
             drag_pane: None,
             quake_shown: false,
             quake_hotkey_spawned: false,
+            conf_watch_spawned: false,
         }
     }
 
@@ -2436,6 +2473,11 @@ impl App {
             if !ok {
                 log::warn!("quake hotkey unavailable (already in use by another app)");
             }
+        }
+        // watch colors.conf/keybindings.conf so hand edits apply live
+        if !self.conf_watch_spawned {
+            self.conf_watch_spawned = true;
+            spawn_conf_watcher(self.proxy.clone());
         }
         // surface installed WSL distros so the user knows valid wsl_distro values
         let distros = win::wsl_distros();
@@ -6688,6 +6730,22 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ToggleQuake => self.toggle_quake(),
+            UserEvent::UserConfChanged => {
+                self.keybindings = load_keybindings();
+                let overrides = load_color_overrides();
+                if let Some(r) = self.pw.renderer.as_mut() {
+                    r.set_color_overrides(overrides.clone());
+                }
+                for s in &mut self.satellites {
+                    if let Some(r) = s.renderer.as_mut() {
+                        r.set_color_overrides(overrides.clone());
+                    }
+                    if let Some(w) = s.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+                self.redraw();
+            }
             #[cfg(windows)]
             UserEvent::Handoff(h) => self.handoff_tab(h),
             UserEvent::UpdateCheckDone(found, manual) => {
