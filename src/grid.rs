@@ -862,6 +862,11 @@ impl Grid {
             self.append_combining(c);
             return;
         }
+        // a glyph right after a ZWJ continues the previous cell's emoji
+        // sequence (family / profession clusters) instead of opening a new cell
+        if self.join_zwj_sequence(c) {
+            return;
+        }
         if self.cursor.wrap_pending {
             self.cursor.wrap_pending = false;
             // DECAWM off pins the cursor at the margin: prints overwrite the
@@ -1279,26 +1284,33 @@ impl Grid {
         self.clusters.get(id as usize).map(String::as_str).unwrap_or("")
     }
 
+    /// the cell the last glyph landed in: the cursor column when a wrap is
+    /// pending (e.g. a wide glyph at end-of-line), else the cell just before
+    /// the cursor, stepping off a wide glyph's '\0' continuation to its lead
+    fn prev_glyph_cell(&self) -> Option<(usize, usize)> {
+        let row = self.cursor.row;
+        let mut col = if self.cursor.wrap_pending {
+            self.cursor.col
+        } else if self.cursor.col == 0 {
+            return None;
+        } else {
+            self.cursor.col - 1
+        };
+        if col > 0 && self.lines.get(row).and_then(|l| l.get(col)).map(|x| x.c) == Some('\0') {
+            col -= 1;
+        }
+        Some((row, col))
+    }
+
     /// attach a zero-width char (combining mark / ZWJ / variation selector) to
     /// the grapheme cluster of the most recently written cell, preserving it for
     /// copy and (Part B) composition. a leading combiner with no base is dropped
     fn append_combining(&mut self, c: char) {
-        let row = self.cursor.row;
-        // the base cell is where the last glyph landed: the cursor column when a
-        // wrap is pending (e.g. a wide glyph at end-of-line), else the cell just
-        // before the cursor
-        let mut col = if self.cursor.wrap_pending {
-            self.cursor.col
-        } else if self.cursor.col == 0 {
-            return; // leading combiner with no base
-        } else {
-            self.cursor.col - 1
-        };
         // never attach to the '\0' continuation of a wide glyph: step to its lead,
         // or the mark renders blank and leaks a NUL into copy / accessibility
-        if col > 0 && self.lines.get(row).and_then(|l| l.get(col)).map(|x| x.c) == Some('\0') {
-            col -= 1;
-        }
+        let Some((row, col)) = self.prev_glyph_cell() else {
+            return;
+        };
         let Some(cell) = self.lines.get(row).and_then(|l| l.get(col)).copied() else {
             return;
         };
@@ -1320,6 +1332,37 @@ impl Grid {
             self.lines[row][col].cluster = id;
         }
         self.cluster_scratch = s; // hand the buffer back for the next mark
+    }
+
+    /// fold a printable char into the previous cell when that cell's cluster
+    /// ends with a ZWJ and its base glyph is wide — the emoji-sequence case
+    /// (family, profession, heart couples). narrow bases (e.g. arabic letters,
+    /// which also use ZWJ) keep their own cells. false = write a normal cell
+    fn join_zwj_sequence(&mut self, c: char) -> bool {
+        let Some((row, col)) = self.prev_glyph_cell() else {
+            return false;
+        };
+        let cell = self.lines[row][col];
+        if char_width(cell.c) != 2 || !self.cluster_str(cell.cluster).ends_with('\u{200D}') {
+            return false;
+        }
+        let mut s = std::mem::take(&mut self.cluster_scratch);
+        s.clear();
+        s.push_str(self.cluster_str(cell.cluster));
+        let joined = if s.chars().count() < 16 {
+            s.push(c);
+            match self.intern_cluster(&s) {
+                0 => false, // table capped: keep the old cluster, write a cell
+                id => {
+                    self.lines[row][col].cluster = id;
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        self.cluster_scratch = s;
+        joined
     }
 
     /// the URI a cell's link id points at, if any
@@ -1503,6 +1546,29 @@ mod tests {
         let mut g2 = Grid::new(2, 8);
         g2.put_char('\u{0301}');
         assert_eq!(g2.lines[0][0].cluster, 0);
+    }
+
+    // an emoji ZWJ sequence occupies one wide cell whose cluster carries the
+    // whole sequence; ZWJ between narrow chars (arabic shaping) does not join
+    #[test]
+    fn zwj_emoji_sequence_joins_into_one_wide_cell() {
+        let mut g = Grid::new(2, 12);
+        for c in "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".chars() {
+            g.put_char(c);
+        }
+        assert_eq!(g.cursor.col, 2); // one wide cell, not three
+        assert_eq!(
+            g.cluster_str(g.lines[0][0].cluster),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"
+        );
+        assert_eq!(g.selected_text((0, 0), (0, 1), false), "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}");
+        // narrow base + ZWJ + narrow char: two cells, no join
+        let mut g2 = Grid::new(2, 12);
+        g2.put_char('\u{0628}'); // arabic beh
+        g2.put_char('\u{200D}');
+        g2.put_char('\u{0644}'); // arabic lam
+        assert_eq!(g2.cursor.col, 2);
+        assert_eq!(g2.lines[0][1].c, '\u{0644}');
     }
 
     // a variation selector (VS16) folds into the base cell's cluster like a mark

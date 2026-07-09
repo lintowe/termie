@@ -2708,9 +2708,10 @@ impl Renderer {
                             bold: cell.attrs.bold,
                             italic: cell.attrs.italic,
                         };
-                        // a cell carrying combining marks composites its whole
-                        // grapheme cluster; fall back to the base char if that
-                        // yields nothing (e.g. an emoji ZWJ cluster)
+                        // a cell carrying combining marks or an emoji ZWJ
+                        // sequence composites/ligates its whole grapheme
+                        // cluster; fall back to the base char if that yields
+                        // nothing (e.g. the font can't ligate the sequence)
                         let glyph = if cell.cluster != 0 {
                             let cg = atlas.get_cluster(
                                 grid.cluster_str(cell.cluster),

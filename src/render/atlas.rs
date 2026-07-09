@@ -502,7 +502,13 @@ impl GlyphAtlas {
         }
         let baseline = m.ascent.round() as i32;
 
-        let mut attrs = Attrs::new().family(Family::Name(m.family));
+        // a ZWJ emoji sequence must shape inside the emoji font itself: through
+        // the content font, fallback picks glyphs per codepoint and the GSUB
+        // ligature never fires — the family renders as its first member
+        let emoji_seq = text.contains('\u{200D}')
+            && text.chars().next().is_some_and(|c| c >= '\u{2600}');
+        let family = if emoji_seq { "Segoe UI Emoji" } else { m.family };
+        let mut attrs = Attrs::new().family(Family::Name(family));
         if bold {
             attrs = attrs.weight(Weight::BOLD);
         }
@@ -522,6 +528,48 @@ impl GlyphAtlas {
         }
         if keys.is_empty() {
             return RasterOutcome::Empty;
+        }
+
+        // an emoji ZWJ sequence the font ligates arrives as one color glyph:
+        // pack its RGBA like the per-char color path, so 👨‍👩‍👧 draws as a
+        // single family glyph instead of falling back to the base char
+        if keys.len() == 1 {
+            let (w, h, left, top, pixels) = {
+                let img = self.swash.get_image(&mut self.font_system, keys[0].1);
+                match img.as_ref() {
+                    Some(i) if matches!(i.content, SwashContent::Color) => (
+                        i.placement.width,
+                        i.placement.height,
+                        i.placement.left,
+                        i.placement.top,
+                        i.data.clone(),
+                    ),
+                    _ => (0, 0, 0, 0, Vec::new()),
+                }
+            };
+            if w > 0 && h > 0 {
+                let (x, y) = match self.alloc(w, h) {
+                    Some(p) => p,
+                    None => return RasterOutcome::NoSpace,
+                };
+                for row in 0..h {
+                    let dst = (((y + row) * self.dim + x) * 4) as usize;
+                    let src = (row * w * 4) as usize;
+                    let n = (w * 4) as usize;
+                    self.color_data[dst..dst + n].copy_from_slice(&pixels[src..src + n]);
+                }
+                self.mark_color_dirty(y, y + h);
+                let d = self.dim as f32;
+                return RasterOutcome::Glyph(AtlasGlyph {
+                    uv_min: [x as f32 / d, y as f32 / d],
+                    uv_max: [(x + w) as f32 / d, (y + h) as f32 / d],
+                    width: w as f32,
+                    height: h as f32,
+                    left: left as f32,
+                    top: top as f32,
+                    color: true,
+                });
+            }
         }
 
         let mut canvas = vec![0u8; (cw * ch) as usize];
