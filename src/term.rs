@@ -106,6 +106,11 @@ pub struct Terminal {
     /// cell size in physical pixels, fed by the renderer; (0,0) = unknown and
     /// the pixel-size XTWINOPS reports stay silent rather than lie
     cell_px: (u16, u16),
+    /// in-flight sixel decode, alive between the DCS q hook and its unhook
+    sixel: Option<Box<crate::sixel::SixelDecoder>>,
+    /// DECSDM (mode 80): set pins a sixel image to the top-left and leaves the
+    /// cursor alone; reset (the default) scrolls it inline with the text
+    sixel_display_mode: bool,
 }
 
 impl Terminal {
@@ -138,6 +143,8 @@ impl Terminal {
             last_print: None,
             images: crate::image::ImageStore::default(),
             cell_px: (0, 0),
+            sixel: None,
+            sixel_display_mode: false,
         }
     }
 
@@ -188,6 +195,7 @@ impl Terminal {
             1003 => self.mouse_proto == MouseProto::Any,
             1004 => self.focus_events,
             1006 => self.mouse_sgr,
+            80 => self.sixel_display_mode,
             2004 => self.bracketed_paste,
             2026 => self.sync_output,
             47 | 1047 | 1049 => self.using_alt,
@@ -309,6 +317,7 @@ impl Terminal {
                     }
                 }
                 25 => self.grid.cursor.visible = enable,
+                80 => self.sixel_display_mode = enable,
                 2026 => self.sync_output = enable,
                 1000 => self.mouse_proto = if enable { MouseProto::Normal } else { MouseProto::Off },
                 1002 => self.mouse_proto = if enable { MouseProto::Button } else { MouseProto::Off },
@@ -646,6 +655,19 @@ impl Perform for Terminal {
                     }
                 }
             }
+            // XTSMGRAPHICS (CSI ? Pi ; Pa ; Pv S): sixel tools size their
+            // output from these. registers and geometry are fixed properties
+            // here, so every action reads back the same values
+            'S' if private => {
+                match param_at(params, 0, 0) {
+                    1 => self.responses.extend_from_slice(b"\x1b[?1;0;256S"),
+                    2 => self
+                        .responses
+                        .extend_from_slice(format!("\x1b[?2;0;{};{}S", crate::sixel::MAX_W, crate::sixel::MAX_H).as_bytes()),
+                    // ReGIS and anything else: status 1 = error in item
+                    i => self.responses.extend_from_slice(format!("\x1b[?{};1S", i).as_bytes()),
+                }
+            }
             'S' => self.grid.scroll_up(param_at(params, 0, 1) as usize),
             'T' => self.grid.scroll_down(param_at(params, 0, 1) as usize),
             // a leading > or ? marks XTMODKEYS/XTQMODKEYS, not SGR — swallowing
@@ -688,7 +710,9 @@ impl Perform for Terminal {
                     // DA2 secondary device attributes: a VT220-class id, version 0
                     self.responses.extend_from_slice(b"\x1b[>41;0;0c");
                 } else if !private {
-                    self.responses.extend_from_slice(b"\x1b[?6c");
+                    // DA1: VT220-class (62) with sixel (4) and ANSI color (22) —
+                    // lsix/chafa/img2sixel detect sixel from the ";4"
+                    self.responses.extend_from_slice(b"\x1b[?62;4;22c");
                 }
             }
             // XTVERSION (CSI > q): report name + version as DCS > | text ST
@@ -816,6 +840,8 @@ impl Perform for Terminal {
                 self.gl = 0;
                 self.last_print = None;
                 self.progress = None;
+                self.sixel = None;
+                self.sixel_display_mode = false;
             }
             _ => {}
         }
@@ -946,10 +972,40 @@ impl Perform for Terminal {
         }
     }
 
-    // DCS sequences are unused for the tracer bullet
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
-    fn put(&mut self, _byte: u8) {}
-    fn unhook(&mut self) {}
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // DCS P1;P2;P3 q — sixel. bare 'q' only: DECRQSS ($ q) and XTGETTCAP
+        // (+ q) carry intermediates. unwritten pixels stay transparent, which
+        // over the cell background matches both P2 background modes
+        if action == 'q' && intermediates.is_empty() {
+            self.sixel = Some(Box::default());
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(dec) = self.sixel.as_mut() {
+            dec.put(byte);
+        }
+    }
+
+    fn unhook(&mut self) {
+        let Some(dec) = self.sixel.take() else { return };
+        let Some((w, h, rgba)) = dec.finish() else { return };
+        let id = self.images.insert(w, h, rgba);
+        if self.sixel_display_mode {
+            // DECSDM: the image pins to the upper-left, cursor untouched
+            self.grid.place_image_at(id, 0, 0, 0, 0);
+        } else {
+            // sixel scrolling (the default): anchor at the cursor, then move
+            // the cursor to the line below the image, scrolling as needed. an
+            // unknown cell height (renderer not attached yet) assumes 20 px
+            self.grid.place_image(id, 0, 0);
+            let cell_h = if self.cell_px.1 > 0 { self.cell_px.1 as usize } else { 20 };
+            for _ in 0..(h as usize).div_ceil(cell_h) {
+                self.grid.linefeed();
+            }
+        }
+        self.dirty = true;
+    }
 }
 
 #[cfg(test)]
@@ -1491,6 +1547,82 @@ mod tests {
             // keep feeding to exercise post-resize transitions (no dim assert)
             feed(&mut t, &buf);
         }
+    }
+
+    #[test]
+    fn sixel_dcs_decodes_places_and_scrolls() {
+        let mut t = Terminal::new(6, 20);
+        t.set_cell_px(8, 6);
+        // a 3x6 px red image = one cell row; the cursor lands on the next line
+        feed(&mut t, b"\x1bP0;0;0q#1;2;100;0;0!3~\x1b\\");
+        let p = t.grid.placements();
+        assert_eq!(p.len(), 1);
+        let img = t.images.get(p[0].image_id).expect("image stored");
+        assert_eq!((img.width, img.height), (3, 6));
+        assert_eq!(img.rgba[..4], [255, 0, 0, 255]);
+        assert_eq!((p[0].abs_line, p[0].col), (0, 0));
+        assert_eq!((t.grid.cursor.row, t.grid.cursor.col), (1, 0));
+    }
+
+    #[test]
+    fn sixel_taller_than_screen_scrolls_with_text() {
+        let mut t = Terminal::new(3, 10);
+        t.set_cell_px(8, 6);
+        // 18 px tall = 3 cell rows on a 3-row screen: the advance must scroll
+        feed(&mut t, b"\x1bPq~-~-~\x1b\\");
+        assert_eq!(t.grid.cursor.row, 2, "cursor pinned at the bottom row");
+        // the placement stays glued to its (now scrolled) text line
+        let p = t.grid.placements();
+        assert_eq!(p[0].abs_line, 0);
+        assert!(t.grid.screen_row_signed(p[0].abs_line) < 0, "anchor scrolled above the viewport top");
+    }
+
+    #[test]
+    fn decsdm_pins_the_image_and_reports() {
+        let mut t = Terminal::new(6, 20);
+        t.set_cell_px(8, 6);
+        feed(&mut t, b"\x1b[?80h\x1b[3;5H\x1bPq~\x1b\\");
+        let p = t.grid.placements();
+        assert_eq!((p[0].abs_line, p[0].col), (0, 0), "pinned to the top-left");
+        assert_eq!((t.grid.cursor.row, t.grid.cursor.col), (2, 4), "cursor untouched");
+        feed(&mut t, b"\x1b[?80$p");
+        assert_eq!(t.responses, b"\x1b[?80;1$y");
+        t.responses.clear();
+        feed(&mut t, b"\x1b[?80l\x1b[?80$p");
+        assert_eq!(t.responses, b"\x1b[?80;2$y");
+    }
+
+    #[test]
+    fn da1_advertises_sixel() {
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, b"\x1b[c");
+        assert_eq!(t.responses, b"\x1b[?62;4;22c");
+    }
+
+    #[test]
+    fn xtsmgraphics_reports_registers_and_geometry() {
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, b"\x1b[?1;1;0S");
+        assert_eq!(t.responses, b"\x1b[?1;0;256S");
+        t.responses.clear();
+        feed(&mut t, b"\x1b[?2;1;0S");
+        assert_eq!(t.responses, b"\x1b[?2;0;4096;4096S");
+        t.responses.clear();
+        // ReGIS (3) is not supported: status 1, error in item
+        feed(&mut t, b"\x1b[?3;1;0S");
+        assert_eq!(t.responses, b"\x1b[?3;1S");
+        t.responses.clear();
+        // plain CSI S stays scroll-up, never a graphics reply
+        feed(&mut t, b"\x1b[1S");
+        assert!(t.responses.is_empty());
+    }
+
+    #[test]
+    fn non_sixel_dcs_is_ignored() {
+        // XTGETTCAP (DCS + q) and DECRQSS (DCS $ q) must not start a sixel
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, b"\x1bP+q544e\x1b\\\x1bP$qm\x1b\\");
+        assert!(t.grid.placements().is_empty());
     }
 
     #[test]

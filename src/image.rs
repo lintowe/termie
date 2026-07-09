@@ -99,7 +99,26 @@ impl ImageStore {
             self.anon = None;
         }
         let p = self.pending.remove(&id)?;
-        let mut img = decode(p.format, p.width, p.height, &p.data)?;
+        let img = decode(p.format, p.width, p.height, &p.data)?;
+        self.store(id, img);
+        Some(id)
+    }
+
+    /// store an already-decoded RGBA image (the sixel path), minting a fresh id
+    /// that never lands on a live entry so it can't evict a kitty image
+    pub fn insert(&mut self, width: u32, height: u32, rgba: Vec<u8>) -> u32 {
+        loop {
+            self.next_auto = self.next_auto.wrapping_add(1).max(1);
+            if !self.images.contains_key(&self.next_auto) {
+                break;
+            }
+        }
+        let id = self.next_auto;
+        self.store(id, Image { key: 0, width, height, rgba });
+        id
+    }
+
+    fn store(&mut self, id: u32, mut img: Image) {
         img.key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
         if self.images.insert(id, img).is_none() {
             self.order.push(id);
@@ -108,7 +127,6 @@ impl ImageStore {
             let old = self.order.remove(0);
             self.images.remove(&old);
         }
-        Some(id)
     }
 
     pub fn get(&self, id: u32) -> Option<&Image> {

@@ -18,7 +18,7 @@ Tabs and recursive split panes — split vertically or horizontally, drag divide
 
 Real terminal emulation: a [vte](https://github.com/alacritty/vte)-based parser, alt screen, scroll regions, mouse reporting, bracketed paste, OSC 7 cwd (tab labels + window title), reflow on resize, the kitty keyboard protocol (so `Shift+Enter` inserts a newline in TUIs), OSC 8 hyperlinks, OSC 52 clipboard writes, OSC 4/10/11/12 color queries, OSC 9;4 taskbar progress, underline styles, strikethrough, blink, and DEC 2026 synchronized output for tear-free frames.
 
-Inline images via the kitty graphics protocol (raw RGB / RGBA / PNG) and full-color emoji, both packed into a dedicated RGBA atlas beside the glyph cache. IME composition, a screen-reader path via AccessKit, and session restore (tab + split layout) with crash recovery.
+Inline images via the kitty graphics protocol (raw RGB / RGBA / PNG) and sixel — `img2sixel`, `chafa`, `lsix`, and anything else that probes DA1 finds both — plus full-color emoji, all packed into a dedicated RGBA atlas beside the glyph cache. IME composition, a screen-reader path via AccessKit, and session restore (tab + split layout) with crash recovery.
 
 A command palette (`Ctrl+P`) for fuzzy access to every action. Seven built-in themes — three house schemes plus Catppuccin Mocha, Gruvbox, Tokyo Night, and Nord — a bundled Maple Mono Nerd Font, adjustable font size / padding / cursor / opacity, and per-user `colors.conf` and `keybindings.conf`. An optional Quake-style drop-down (`quake_key`).
 

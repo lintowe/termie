@@ -12,6 +12,7 @@ mod plugin;
 mod pty;
 mod render;
 mod session;
+mod sixel;
 mod term;
 mod update;
 mod win;

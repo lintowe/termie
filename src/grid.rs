@@ -1154,11 +1154,17 @@ impl Grid {
     /// so it scrolls with the surrounding text. cols/rows = the client's
     /// requested cell box (kitty c=/r=), 0 = draw at native pixel size
     pub fn place_image(&mut self, image_id: u32, cols: u16, rows: u16) {
-        let abs_line = self.total_scrolled + self.cursor.row as u64;
+        self.place_image_at(image_id, self.cursor.row, self.cursor.col, cols, rows);
+    }
+
+    /// place an image at an explicit screen position (sixel display mode pins
+    /// its image to the top-left instead of the cursor)
+    pub fn place_image_at(&mut self, image_id: u32, row: usize, col: usize, cols: u16, rows: u16) {
+        let abs_line = self.total_scrolled + row as u64;
         self.placements.push(Placement {
             image_id,
             abs_line,
-            col: self.cursor.col,
+            col,
             cols,
             rows,
         });
