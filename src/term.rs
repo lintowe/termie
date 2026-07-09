@@ -106,8 +106,8 @@ pub struct Terminal {
     /// cell size in physical pixels, fed by the renderer; (0,0) = unknown and
     /// the pixel-size XTWINOPS reports stay silent rather than lie
     cell_px: (u16, u16),
-    /// in-flight sixel decode, alive between the DCS q hook and its unhook
-    sixel: Option<Box<crate::sixel::SixelDecoder>>,
+    /// in-flight DCS consumer, alive between hook and unhook
+    dcs: Option<Dcs>,
     /// DECSDM (mode 80): set pins a sixel image to the top-left and leaves the
     /// cursor alone; reset (the default) scrolls it inline with the text
     sixel_display_mode: bool,
@@ -143,7 +143,7 @@ impl Terminal {
             last_print: None,
             images: crate::image::ImageStore::default(),
             cell_px: (0, 0),
-            sixel: None,
+            dcs: None,
             sixel_display_mode: false,
         }
     }
@@ -202,6 +202,67 @@ impl Terminal {
             _ => return 0,
         };
         if on { 1 } else { 2 }
+    }
+
+    /// the current SGR pen as a DECRQSS report body ("0;1;38:2:255:0:0m"),
+    /// colon subparams for extended color and underline style — the shape our
+    /// own parser and every modern probe accept. tmux and the truecolor
+    /// detection scripts set a pen, query it back, and look for the echo
+    fn sgr_report(&self) -> String {
+        use std::fmt::Write;
+        let cur = &self.grid.cursor;
+        let a = &cur.attrs;
+        let mut s = String::from("0");
+        for (on, code) in [
+            (a.bold, 1),
+            (a.dim, 2),
+            (a.italic, 3),
+            (a.blink, 5),
+            (a.inverse, 7),
+            (a.hidden, 8),
+            (a.strike, 9),
+            (a.overline, 53),
+        ] {
+            if on {
+                let _ = write!(s, ";{code}");
+            }
+        }
+        match a.underline {
+            UnderlineStyle::None => {}
+            UnderlineStyle::Single => s.push_str(";4"),
+            UnderlineStyle::Double => s.push_str(";4:2"),
+            UnderlineStyle::Curly => s.push_str(";4:3"),
+            UnderlineStyle::Dotted => s.push_str(";4:4"),
+            UnderlineStyle::Dashed => s.push_str(";4:5"),
+        }
+        let mut color = |base: u16, c: Color| {
+            let _ = match c {
+                Color::Indexed(n) if n < 8 && base < 58 => write!(s, ";{}", base - 8 + n as u16),
+                Color::Indexed(n) if n < 16 && base < 58 => write!(s, ";{}", base + 52 + (n - 8) as u16),
+                Color::Indexed(n) => write!(s, ";{base}:5:{n}"),
+                Color::Rgb(r, g, b) => write!(s, ";{base}:2:{r}:{g}:{b}"),
+                Color::Default | Color::DefaultBg => Ok(()),
+            };
+        };
+        color(38, cur.fg);
+        color(48, cur.bg);
+        color(58, a.ul);
+        s.push('m');
+        s
+    }
+
+    /// the DECSCUSR value for the current cursor: 1/2 block, 3/4 underline,
+    /// 5/6 bar, odd = blinking. an app that never set one gets the default (1)
+    fn cursor_style_code(&self) -> u8 {
+        if !self.grid.cursor.shape_set {
+            return 1;
+        }
+        let base = match self.grid.cursor.shape {
+            CursorShape::Block => 1,
+            CursorShape::Underline => 3,
+            CursorShape::Bar => 5,
+        };
+        base + u8::from(self.grid.cursor.shape_blink == Some(false))
     }
 
     /// active kitty keyboard protocol flags (top of the stack)
@@ -547,6 +608,18 @@ enum Charset {
     DecGraphics,
 }
 
+/// what an open DCS string is feeding
+enum Dcs {
+    /// sixel graphics decode (DCS q)
+    Sixel(Box<crate::sixel::SixelDecoder>),
+    /// DECRQSS status request (DCS $ q); the payload names the setting
+    Rqss(Vec<u8>),
+}
+
+/// a DECRQSS request is at most two bytes; anything longer is garbage and
+/// only needs to stay bounded until the invalid reply
+const RQSS_CAP: usize = 8;
+
 /// the DEC special-graphics set (ESC ( 0): maps ASCII into the box-drawing /
 /// line glyphs legacy curses apps draw with via SO/SI
 fn dec_special_graphics(c: char) -> char {
@@ -840,7 +913,7 @@ impl Perform for Terminal {
                 self.gl = 0;
                 self.last_print = None;
                 self.progress = None;
-                self.sixel = None;
+                self.dcs = None;
                 self.sixel_display_mode = false;
             }
             _ => {}
@@ -973,38 +1046,70 @@ impl Perform for Terminal {
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        // DCS P1;P2;P3 q — sixel. bare 'q' only: DECRQSS ($ q) and XTGETTCAP
-        // (+ q) carry intermediates. unwritten pixels stay transparent, which
-        // over the cell background matches both P2 background modes
-        if action == 'q' && intermediates.is_empty() {
-            self.sixel = Some(Box::default());
-        }
+        self.dcs = match (action, intermediates) {
+            // DCS P1;P2;P3 q — sixel. unwritten pixels stay transparent, which
+            // over the cell background matches both P2 background modes
+            ('q', []) => Some(Dcs::Sixel(Box::default())),
+            // DCS $ q — DECRQSS, the payload names the queried setting
+            ('q', [b'$']) => Some(Dcs::Rqss(Vec::new())),
+            _ => None,
+        };
     }
 
     fn put(&mut self, byte: u8) {
-        if let Some(dec) = self.sixel.as_mut() {
-            dec.put(byte);
+        match self.dcs.as_mut() {
+            Some(Dcs::Sixel(dec)) => dec.put(byte),
+            Some(Dcs::Rqss(req)) => {
+                if req.len() < RQSS_CAP {
+                    req.push(byte);
+                }
+            }
+            None => {}
         }
     }
 
     fn unhook(&mut self) {
-        let Some(dec) = self.sixel.take() else { return };
-        let Some((w, h, rgba)) = dec.finish() else { return };
-        let id = self.images.insert(w, h, rgba);
-        if self.sixel_display_mode {
-            // DECSDM: the image pins to the upper-left, cursor untouched
-            self.grid.place_image_at(id, 0, 0, 0, 0);
-        } else {
-            // sixel scrolling (the default): anchor at the cursor, then move
-            // the cursor to the line below the image, scrolling as needed. an
-            // unknown cell height (renderer not attached yet) assumes 20 px
-            self.grid.place_image(id, 0, 0);
-            let cell_h = if self.cell_px.1 > 0 { self.cell_px.1 as usize } else { 20 };
-            for _ in 0..(h as usize).div_ceil(cell_h) {
-                self.grid.linefeed();
+        match self.dcs.take() {
+            Some(Dcs::Sixel(dec)) => {
+                let Some((w, h, rgba)) = dec.finish() else { return };
+                let id = self.images.insert(w, h, rgba);
+                if self.sixel_display_mode {
+                    // DECSDM: the image pins to the upper-left, cursor untouched
+                    self.grid.place_image_at(id, 0, 0, 0, 0);
+                } else {
+                    // sixel scrolling (the default): anchor at the cursor, then
+                    // move the cursor to the line below the image, scrolling as
+                    // needed. an unknown cell height (renderer not attached
+                    // yet) assumes 20 px
+                    self.grid.place_image(id, 0, 0);
+                    let cell_h = if self.cell_px.1 > 0 { self.cell_px.1 as usize } else { 20 };
+                    for _ in 0..(h as usize).div_ceil(cell_h) {
+                        self.grid.linefeed();
+                    }
+                }
+                self.dirty = true;
             }
+            Some(Dcs::Rqss(req)) => {
+                // reply DCS 1 $ r <setting> ST when the setting is known,
+                // DCS 0 $ r ST otherwise
+                let body = match req.as_slice() {
+                    b"m" => Some(self.sgr_report()),
+                    b"r" => Some(format!("{};{}r", self.grid.region_top + 1, self.grid.region_bottom + 1)),
+                    b" q" => Some(format!("{} q", self.cursor_style_code())),
+                    // DECSCL: VT220-class with 7-bit responses, matching DA1
+                    b"\"p" => Some("62;1\"p".to_string()),
+                    // DECSCA: character protection is never on
+                    b"\"q" => Some("0\"q".to_string()),
+                    _ => None,
+                };
+                let reply = match body {
+                    Some(b) => format!("\x1bP1$r{b}\x1b\\"),
+                    None => "\x1bP0$r\x1b\\".to_string(),
+                };
+                self.responses.extend_from_slice(reply.as_bytes());
+            }
+            None => {}
         }
-        self.dirty = true;
     }
 }
 
@@ -1623,6 +1728,40 @@ mod tests {
         let mut t = Terminal::new(4, 10);
         feed(&mut t, b"\x1bP+q544e\x1b\\\x1bP$qm\x1b\\");
         assert!(t.grid.placements().is_empty());
+    }
+
+    #[test]
+    fn decrqss_reports_the_sgr_pen() {
+        let mut t = Terminal::new(4, 20);
+        // a default pen reports bare reset
+        feed(&mut t, b"\x1bP$qm\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1$r0m\x1b\\");
+        t.responses.clear();
+        // bold + italic + curly underline + truecolor fg + indexed bg round-trip
+        feed(&mut t, b"\x1b[1;3;4:3;38;2;1;2;3;48;5;110m\x1bP$qm\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1$r0;1;3;4:3;38:2:1:2:3;48:5:110m\x1b\\");
+        t.responses.clear();
+        // the basic 16 report as their compact codes
+        feed(&mut t, b"\x1b[0;31;103m\x1bP$qm\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1$r0;31;103m\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_reports_region_cursor_style_and_invalid() {
+        let mut t = Terminal::new(10, 20);
+        feed(&mut t, b"\x1b[3;7r\x1bP$qr\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1$r3;7r\x1b\\");
+        t.responses.clear();
+        // cursor style: default 1, then a steady bar (6)
+        feed(&mut t, b"\x1bP$q q\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1$r1 q\x1b\\");
+        t.responses.clear();
+        feed(&mut t, b"\x1b[6 q\x1bP$q q\x1b\\");
+        assert_eq!(t.responses, b"\x1bP1$r6 q\x1b\\");
+        t.responses.clear();
+        // an unknown setting gets the invalid reply, not silence
+        feed(&mut t, b"\x1bP$qz\x1b\\");
+        assert_eq!(t.responses, b"\x1bP0$r\x1b\\");
     }
 
     #[test]
