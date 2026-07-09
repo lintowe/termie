@@ -567,6 +567,7 @@ pub struct Renderer {
     gradient_cache: Vec<Instance>,
     gradient_key: (u32, u32, ThemeId),
     pane_mode: bool,
+    mark_mode: bool,
     tabs: Vec<String>,
     /// parallel to `tabs`: true = a bell rang there while backgrounded
     tab_attention: Vec<bool>,
@@ -1234,6 +1235,7 @@ impl Renderer {
             font_idx: 0,
             settings_view: SettingsView::default(),
             pane_mode: false,
+            mark_mode: false,
             tabs: Vec::new(),
             tab_attention: Vec::new(),
             active_tab: 0,
@@ -1497,6 +1499,10 @@ impl Renderer {
 
     pub fn set_pane_mode(&mut self, on: bool) {
         self.pane_mode = on;
+    }
+
+    pub fn set_mark_mode(&mut self, on: bool) {
+        self.mark_mode = on;
     }
 
     pub fn set_broadcast(&mut self, on: bool) {
@@ -3253,6 +3259,8 @@ impl Renderer {
                 ("BROADCAST", PAPER)
             } else if self.pane_mode {
                 ("PANE MODE", PAPER)
+            } else if self.mark_mode {
+                ("MARK MODE", PAPER)
             } else {
                 ("READY", TEXT_2)
             };
@@ -3512,10 +3520,11 @@ impl Renderer {
 
         // KEYBINDINGS (two sub-columns)
         self.section_label(out, cx, g.sec_keys_y, cw, "KEYBINDINGS", wide, RULE_2, MUTE);
-        let keys: [(&str, &str); 11] = [
+        let keys: [(&str, &str); 12] = [
             ("Ctrl+T", "new tab"),
             ("Ctrl+P", "palette"),
             ("Ctrl+Shift+P", "pane mode"),
+            ("Ctrl+Shift+M", "mark mode"),
             ("Ctrl+Shift+E", "split V"),
             ("Ctrl+Shift+O", "split H"),
             ("Ctrl+Shift+W", "close pane"),

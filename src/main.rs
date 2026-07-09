@@ -150,6 +150,14 @@ struct Sel {
     block: bool,
 }
 
+/// keyboard mark mode: the selection cursor cell and, once shift-extending,
+/// the anchor it grows from (both viewport-relative, like Sel)
+#[derive(Clone, Copy)]
+struct MarkState {
+    cur: (usize, usize),
+    anchor: Option<(usize, usize)>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PaletteAction {
     NewTab,
@@ -167,6 +175,8 @@ enum PaletteAction {
     CloseTab,
     Settings,
     PaneMode,
+    /// keyboard selection: move a cursor through screen + scrollback and copy
+    MarkMode,
     Quake,
     Theme,
     Plugins,
@@ -219,6 +229,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("close tab", PaletteAction::CloseTab),
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
+    ("mark mode", PaletteAction::MarkMode),
     ("zoom pane", PaletteAction::ToggleZoom),
     ("toggle fullscreen", PaletteAction::ToggleFullscreen),
     ("rename tab", PaletteAction::RenameTab),
@@ -736,6 +747,8 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
         (cs, chr("w"), A::CloseFocusedPane),
         (cs, chr("e"), A::SplitV),
         (cs, chr("o"), A::SplitH),
+        // keyboard selection, the windows terminal chord
+        (cs, chr("m"), A::MarkMode),
     ];
     for n in 1u8..=9 {
         v.push((ctrl, chr(&n.to_string()), A::SelectTab(n - 1)));
@@ -2073,6 +2086,8 @@ struct App {
     shown: bool,
     pool: Vec<Pane>,
     selection: Option<Sel>,
+    /// keyboard mark mode state; Some while active (selection mirrors it)
+    mark: Option<MarkState>,
     selecting: bool,
     /// dragging the scroll thumb: (pane id, pointer-y offset from the thumb top)
     sb_drag: Option<(usize, f32)>,
@@ -2237,6 +2252,7 @@ impl App {
             shown: false,
             pool: Vec::new(),
             selection: None,
+            mark: None,
             selecting: false,
             sb_drag: None,
             last_click: None,
@@ -3831,6 +3847,7 @@ impl App {
             PaletteAction::Settings => self.open_settings(),
             PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
+            PaletteAction::MarkMode => self.set_mark_mode(true),
             PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {
                 if let Some(r) = self.pw.renderer.as_mut() {
@@ -4686,6 +4703,123 @@ impl App {
         self.redraw();
     }
 
+    /// enter/leave keyboard mark mode: a selection cursor starts on the shell
+    /// cursor and moves with the arrows; leaving clears the highlight
+    fn set_mark_mode(&mut self, on: bool) {
+        if on {
+            let Some(pane) = self.active_focused_id() else {
+                return;
+            };
+            let Some(cur) = self.focused_grid_mut().map(|g| {
+                // start on the live screen, at the shell cursor
+                g.scroll_view(-(g.view_offset as isize));
+                (g.cursor.row.min(g.rows.saturating_sub(1)), g.cursor.col.min(g.cols.saturating_sub(1)))
+            }) else {
+                return;
+            };
+            self.mark = Some(MarkState { cur, anchor: None });
+            self.selection = Some(Sel { pane, start: cur, end: cur, block: false });
+        } else {
+            self.mark = None;
+            self.selection = None;
+        }
+        if let Some(r) = self.pw.renderer.as_mut() {
+            r.set_mark_mode(self.mark.is_some());
+        }
+        self.redraw();
+    }
+
+    /// one key in mark mode: arrows move the cursor (scrolling into history at
+    /// the edges), shift extends, enter/ctrl+c copy and exit, esc exits
+    fn mark_key(&mut self, event: &winit::event::KeyEvent) {
+        use NamedKey as N;
+        let shift = self.mods.shift_key();
+        let ctrl = self.mods.control_key();
+        let (Some(pane), Some((rows, cols))) = (
+            self.active_focused_id(),
+            self.focused_grid_mut().map(|g| (g.rows, g.cols)),
+        ) else {
+            self.set_mark_mode(false);
+            return;
+        };
+        let Some(MarkState { mut cur, anchor }) = self.mark else {
+            return;
+        };
+        let before = cur;
+        match &event.logical_key {
+            Key::Named(N::Escape) => {
+                self.set_mark_mode(false);
+                return;
+            }
+            Key::Named(N::Enter) => {
+                self.copy_selection();
+                self.set_mark_mode(false);
+                return;
+            }
+            Key::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => {
+                self.copy_selection();
+                self.set_mark_mode(false);
+                return;
+            }
+            Key::Character(c) if ctrl && shift && c.eq_ignore_ascii_case("m") => {
+                self.set_mark_mode(false);
+                return;
+            }
+            Key::Named(N::ArrowLeft) => cur.1 = cur.1.saturating_sub(1),
+            Key::Named(N::ArrowRight) => cur.1 = (cur.1 + 1).min(cols.saturating_sub(1)),
+            Key::Named(N::ArrowUp) => {
+                if cur.0 > 0 {
+                    cur.0 -= 1;
+                } else if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(1);
+                }
+            }
+            Key::Named(N::ArrowDown) => {
+                if cur.0 + 1 < rows {
+                    cur.0 += 1;
+                } else if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(-1);
+                }
+            }
+            Key::Named(N::Home) if ctrl => {
+                if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(g.scrollback.len() as isize);
+                }
+                cur = (0, 0);
+            }
+            Key::Named(N::End) if ctrl => {
+                if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(-(g.view_offset as isize));
+                }
+                cur.0 = rows.saturating_sub(1);
+                cur.1 = self.focused_grid_mut().map(|g| g.line_last_col(cur.0)).unwrap_or(0);
+            }
+            Key::Named(N::Home) => cur.1 = 0,
+            Key::Named(N::End) => {
+                cur.1 = self.focused_grid_mut().map(|g| g.line_last_col(cur.0)).unwrap_or(0);
+            }
+            // page moves scroll the view under a stationary cursor, so a page
+            // is exactly a page whether or not history remains
+            Key::Named(N::PageUp) => {
+                if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(rows.saturating_sub(1) as isize);
+                }
+            }
+            Key::Named(N::PageDown) => {
+                if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(-(rows.saturating_sub(1) as isize));
+                }
+            }
+            _ => return,
+        }
+        // shift starts (or keeps) an anchor at the pre-move cell; a plain move
+        // collapses the selection back to just the cursor
+        let anchor = if shift { anchor.or(Some(before)) } else { None };
+        self.mark = Some(MarkState { cur, anchor });
+        self.selection = Some(Sel { pane, start: anchor.unwrap_or(cur), end: cur, block: false });
+        self.redraw();
+    }
+
     /// run a pane context-menu item (index into render::PANE_MENU_ITEMS:
     /// 0 copy, 1 split vertical, 2 split horizontal, 3 pop out, 4 close pane,
     /// 5 paste). copy is a no-op when nothing is selected
@@ -5431,6 +5565,11 @@ impl App {
                     }
                     return;
                 }
+                // reaching for the mouse leaves mark mode; the click then acts
+                // on the pane normally (focus, selection, buttons)
+                if self.mark.is_some() && state == ElementState::Pressed {
+                    self.set_mark_mode(false);
+                }
                 // pane mode: drag a divider to resize, or drag a pane onto another
                 // to swap them (instead of selecting text)
                 if self.pw.pane_mode && !matches!(hit, Some(Hit::Button(_)) | Some(Hit::TitleBar) | Some(Hit::Resize(_))) {
@@ -5819,6 +5958,7 @@ impl App {
             && self.palette.is_none()
             && !self.pw.settings_open
             && !self.pw.pane_mode
+            && self.mark.is_none()
         {
             let mods = self.mods;
             let act = self
@@ -5841,6 +5981,7 @@ impl App {
             && self.palette.is_none()
             && !self.pw.settings_open
             && !self.pw.pane_mode
+            && self.mark.is_none()
             && self.mods.control_key()
             && !self.mods.shift_key()
             && !self.mods.alt_key()
@@ -5957,6 +6098,7 @@ impl App {
         // and exits it, so it stays on until you deliberately turn it off
         if self.mods.control_key()
             && self.mods.shift_key()
+            && self.mark.is_none()
             && matches!(&event.logical_key, Key::Character(c) if c.eq_ignore_ascii_case("p"))
         {
             self.set_pane_mode(!self.pw.pane_mode);
@@ -5991,6 +6133,12 @@ impl App {
                 },
                 _ => {}
             }
+            return true;
+        }
+        // mark mode captures every key until exited: keyboard selection over
+        // screen + scrollback without touching the mouse
+        if self.mark.is_some() {
+            self.mark_key(event);
             return true;
         }
 
@@ -7176,6 +7324,9 @@ mod tests {
         assert!(named(ModifiersState::empty(), NamedKey::F11, PaletteAction::ToggleFullscreen));
         assert!(named(cs, NamedKey::PageUp, PaletteAction::MoveTabLeft));
         assert!(named(cs, NamedKey::PageDown, PaletteAction::MoveTabRight));
+        // mark mode ships on the windows terminal chord and resolves by label
+        assert!(has(cs, "m", PaletteAction::MarkMode));
+        assert_eq!(action_from_label("mark mode"), Some(PaletteAction::MarkMode));
         // label resolution covers palette + keybinding-only + select-tab
         assert_eq!(action_from_label("new tab"), Some(PaletteAction::NewTab));
         assert_eq!(action_from_label("copy"), Some(PaletteAction::Copy));
