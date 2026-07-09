@@ -159,6 +159,9 @@ enum PaletteAction {
     SplitH,
     NextTab,
     PrevTab,
+    /// reorder: nudge the active tab one slot along the strip
+    MoveTabLeft,
+    MoveTabRight,
     CloseTab,
     Settings,
     PaneMode,
@@ -207,6 +210,8 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("split horizontal", PaletteAction::SplitH),
     ("next tab", PaletteAction::NextTab),
     ("previous tab", PaletteAction::PrevTab),
+    ("move tab left", PaletteAction::MoveTabLeft),
+    ("move tab right", PaletteAction::MoveTabRight),
     ("close tab", PaletteAction::CloseTab),
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
@@ -564,6 +569,20 @@ fn parse_combo(s: &str) -> Option<(ModifiersState, Key)> {
     key.map(|k| (mods, k))
 }
 
+/// where the active-tab index lands after the tab at `from` is moved to `to`:
+/// the active tab itself follows the move, tabs between the two slots shift one
+fn active_after_move(active: usize, from: usize, to: usize) -> usize {
+    if active == from {
+        to
+    } else if from < active && to >= active {
+        active - 1
+    } else if from > active && to <= active {
+        active + 1
+    } else {
+        active
+    }
+}
+
 /// the built-in keybindings, seeded before any user overrides. matching at the
 /// gate is exact-modifier (Ctrl+Alt+X is a different chord than Ctrl+X), so the
 /// shift-produced symbols '+' and '_' are seeded with Ctrl+Shift, the modifiers
@@ -602,6 +621,9 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
         (ModifiersState::SHIFT, Key::Named(NamedKey::PageDown), A::ScrollPageDown),
         (cs, Key::Named(NamedKey::Home), A::ScrollTop),
         (cs, Key::Named(NamedKey::End), A::ScrollBottom),
+        // tab reorder (the VS Code / Konsole chords)
+        (cs, Key::Named(NamedKey::PageUp), A::MoveTabLeft),
+        (cs, Key::Named(NamedKey::PageDown), A::MoveTabRight),
         (ModifiersState::empty(), Key::Named(NamedKey::F11), A::ToggleFullscreen),
         (cs, chr("w"), A::CloseFocusedPane),
         (cs, chr("e"), A::SplitV),
@@ -1861,6 +1883,9 @@ struct App {
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
     pressed: Option<Hot>,
+    /// a tab being drag-reordered along the strip: its current index, updated
+    /// live as it swaps past neighbors; cleared on release or focus loss
+    tab_drag: Option<usize>,
     last_title: String,
     config: Config,
     /// user keybindings (combo -> palette action) loaded from disk; checked
@@ -2006,6 +2031,7 @@ impl App {
             a11y: None,
             market: None,
             pressed: None,
+            tab_drag: None,
             last_title: String::new(),
             config: Config {
                 scrollback: p.scrollback,
@@ -3489,6 +3515,8 @@ impl App {
                     self.redraw();
                 }
             }
+            PaletteAction::MoveTabLeft => self.shift_active_tab(-1),
+            PaletteAction::MoveTabRight => self.shift_active_tab(1),
             PaletteAction::CloseTab => {
                 let i = self.pw.active_tab;
                 self.close_tab(i, event_loop);
@@ -3802,6 +3830,8 @@ impl App {
     /// stray Ctrl+W / middle-click can't drop multiple shells at once (session
     /// restore can't undo it — the closed tab leaves the saved layout)
     fn close_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
+        // closing a tab shifts indices, so any in-flight drag-reorder is stale
+        self.tab_drag = None;
         let panes = self
             .pw.tabs
             .get(idx)
@@ -3852,6 +3882,27 @@ impl App {
             self.relayout_all();
             self.sync_tabs();
             self.redraw();
+        }
+    }
+
+    /// move the tab at `from` so it sits at `to` (drag reorder / keyboard nudge);
+    /// the active tab stays the same tab through the shuffle
+    fn move_tab(&mut self, from: usize, to: usize) {
+        let n = self.pw.tabs.len();
+        if from == to || from >= n || to >= n {
+            return;
+        }
+        let tab = self.pw.tabs.remove(from);
+        self.pw.tabs.insert(to, tab);
+        self.pw.active_tab = active_after_move(self.pw.active_tab, from, to);
+        self.sync_tabs();
+        self.redraw();
+    }
+
+    fn shift_active_tab(&mut self, delta: i32) {
+        let to = self.pw.active_tab as i32 + delta;
+        if to >= 0 && (to as usize) < self.pw.tabs.len() {
+            self.move_tab(self.pw.active_tab, to as usize);
         }
     }
 
@@ -4568,6 +4619,9 @@ impl App {
                 if !f {
                     self.pw.ime_composing = false;
                     self.release_held_input();
+                    // a tab drag can't survive losing focus (the release lands
+                    // in another window)
+                    self.tab_drag = None;
                 }
                 // coming back acknowledges the active tab's bell dot
                 if f && self.pw.tabs.get(self.pw.active_tab).is_some_and(|t| t.attention) {
@@ -4759,6 +4813,19 @@ impl App {
         if let Some((id, _)) = self.sb_drag {
             self.apply_scrollbar_drag(id, py);
             self.redraw();
+            return;
+        }
+        // drag-reordering a tab: the held tab follows the pointer along the
+        // strip, swapping places live as it crosses its neighbors (equal tab
+        // widths keep the pointer inside the moved tab, so this can't oscillate)
+        if let Some(i) = self.tab_drag {
+            if let Some(Hit::Button(Hot::Tab(j) | Hot::TabClose(j))) =
+                self.pw.renderer.as_ref().map(|r| r.hit_test(px, py))
+                && j != i
+            {
+                self.move_tab(i, j);
+                self.tab_drag = Some(j);
+            }
             return;
         }
         // mouse-tracking motion (1002 drag / 1003 any-motion)
@@ -5128,7 +5195,15 @@ impl App {
                 }
                 match state {
                     ElementState::Pressed => match hit {
-                        Some(Hit::Button(h)) => self.pressed = Some(h),
+                        Some(Hit::Button(h)) => {
+                            self.pressed = Some(h);
+                            // a tab activates on press (like every tab strip) and
+                            // can then be dragged along the strip to reorder
+                            if let Hot::Tab(i) = h {
+                                self.switch_tab(i);
+                                self.tab_drag = Some(i);
+                            }
+                        }
                         Some(Hit::Content) => {
                             self.focus_pane_at(cx, cy);
                             // shift-click extends an existing selection in the
@@ -5232,6 +5307,7 @@ impl App {
                     },
                     ElementState::Released => {
                         self.selecting = false;
+                        self.tab_drag = None;
                         // a plain click (no drag) clears the selection; a real drag
                         // auto-copies when copy-on-select is enabled
                         if let Some(sel) = self.selection {
@@ -5242,8 +5318,10 @@ impl App {
                                 self.copy_selection();
                             }
                         }
+                        // tabs already switched on press, so a tab release is a no-op
                         if let Some(h) = self.pressed.take()
-                            && matches!(hit, Some(Hit::Button(hh)) if hh == h) {
+                            && matches!(hit, Some(Hit::Button(hh)) if hh == h)
+                            && !matches!(h, Hot::Tab(_)) {
                                 self.button_action(event_loop, h);
                             }
                     }
@@ -6069,6 +6147,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if !f {
                     self.pw.ime_composing = false;
                     self.release_held_input();
+                    // a tab drag can't survive losing focus (the release lands
+                    // in another window)
+                    self.tab_drag = None;
                 }
                 // coming back acknowledges the active tab's bell dot
                 if f && self.pw.tabs.get(self.pw.active_tab).is_some_and(|t| t.attention) {
@@ -6755,11 +6836,28 @@ mod tests {
         assert!(named(ctrl, NamedKey::Insert, PaletteAction::Copy));
         assert!(named(ModifiersState::SHIFT, NamedKey::Insert, PaletteAction::Paste));
         assert!(named(ModifiersState::empty(), NamedKey::F11, PaletteAction::ToggleFullscreen));
+        assert!(named(cs, NamedKey::PageUp, PaletteAction::MoveTabLeft));
+        assert!(named(cs, NamedKey::PageDown, PaletteAction::MoveTabRight));
         // label resolution covers palette + keybinding-only + select-tab
         assert_eq!(action_from_label("new tab"), Some(PaletteAction::NewTab));
         assert_eq!(action_from_label("copy"), Some(PaletteAction::Copy));
         assert_eq!(action_from_label("select tab 3"), Some(PaletteAction::SelectTab(2)));
         assert_eq!(action_from_label("bogus action"), None);
+    }
+
+    #[test]
+    fn active_tab_index_tracks_reorder() {
+        // the active tab itself follows the move
+        assert_eq!(active_after_move(2, 2, 0), 0);
+        assert_eq!(active_after_move(0, 0, 3), 3);
+        // a tab dragged across the active one shifts it by a single slot
+        assert_eq!(active_after_move(1, 0, 2), 0); // from left, past it, to its right
+        assert_eq!(active_after_move(1, 3, 0), 2); // from right, past it, to its left
+        assert_eq!(active_after_move(1, 3, 1), 2); // landing exactly on it from the right
+        assert_eq!(active_after_move(1, 0, 1), 0); // landing exactly on it from the left
+        // moves entirely on one side leave it alone
+        assert_eq!(active_after_move(0, 1, 3), 0);
+        assert_eq!(active_after_move(3, 0, 2), 3);
     }
 
     #[test]
