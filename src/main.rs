@@ -3315,7 +3315,11 @@ impl App {
             self.pw.active_tab = self.pw.tabs.len() - 1;
             self.relayout_all();
             self.sync_tabs();
-            self.redraw();
+            if self.find.is_some() {
+                self.find_recompute();
+            } else {
+                self.redraw();
+            }
             self.warm_pool();
             timing(&format!(
                 "new tab ({}) in {:.2}ms",
@@ -3500,19 +3504,13 @@ impl App {
             PaletteAction::NextTab => {
                 let n = self.pw.tabs.len();
                 if n > 1 {
-                    self.pw.active_tab = (self.pw.active_tab + 1) % n;
-                    self.relayout_all();
-                    self.sync_tabs();
-                    self.redraw();
+                    self.switch_tab((self.pw.active_tab + 1) % n);
                 }
             }
             PaletteAction::PrevTab => {
                 let n = self.pw.tabs.len();
                 if n > 1 {
-                    self.pw.active_tab = (self.pw.active_tab + n - 1) % n;
-                    self.relayout_all();
-                    self.sync_tabs();
-                    self.redraw();
+                    self.switch_tab((self.pw.active_tab + n - 1) % n);
                 }
             }
             PaletteAction::MoveTabLeft => self.shift_active_tab(-1),
@@ -3561,15 +3559,7 @@ impl App {
                     self.redraw();
                 }
             }
-            PaletteAction::SelectTab(n) => {
-                let n = n as usize;
-                if n < self.pw.tabs.len() && n != self.pw.active_tab {
-                    self.pw.active_tab = n;
-                    self.relayout_all();
-                    self.sync_tabs();
-                    self.redraw();
-                }
-            }
+            PaletteAction::SelectTab(n) => self.switch_tab(n as usize),
         }
         true
     }
@@ -3873,14 +3863,26 @@ impl App {
         self.pw.active_tab = self.pw.active_tab.min(self.pw.tabs.len() - 1);
         self.relayout_all();
         self.sync_tabs();
-        self.redraw();
+        // find matches are per-grid; the active tab just changed
+        if self.find.is_some() {
+            self.find_recompute();
+        } else {
+            self.redraw();
+        }
     }
 
     fn switch_tab(&mut self, idx: usize) {
-        if idx < self.pw.tabs.len() {
-            self.pw.active_tab = idx;
-            self.relayout_all();
-            self.sync_tabs();
+        if idx >= self.pw.tabs.len() || idx == self.pw.active_tab {
+            return;
+        }
+        self.pw.active_tab = idx;
+        self.relayout_all();
+        self.sync_tabs();
+        // re-run find against the newly focused pane so highlights don't stick
+        // to the previous tab's match list
+        if self.find.is_some() {
+            self.find_recompute();
+        } else {
             self.redraw();
         }
     }
@@ -4017,7 +4019,12 @@ impl App {
             // tab label + git track the focused pane; ease the accent border in
             self.focus_anim = Some(Instant::now());
             self.sync_tabs();
-            self.redraw();
+            // find is per focused pane; recompute so highlights follow the click
+            if self.find.is_some() {
+                self.find_recompute();
+            } else {
+                self.redraw();
+            }
             if let (Some(id), false) = (hit, self.plugins.is_empty()) {
                 self.plugins_broadcast(&plugin::HostEvent::FocusChanged { pane: id as u64 });
             }
@@ -5413,7 +5420,11 @@ impl App {
             // ease the accent border in on the newly focused pane
             self.focus_anim = Some(Instant::now());
             self.sync_tabs();
-            self.redraw();
+            if self.find.is_some() {
+                self.find_recompute();
+            } else {
+                self.redraw();
+            }
         }
     }
 

@@ -5,6 +5,8 @@
 ### Workflow
 - **Duplicate tab** (`Ctrl+Shift+D`, and on the palette): opens a new tab running the focused pane's shell in its current directory — the same chord Windows Terminal uses. "New tab here" keeps opening the *default* shell there; duplicate carries the shell too, so a `cmd` or WSL tab duplicates as itself.
 - **Tab reorder**: drag a tab along the strip to move it (it swaps past its neighbors live, like a browser), or nudge the active tab with `Ctrl+Shift+PgUp` / `Ctrl+Shift+PgDn` ("move tab left/right" on the palette). Tabs now also activate on press rather than release, matching every other tab strip.
+- **Find follows the focused pane.** Switching tabs or panes while find is open re-runs the query against the newly focused grid, so highlights and next/prev no longer stick to the previous pane's match list.
+- **Find spans soft-wrapped lines.** A long URL or command that the terminal wrapped mid-line is still one logical string for search (same rule as copy), so `Ctrl+Shift+F` hits it; wide-glyph continuation cells no longer break a match.
 
 ### Terminal fidelity
 - **XTGETTCAP capability queries** (`DCS + q`): answers the terminfo probes nvim and similar send when they can't trust `$TERM` (usually over ssh) — truecolor (`Tc`/`RGB`, `setrgbf`/`setrgbb`), styled underlines (`smulx`/`Su`), and color count — so those features light up without manual overrides. Unknown or malformed names get the standard failure reply instead of a hang.
