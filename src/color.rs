@@ -152,7 +152,11 @@ impl Palette {
 
     pub fn resolve_bg(&self, c: Color) -> Rgb {
         match c {
-            Color::Default | Color::DefaultBg => self.bg,
+            // a plain Default in the bg slot only happens via the SGR 7
+            // inverse swap, so it names the theme foreground — mapping it to
+            // bg painted inverse default text invisibly bg-on-bg
+            Color::Default => self.fg,
+            Color::DefaultBg => self.bg,
             Color::Indexed(i) => self.ansi[i as usize],
             Color::Rgb(r, g, b) => Rgb::new(r, g, b),
         }
@@ -519,6 +523,16 @@ fn fill_ansi(base16: [Rgb; 16]) -> [Rgb; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inverse_default_cell_resolves_to_visible_colors() {
+        // SGR 7 swaps the cell's fg/bg slots, so a default-colored cell puts
+        // Color::Default in the bg slot: it must resolve to the theme fg
+        let pal = Palette::from_theme(ThemeId::Instrument);
+        assert_eq!(pal.resolve_bg(Color::Default), pal.fg);
+        assert_eq!(pal.resolve_fg(Color::DefaultBg), pal.bg);
+        assert_ne!(pal.resolve_bg(Color::Default), pal.resolve_fg(Color::DefaultBg));
+    }
 
     #[test]
     fn bold_bright_promotes_indexed_0_7_only_when_enabled() {

@@ -20,6 +20,7 @@
 - **Prompt marks now show on the scrollbar.** The prompts Termie tracks through shell integration also appear as small pips on the rail, making the next command easier to spot before you jump to it.
 
 ### Terminal fidelity
+- **Inverse text with default colors is visible again.** SGR 7 on a cell that never set explicit colors swapped the *default-fg* and *default-bg* sentinels, and the background resolver mapped both to the theme background — reverse-video prompts and status lines in default colors painted background-on-background. The bg slot now resolves a swapped default to the theme foreground.
 - **Apps can start and stop cursor blink.** `CSI ? 12 h/l` (vim's `guicursor` blink path) now overrides the configured blink like DECSCUSR's blink bit already did, reports through DECRQM, and clears back to your default on a soft reset.
 - **IRM insert mode.** `CSI 4 h` makes prints shift the rest of the line right instead of overwriting — old full-screen editors and vttest rely on it — with the ANSI DECRQM form (`CSI 4 $ p`) reporting the state and DECSTR putting it back to replace.
 - **Apps can turn alternate scroll off.** Wheel-to-arrow-keys on the alt screen is still the default, but a full-screen app that wants the wheel dead (or handles it through mouse reporting) can now `CSI ? 1007 l` like in xterm and Windows Terminal, query the state back with DECRQM, and get the default restored on a full reset.
