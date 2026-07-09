@@ -13,6 +13,7 @@
 - **Prompt marks now show on the scrollbar.** The prompts Termie tracks through shell integration also appear as small pips on the rail, making the next command easier to spot before you jump to it.
 
 ### Terminal fidelity
+- **IRM insert mode.** `CSI 4 h` makes prints shift the rest of the line right instead of overwriting — old full-screen editors and vttest rely on it — with the ANSI DECRQM form (`CSI 4 $ p`) reporting the state and DECSTR putting it back to replace.
 - **Apps can turn alternate scroll off.** Wheel-to-arrow-keys on the alt screen is still the default, but a full-screen app that wants the wheel dead (or handles it through mouse reporting) can now `CSI ? 1007 l` like in xterm and Windows Terminal, query the state back with DECRQM, and get the default restored on a full reset.
 - **DECALN works — and `ESC 8` is safe again.** The vttest alignment pattern (`ESC # 8`) fills the screen with `E`, resets the margins and origin mode, and homes the cursor. It also used to fall through to the restore-cursor arm, so any program emitting it silently teleported the cursor instead.
 - **Real tab stops.** HTS (`ESC H`) sets a stop, TBC (`CSI g`) clears one or all, and CHT / CBT (`CSI I` / `CSI Z`) hop forward and back over them — so the `tabs` command, `tput hts`, and anything laying out columns with custom stops lands where it aimed instead of on a hardcoded every-8 grid. Stops survive a resize (new columns pick up the default cadence).

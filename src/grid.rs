@@ -150,6 +150,8 @@ pub struct Grid {
     pub region_bottom: usize,
     /// DECOM origin mode: CUP/VPA address relative to the scroll region top
     pub origin_mode: bool,
+    /// IRM insert mode (ANSI mode 4): prints shift the rest of the line right
+    pub insert_mode: bool,
     /// DECAWM autowrap (mode 7): off pins prints at the right margin instead
     /// of wrapping to the next line
     pub autowrap: bool,
@@ -248,6 +250,7 @@ impl Grid {
             region_top: 0,
             region_bottom: rows - 1,
             origin_mode: false,
+            insert_mode: false,
             autowrap: true,
             saved_origin: false,
             view_offset: 0,
@@ -842,6 +845,11 @@ impl Grid {
             } else {
                 self.cursor.col = self.cols.saturating_sub(2);
             }
+        }
+        // IRM: shift the rest of the line right so the glyph is inserted, not
+        // overwritten (the blanks it opens are filled by the write below)
+        if self.insert_mode {
+            self.insert_chars(w);
         }
         let row = self.cursor.row;
         let col = self.cursor.col;

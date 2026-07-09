@@ -191,6 +191,8 @@ impl Terminal {
         self.apply_sgr(&[&[0u16][..]]);
         self.grid.set_scroll_region(0, self.grid.rows - 1);
         self.grid.origin_mode = false;
+        // DECSTR puts IRM back to replace
+        self.grid.insert_mode = false;
         // DECSTR restores autowrap to its set default
         self.grid.autowrap = true;
         self.grid.cursor.shape_set = false;
@@ -432,8 +434,10 @@ impl Terminal {
                 }
                 _ => {}
             }
+        } else if mode == 4 {
+            // IRM: insert mode (old full-screen editors and vttest)
+            self.grid.insert_mode = enable;
         }
-        // non-private (ANSI) modes: none needed for the tracer bullet
     }
 
     fn apply_sgr(&mut self, groups: &[&[u16]]) {
@@ -938,6 +942,22 @@ impl Perform for Terminal {
                 let state = self.dec_mode_state(m);
                 self.responses
                     .extend_from_slice(format!("\x1b[?{};{}$y", m, state).as_bytes());
+            }
+            // DECRQM for ANSI modes (CSI Ps $ p): only IRM is tracked
+            'p' if !private && intermediates.first() == Some(&b'$') => {
+                let m = param_at(params, 0, 0);
+                let state = match m {
+                    4 => {
+                        if self.grid.insert_mode {
+                            1
+                        } else {
+                            2
+                        }
+                    }
+                    _ => 0,
+                };
+                self.responses
+                    .extend_from_slice(format!("\x1b[{};{}$y", m, state).as_bytes());
             }
             // XTWINOPS size reports; the resize/iconify/title-stack ops are
             // deliberately ignored
@@ -1714,6 +1734,30 @@ mod tests {
         feed(&mut t, b"\x1b]9;9;C:\\work\x1b\\");
         assert_eq!(t.cwd.as_deref(), Some("C:\\work"));
         assert!(t.cwd_dirty);
+    }
+
+    #[test]
+    fn irm_insert_mode_shifts_the_line() {
+        let mut t = Terminal::new(2, 10);
+        feed(&mut t, b"abcdef\x1b[1;3H");
+        // replace mode overwrites
+        feed(&mut t, b"X");
+        assert_eq!(t.grid.lines[0][2].c, 'X');
+        assert_eq!(t.grid.lines[0][3].c, 'd');
+        // insert mode shifts the tail right, dropping what falls off the edge
+        feed(&mut t, b"\x1b[4h\x1b[1;3HY");
+        assert_eq!(t.grid.lines[0][2].c, 'Y');
+        assert_eq!(t.grid.lines[0][3].c, 'X');
+        assert_eq!(t.grid.lines[0][4].c, 'd');
+        // DECRQM (ANSI form) reports it set
+        feed(&mut t, b"\x1b[4$p");
+        assert_eq!(t.responses, b"\x1b[4;1$y");
+        t.responses.clear();
+        // DECSTR restores replace mode
+        feed(&mut t, b"\x1b[!p");
+        assert!(!t.grid.insert_mode);
+        feed(&mut t, b"\x1b[4$p");
+        assert_eq!(t.responses, b"\x1b[4;2$y");
     }
 
     #[test]
