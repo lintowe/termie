@@ -376,30 +376,52 @@ impl Grid {
 
     /// case-insensitive substring search across scrollback and the live screen;
     /// returns (global_line_index, col) for each match start, in top-to-bottom
-    /// order. global indices span scrollback (0..len) then live lines
+    /// order. global indices span scrollback (0..len) then live lines.
+    /// soft-wrapped runs are joined (same as copy), so a long URL that wrapped
+    /// still matches; wide-glyph continuation cells (`\0`) are skipped
     pub fn search(&self, needle: &str) -> Vec<(usize, usize)> {
         let needle: Vec<char> = needle.chars().map(|c| c.to_ascii_lowercase()).collect();
         let mut out = Vec::new();
         if needle.is_empty() {
             return out;
         }
-        let scan = |cells: &Line, gi: usize, out: &mut Vec<(usize, usize)>| {
-            if cells.len() < needle.len() {
-                return;
-            }
-            let lc: Vec<char> = cells.iter().map(|c| c.c.to_ascii_lowercase()).collect();
-            for start in 0..=(lc.len() - needle.len()) {
-                if lc[start..start + needle.len()] == needle[..] {
-                    out.push((gi, start));
-                }
+        let total = self.total_lines();
+        let line_at_global = |gi: usize| -> &Line {
+            if gi < self.scrollback.len() {
+                &self.scrollback[gi]
+            } else {
+                &self.lines[gi - self.scrollback.len()]
             }
         };
-        for (i, line) in self.scrollback.iter().enumerate() {
-            scan(line, i, &mut out);
-        }
-        let base = self.scrollback.len();
-        for (i, line) in self.lines.iter().enumerate() {
-            scan(line, base + i, &mut out);
+        let mut gi = 0;
+        while gi < total {
+            // one logical run: this row plus any soft-wrapped continuations
+            let mut text: Vec<char> = Vec::new();
+            // text[i] came from physical (global_line, col)
+            let mut map: Vec<(usize, usize)> = Vec::new();
+            loop {
+                let line = line_at_global(gi);
+                for (col, cell) in line.iter().enumerate() {
+                    // skip the empty half of a wide glyph so "a漢b" still matches
+                    if cell.c == '\0' {
+                        continue;
+                    }
+                    text.push(cell.c.to_ascii_lowercase());
+                    map.push((gi, col));
+                }
+                if !line.wrapped || gi + 1 >= total {
+                    break;
+                }
+                gi += 1;
+            }
+            if text.len() >= needle.len() {
+                for start in 0..=(text.len() - needle.len()) {
+                    if text[start..start + needle.len()] == needle[..] {
+                        out.push(map[start]);
+                    }
+                }
+            }
+            gi += 1;
         }
         out
     }
@@ -1662,5 +1684,69 @@ mod tests {
         assert_eq!(collect_labels(&g), expect, "after narrow (each line wraps)");
         g.resize(4, 30);
         assert_eq!(collect_labels(&g), expect, "after re-widen");
+    }
+
+    #[test]
+    fn search_is_case_insensitive_and_skips_empty() {
+        let mut g = Grid::new(3, 20);
+        for c in "Hello World".chars() {
+            g.put_char(c);
+        }
+        assert!(g.search("").is_empty());
+        assert_eq!(g.search("hello"), vec![(0, 0)]);
+        assert_eq!(g.search("WORLD"), vec![(0, 6)]);
+        assert_eq!(g.search("lo wo"), vec![(0, 3)]);
+        assert!(g.search("xyz").is_empty());
+    }
+
+    #[test]
+    fn search_hits_scrollback_and_live_screen() {
+        let mut g = Grid::new(2, 10);
+        for c in "alpha".chars() {
+            g.put_char(c);
+        }
+        g.carriage_return();
+        g.linefeed();
+        for c in "beta".chars() {
+            g.put_char(c);
+        }
+        g.carriage_return();
+        g.linefeed(); // alpha -> scrollback
+        for c in "gamma".chars() {
+            g.put_char(c);
+        }
+        // scrollback[0]=alpha, live[0]=beta, live[1]=gamma
+        assert_eq!(g.scrollback.len(), 1);
+        assert_eq!(g.search("alpha"), vec![(0, 0)]);
+        assert_eq!(g.search("beta"), vec![(1, 0)]);
+        assert_eq!(g.search("gamma"), vec![(2, 0)]);
+        // every named hit is present; full "a" scan covers both letters of alpha
+        let a_hits = g.search("a");
+        assert!(a_hits.contains(&(0, 0)));
+        assert!(a_hits.contains(&(0, 4)));
+        assert!(a_hits.contains(&(1, 3)));
+        assert!(a_hits.contains(&(2, 1)));
+    }
+
+    #[test]
+    fn search_spans_soft_wrapped_lines() {
+        // 8-col grid: "FINDME!!" fills the first row and wraps the rest
+        let mut g = Grid::new(4, 8);
+        for c in "xxFINDME!!yy".chars() {
+            g.put_char(c);
+        }
+        // "xxFINDME" on row 0 (wrapped), "!!yy" on row 1 — needle crosses the join
+        assert!(g.lines[0].wrapped);
+        assert_eq!(g.search("FINDME!!"), vec![(0, 2)]);
+        // a hard newline must still break the run
+        g.carriage_return();
+        g.linefeed();
+        for c in "FINDME!!".chars() {
+            g.put_char(c);
+        }
+        // the soft-wrap match on the first logical line, plus the hard-line one
+        let hits = g.search("FINDME!!");
+        assert!(hits.contains(&(0, 2)));
+        assert!(hits.len() >= 2);
     }
 }
