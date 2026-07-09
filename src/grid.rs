@@ -916,6 +916,25 @@ impl Grid {
         self.cursor.wrap_pending = false;
     }
 
+    /// DECALN: fill the screen with 'E', reset the margins and origin mode,
+    /// and home the cursor — the vttest alignment pattern
+    pub fn screen_alignment_test(&mut self) {
+        let cell = Cell {
+            c: 'E',
+            ..Cell::default()
+        };
+        for line in &mut self.lines {
+            line.cells.iter_mut().for_each(|c| *c = cell);
+            line.wrapped = false;
+        }
+        self.region_top = 0;
+        self.region_bottom = self.rows - 1;
+        self.origin_mode = false;
+        self.cursor.row = 0;
+        self.cursor.col = 0;
+        self.cursor.wrap_pending = false;
+    }
+
     /// HTS: set a tab stop at the cursor column
     pub fn set_tab_stop(&mut self) {
         let col = self.cursor.col;

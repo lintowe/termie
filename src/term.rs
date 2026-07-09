@@ -980,6 +980,15 @@ impl Perform for Terminal {
             self.dirty = true;
             return;
         }
+        // DECALN screen alignment test (ESC # 8): without this check the byte
+        // would fall into the DECRC arm below and quietly move the cursor
+        if intermediates.first() == Some(&b'#') {
+            if byte == b'8' {
+                self.grid.screen_alignment_test();
+            }
+            self.dirty = true;
+            return;
+        }
         match byte {
             b'M' => self.grid.reverse_index(),
             b'D' => self.grid.linefeed(),
@@ -1698,6 +1707,26 @@ mod tests {
         feed(&mut t, b"\x1b]9;9;C:\\work\x1b\\");
         assert_eq!(t.cwd.as_deref(), Some("C:\\work"));
         assert!(t.cwd_dirty);
+    }
+
+    #[test]
+    fn decaln_fills_screen_and_resets_margins() {
+        let mut t = Terminal::new(4, 10);
+        // shrink the region, turn on origin mode, park the cursor mid-screen
+        feed(&mut t, b"\x1b[2;3r\x1b[?6h\x1b[2;5Hxyz\x1b#8");
+        assert_eq!(t.grid.cursor.row, 0);
+        assert_eq!(t.grid.cursor.col, 0);
+        assert!(!t.grid.origin_mode);
+        assert_eq!(t.grid.region_top, 0);
+        assert_eq!(t.grid.region_bottom, 3);
+        for r in 0..4 {
+            for c in 0..10 {
+                assert_eq!(t.grid.lines[r][c].c, 'E', "row {r} col {c}");
+            }
+        }
+        // ESC 8 alone must still be DECRC, not a stray alignment fill
+        feed(&mut t, b"\x1b7\x1b[3;3Hq\x1b8");
+        assert_eq!(t.grid.lines[2][2].c, 'q');
     }
 
     #[test]
