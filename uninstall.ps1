@@ -33,6 +33,21 @@ foreach ($key in @('HKCU:\Software\Classes\Directory\shell\termie',
     if (Test-Path $key) { Remove-Item $key -Recurse -Force; Write-Host "    removed $key" }
 }
 
+# default-terminal delegation: restore the previous pair if it points at termie
+$termieClsid = '{D6F7E8A1-3C52-4B0F-9E6A-71B2C0A4F3D9}'
+$clsidKey = "HKCU:\Software\Classes\CLSID\$termieClsid"
+$startup = 'HKCU:\Console\%%Startup'
+$current = (Get-ItemProperty -Path $startup -Name DelegationTerminal -ErrorAction SilentlyContinue).DelegationTerminal
+if ($current -eq $termieClsid) {
+    $zero = '{00000000-0000-0000-0000-000000000000}'
+    $pc = (Get-ItemProperty -Path $clsidKey -Name PrevDelegationConsole -ErrorAction SilentlyContinue).PrevDelegationConsole
+    $pt = (Get-ItemProperty -Path $clsidKey -Name PrevDelegationTerminal -ErrorAction SilentlyContinue).PrevDelegationTerminal
+    Set-ItemProperty -Path $startup -Name DelegationConsole -Value ($(if ($pc) { $pc } else { $zero }))
+    Set-ItemProperty -Path $startup -Name DelegationTerminal -Value ($(if ($pt) { $pt } else { $zero }))
+    Write-Host "    restored default terminal delegation"
+}
+if (Test-Path $clsidKey) { Remove-Item $clsidKey -Recurse -Force; Write-Host "    removed $clsidKey" }
+
 # PATH entry
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath) {

@@ -125,10 +125,66 @@ pub fn uninstall() -> Result<(), String> {
         let _ = std::fs::remove_file(lnk);
     }
     unregister_verbs();
+    unregister_defterm();
     remove_from_path(&dir);
     delete_hkcu_tree("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\termie");
     schedule_dir_removal(&dir);
     Ok(())
+}
+
+/// if the windows default-terminal delegation points at termie, restore the
+/// pair that was active before registration (stashed under the CLSID key) and
+/// drop the handoff COM class — console apps must not chase a deleted exe
+fn unregister_defterm() {
+    const TERMIE_CLSID: &str = "{D6F7E8A1-3C52-4B0F-9E6A-71B2C0A4F3D9}";
+    const STARTUP: &str = "Console\\%%Startup";
+    const DEFAULT: &str = "{00000000-0000-0000-0000-000000000000}";
+    let clsid_key = format!("Software\\Classes\\CLSID\\{TERMIE_CLSID}");
+    let ours = read_hkcu_sz(STARTUP, "DelegationTerminal")
+        .map(|v| v.eq_ignore_ascii_case(TERMIE_CLSID))
+        .unwrap_or(false);
+    if ours {
+        let pc = read_hkcu_sz(&clsid_key, "PrevDelegationConsole").filter(|s| !s.is_empty());
+        let pt = read_hkcu_sz(&clsid_key, "PrevDelegationTerminal").filter(|s| !s.is_empty());
+        if let Some(key) = create_hkcu(STARTUP) {
+            set_hkcu_sz(key, Some("DelegationConsole"), pc.as_deref().unwrap_or(DEFAULT));
+            set_hkcu_sz(key, Some("DelegationTerminal"), pt.as_deref().unwrap_or(DEFAULT));
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+        }
+    }
+    delete_hkcu_tree(&clsid_key);
+}
+
+/// read an HKCU REG_SZ value; None when the key/value is missing
+fn read_hkcu_sz(path: &str, value: &str) -> Option<String> {
+    unsafe {
+        let mut key = HKEY::default();
+        let p = wide(path);
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(p.as_ptr()), Some(0), KEY_READ, &mut key)
+            != ERROR_SUCCESS
+        {
+            return None;
+        }
+        let name = wide(value);
+        let mut buf = [0u16; 512];
+        let mut bytes = (buf.len() * 2) as u32;
+        let q = RegQueryValueExW(
+            key,
+            PCWSTR(name.as_ptr()),
+            None,
+            None,
+            Some(buf.as_mut_ptr() as *mut u8),
+            Some(&mut bytes),
+        );
+        let _ = RegCloseKey(key);
+        if q != ERROR_SUCCESS {
+            return None;
+        }
+        let chars = (bytes as usize / 2).min(buf.len());
+        Some(String::from_utf16_lossy(&buf[..chars]).trim_end_matches('\0').to_string())
+    }
 }
 
 /// for /update: keep whatever integration choices the original install made
