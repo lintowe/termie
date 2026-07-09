@@ -207,6 +207,9 @@ impl Terminal {
             1 => self.app_cursor_keys,
             6 => self.grid.origin_mode,
             7 => self.grid.autowrap,
+            // unset means the user-configured default (not visible from here);
+            // report the spec default of blinking until an app sets it
+            12 => self.grid.cursor.shape_blink.unwrap_or(true),
             25 => self.grid.cursor.visible,
             1000 => self.mouse_proto == MouseProto::Normal,
             1002 => self.mouse_proto == MouseProto::Button,
@@ -406,6 +409,8 @@ impl Terminal {
                         self.grid.cursor.wrap_pending = false;
                     }
                 }
+                // ATT610 cursor blink (vim's guicursor blinkon/blinkoff path)
+                12 => self.grid.cursor.shape_blink = Some(enable),
                 25 => self.grid.cursor.visible = enable,
                 80 => self.sixel_display_mode = enable,
                 2026 => self.sync_output = enable,
@@ -1734,6 +1739,22 @@ mod tests {
         feed(&mut t, b"\x1b]9;9;C:\\work\x1b\\");
         assert_eq!(t.cwd.as_deref(), Some("C:\\work"));
         assert!(t.cwd_dirty);
+    }
+
+    #[test]
+    fn mode_12_controls_cursor_blink() {
+        let mut t = Terminal::new(2, 10);
+        assert_eq!(t.grid.cursor.shape_blink, None);
+        feed(&mut t, b"\x1b[?12l");
+        assert_eq!(t.grid.cursor.shape_blink, Some(false));
+        feed(&mut t, b"\x1b[?12$p");
+        assert_eq!(t.responses, b"\x1b[?12;2$y");
+        t.responses.clear();
+        feed(&mut t, b"\x1b[?12h");
+        assert_eq!(t.grid.cursor.shape_blink, Some(true));
+        // DECSTR clears the app override back to the configured default
+        feed(&mut t, b"\x1b[!p");
+        assert_eq!(t.grid.cursor.shape_blink, None);
     }
 
     #[test]
