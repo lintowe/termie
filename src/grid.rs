@@ -725,6 +725,17 @@ impl Grid {
         self.prompts.push(abs);
     }
 
+    /// retained OSC 133 prompt rows as indices into the complete visible history
+    /// (scrollback first, then the live screen), in chronological order
+    pub fn prompt_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        let base = self.prompt_base();
+        let total = self.total_lines();
+        self.prompts.iter().filter_map(move |&mark| {
+            mark.checked_sub(base)
+                .and_then(|row| (row < total as u64).then_some(row as usize))
+        })
+    }
+
     /// scroll to the next (forward) or previous prompt mark relative to the
     /// current viewport top; returns true if the view moved
     pub fn jump_prompt(&mut self, forward: bool) -> bool {
@@ -1545,6 +1556,7 @@ mod tests {
         // generous limit: nothing evicted, every mark within the retained window
         assert_eq!(g.prompts.len(), 5);
         assert!(g.prompts.iter().all(|&p| p >= g.prompt_base()));
+        assert_eq!(g.prompt_rows().count(), 5);
         // from the live bottom, jumping back reaches a prompt and scrolls up
         assert!(g.jump_prompt(false));
         let v1 = g.view_offset;

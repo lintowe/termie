@@ -45,7 +45,7 @@ termie checks for a newer release once a day and shows a small `UPDATE` chip on 
 | `Ctrl+Shift+F` | find in scrollback |
 | `Ctrl+Shift+B` | broadcast input to every pane |
 | `Ctrl+Shift+W` | close pane |
-| `Ctrl+Up` / `Ctrl+Down` | jump to previous / next prompt |
+| `Ctrl+Up` / `Ctrl+Down` | jump to previous / next prompt (marked on the scrollbar) |
 | `Shift+PgUp` / `Shift+PgDn` | scroll a page of history |
 | `Ctrl+Shift+Home` / `Ctrl+Shift+End` | scroll to the top / bottom |
 | `F11` | fullscreen |

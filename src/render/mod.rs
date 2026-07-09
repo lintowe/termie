@@ -2809,6 +2809,18 @@ impl Renderer {
         {
             Self::push_rect(out, t.track_x, t.track_y, t.track_w, t.track_h, palette.mute, 0.18);
             Self::push_rect(out, t.track_x, t.thumb_y, t.track_w, t.thumb_h, palette.mute, 0.8);
+            let total = grid.total_lines().max(1) as f32;
+            let tick_h = beam_w.min(cell_h).max(1.0);
+            let max_y = t.track_y + t.track_h - tick_h;
+            let mut last_y = None;
+            for row in grid.prompt_rows() {
+                let y = (t.track_y + t.track_h * (row as f32 + 0.5) / total).round().min(max_y);
+                if last_y == Some(y) {
+                    continue;
+                }
+                Self::push_rect(out, t.track_x, y, t.track_w, tick_h, palette.paper, 0.6);
+                last_y = Some(y);
+            }
         }
     }
 
@@ -4744,6 +4756,43 @@ mod tests {
     fn scrollbar_uses_the_right_padding_gutter() {
         let thumb = Renderer::scrollbar_geom(10.0, 20.0, 4, 2, 8.0, 16.0, 2.0, 10, 0).unwrap();
         assert!(thumb.track_x >= 10.0 + 4.0 * 8.0);
+    }
+
+    #[test]
+    fn scrollbar_renders_a_prompt_tick() {
+        let mut marked = Terminal::new(2, 4);
+        marked.grid.mark_prompt();
+        marked.grid.linefeed();
+        marked.grid.linefeed();
+        let mut plain = Terminal::new(2, 4);
+        plain.grid.linefeed();
+        plain.grid.linefeed();
+
+        let mut atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let palette = Palette::from_theme(ThemeId::Instrument);
+        let mut draw = |term: &Terminal| {
+            let mut out = Vec::new();
+            Renderer::draw_grid(
+                &mut atlas,
+                &palette,
+                &mut out,
+                term,
+                0.0,
+                0.0,
+                true,
+                true,
+                true,
+                2.0,
+                CursorShape::Block,
+                None,
+                None,
+                &[],
+                true,
+            );
+            out.len()
+        };
+
+        assert_eq!(draw(&marked), draw(&plain) + 1);
     }
 
     #[test]

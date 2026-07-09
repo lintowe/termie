@@ -10,6 +10,7 @@
 
 ### Interface
 - **The scrollbar is now a stable dedicated rail.** It stays in the reserved right gutter whenever a pane has history, so a full-screen TUI cannot fight the thumb for the final text cell.
+- **Prompt marks now show on the scrollbar.** The prompts Termie tracks through shell integration also appear as small pips on the rail, making the next command easier to spot before you jump to it.
 
 ### Terminal fidelity
 - **Prompt navigation survives a resize.** Shell-integration prompt marks now
