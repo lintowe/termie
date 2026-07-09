@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Security
+- **`cargo audit` is clean of vulnerabilities.** Bumped `anyhow` (RUSTSEC-2026-0190) and `memmap2` (RUSTSEC-2026-0186), pulled `zbus_xml` past the vulnerable `quick-xml` 0.39 line, and patched `wayland-scanner` to the upstream commit that uses `quick-xml` 0.41 (RUSTSEC-2026-0194/0195) until crates.io ships it. The remaining audit note is the informational `ttf-parser` unmaintained warning via `cosmic-text`/`fontdb`.
+
 ### Installer
 - **Old MSI leftovers can't survive a native install.** Removing the previous per-machine MSI now elevates via UAC when a quiet uninstall is not enough, then scrubs `Program Files\termie`, the all-users Start shortcut, and a machine PATH entry so Search never shows two termies side by side.
 
