@@ -65,6 +65,9 @@ pub struct Terminal {
     pub mouse_proto: MouseProto,
     pub mouse_sgr: bool,
     pub focus_events: bool,
+    /// mode 1007 "alternate scroll": wheel becomes arrow keys on the alt
+    /// screen. ships on (the pager-friendly default) but apps may turn it off
+    pub alt_scroll: bool,
 
     pub title: String,
     pub cwd: Option<String>,
@@ -124,6 +127,7 @@ impl Terminal {
             mouse_proto: MouseProto::Off,
             mouse_sgr: false,
             focus_events: false,
+            alt_scroll: true,
             title: String::new(),
             cwd: None,
             cwd_dirty: false,
@@ -207,6 +211,7 @@ impl Terminal {
             1003 => self.mouse_proto == MouseProto::Any,
             1004 => self.focus_events,
             1006 => self.mouse_sgr,
+            1007 => self.alt_scroll,
             80 => self.sixel_display_mode,
             2004 => self.bracketed_paste,
             2026 => self.sync_output,
@@ -407,6 +412,7 @@ impl Terminal {
                 1003 => self.mouse_proto = if enable { MouseProto::Any } else { MouseProto::Off },
                 1006 => self.mouse_sgr = enable,
                 1004 => self.focus_events = enable,
+                1007 => self.alt_scroll = enable,
                 2004 => self.bracketed_paste = enable,
                 47 | 1047 => {
                     if enable {
@@ -1008,6 +1014,7 @@ impl Perform for Terminal {
                 self.using_alt = false;
                 self.app_cursor_keys = false;
                 self.bracketed_paste = false;
+                self.alt_scroll = true;
                 self.kbd_stack = vec![0];
                 self.g0 = Charset::Ascii;
                 self.g1 = Charset::Ascii;
@@ -1707,6 +1714,23 @@ mod tests {
         feed(&mut t, b"\x1b]9;9;C:\\work\x1b\\");
         assert_eq!(t.cwd.as_deref(), Some("C:\\work"));
         assert!(t.cwd_dirty);
+    }
+
+    #[test]
+    fn mode_1007_tracks_alternate_scroll() {
+        let mut t = Terminal::new(4, 10);
+        assert!(t.alt_scroll);
+        feed(&mut t, b"\x1b[?1007l");
+        assert!(!t.alt_scroll);
+        // DECRQM reports it reset
+        feed(&mut t, b"\x1b[?1007$p");
+        assert_eq!(t.responses, b"\x1b[?1007;2$y");
+        t.responses.clear();
+        feed(&mut t, b"\x1b[?1007h");
+        assert!(t.alt_scroll);
+        // RIS restores the default-on state
+        feed(&mut t, b"\x1b[?1007l\x1bc");
+        assert!(t.alt_scroll);
     }
 
     #[test]

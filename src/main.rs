@@ -5191,7 +5191,7 @@ impl App {
                         if !p.term.using_alt {
                             p.term.grid.scroll_view(step as isize);
                             self.redraw();
-                        } else {
+                        } else if p.term.alt_scroll {
                             // the alt screen has no scrollback: translate the
                             // wheel to arrow keys (the default-on "alternate
                             // scroll" other terminals ship) so pagers — less,
