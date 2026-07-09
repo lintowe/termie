@@ -20,6 +20,16 @@ project (https://github.com/ryanoasis/nerd-fonts). The constituent icon sets
 carry their own permissive licenses (MIT, OFL, and others) as documented by
 that project.
 
+## Bundled ConPTY host (`conpty.dll`, `OpenConsole.exe`)
+
+Copyright (c) Microsoft Corporation.
+
+Built from the Windows Terminal / console source at
+https://github.com/microsoft/terminal and distributed by Microsoft as the
+`Microsoft.Windows.Console.ConPTY` NuGet package, under the MIT License.
+termie ships the pair beside its executable so terminal sessions run on a
+current ConPTY host instead of the older one built into Windows.
+
 ## Rust dependencies
 
 termie links a number of Rust crates (anyhow, bytemuck, cosmic-text, log, png,

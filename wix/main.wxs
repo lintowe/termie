@@ -62,6 +62,15 @@
         </File>
       </Component>
 
+      <!-- sideloaded ConPTY host (fetched by setup\fetch-conpty.ps1 before the
+           WiX build): the inbox conhost strips sixel; this pair passes it through -->
+      <Component Id="C_conpty_dll" Guid="*">
+        <File Id="conpty.dll" Source="target\release\conpty.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="C_openconsole_exe" Guid="*">
+        <File Id="OpenConsole.exe" Source="target\release\OpenConsole.exe" KeyPath="yes" />
+      </Component>
+
       <!-- add the install dir to the machine PATH so `termie` works in any shell -->
       <Component Id="C_path" Guid="*">
         <RegistryValue Root="HKLM" Key="SOFTWARE\termie" Name="InstallDir"
@@ -123,6 +132,8 @@
 
     <Feature Id="Main" Title="termie" Level="1">
       <ComponentRef Id="C_termie_exe" />
+      <ComponentRef Id="C_conpty_dll" />
+      <ComponentRef Id="C_openconsole_exe" />
       <ComponentRef Id="C_path" />
       <ComponentRef Id="C_apppaths" />
       <ComponentRef Id="C_ctxmenu" />

@@ -33,6 +33,10 @@ jobs:
       - name: build (release, LTO)
         run: cargo build --release
 
+      - name: fetch conpty host
+        shell: pwsh
+        run: pwsh -NoProfile -File setup\fetch-conpty.ps1 -Dest target\release
+
       - name: build installer (WiX MSI)
         shell: powershell
         run: |
@@ -62,6 +66,7 @@ jobs:
           if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item target\release\termie.exe $stage\
+          Copy-Item target\release\conpty.dll, target\release\OpenConsole.exe $stage\
           Copy-Item assets $stage\assets -Recurse
           Copy-Item LICENSE-MIT, LICENSE-APACHE, THIRDPARTY.md $stage\
           Set-Content (Join-Path $stage 'VERSION') $ver
