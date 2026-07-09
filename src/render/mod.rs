@@ -2834,6 +2834,11 @@ impl Renderer {
                 }
                 let (color, alpha) = if failed {
                     (palette.ansi_color(1), 0.95)
+                } else if y + tick_h > t.thumb_y && y < t.thumb_y + t.thumb_h {
+                    // a paper tick over the thumb blends into it (both light);
+                    // cut a dark notch instead so a prompt at the live bottom
+                    // stays marked
+                    (palette.bg, 0.9)
                 } else {
                     (palette.paper, 0.6)
                 };
@@ -4815,6 +4820,40 @@ mod tests {
         };
 
         assert_eq!(draw(&marked), draw(&plain) + 1);
+    }
+
+    // a prompt at the live bottom lands its tick inside the thumb; it must
+    // paint as a dark notch (bg), not the paper color that vanishes into it
+    #[test]
+    fn bottom_prompt_tick_notches_the_thumb() {
+        let mut term = Terminal::new(2, 4);
+        term.grid.linefeed();
+        term.grid.linefeed();
+        term.grid.mark_prompt();
+
+        let mut atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let palette = Palette::from_theme(ThemeId::Instrument);
+        let mut out = Vec::new();
+        Renderer::draw_grid(
+            &mut atlas,
+            &palette,
+            &mut out,
+            &term,
+            0.0,
+            0.0,
+            true,
+            true,
+            true,
+            2.0,
+            CursorShape::Block,
+            None,
+            None,
+            &[],
+            true,
+        );
+        let tick = out.last().unwrap();
+        let bg = palette.bg.to_linear_f32();
+        assert_eq!(&tick.color[..3], &bg[..3]);
     }
 
     #[test]
