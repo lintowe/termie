@@ -1971,12 +1971,16 @@ mod tests {
             state
         };
         // weighted toward control/escape bytes so the CSI/OSC/SGR machinery is
-        // exercised, not just printable text
-        let alphabet: &[u8] = b"\x1b[]0123456789;:?>=<mHJKABCDsuhlr \x07\r\n\t\x08\xff\xc2\x80\xf0\x9f";
+        // exercised, not just printable text. P/q/#/!/~/- open and drive DCS
+        // (sixel, XTGETTCAP, DECRQSS), _ and G reach the APC kitty-graphics
+        // path, and \ closes any of them with ST mid-stream
+        let alphabet: &[u8] =
+            b"\x1b[]0123456789;:?>=<mHJKABCDsuhlrPq#!~-_G$+\\ \x07\r\n\t\x08\xff\xc2\x80\xf0\x9f";
         for _ in 0..500 {
             let rows = 1 + (next() % 40) as usize;
             let cols = 1 + (next() % 120) as usize;
             let mut t = Terminal::new(rows, cols);
+            t.set_cell_px(8, 16);
             let len = (next() % 800) as usize;
             let buf: Vec<u8> = (0..len).map(|_| alphabet[(next() as usize) % alphabet.len()]).collect();
             feed(&mut t, &buf);
