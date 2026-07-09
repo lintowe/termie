@@ -1,0 +1,11 @@
+{
+  "id": "hello-world",
+  "name": "Hello World",
+  "version": "0.1.0",
+  "api_version": 2,
+  "entry": {
+    "cmd": "python",
+    "args": ["plugin.py"]
+  },
+  "permissions": []
+}
