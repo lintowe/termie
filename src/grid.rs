@@ -241,6 +241,29 @@ fn char_width(c: char) -> usize {
     1
 }
 
+/// narrow-by-default bases of Unicode's emoji-variation-sequences.txt: a VS16
+/// (U+FE0F) after one of these requests emoji presentation, and the cell
+/// promotes to double width. kitty, ghostty, and rio settled on promotion;
+/// alacritty and WT leave the color glyph overflowing its single cell
+fn emoji_vs_base(c: char) -> bool {
+    matches!(c as u32,
+        0x23 | 0x2A | 0x30..=0x39 | 0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122
+        | 0x2139 | 0x2194..=0x2199 | 0x21A9..=0x21AA | 0x2328 | 0x23CF
+        | 0x23ED..=0x23EF | 0x23F1..=0x23F2 | 0x23F8..=0x23FA | 0x24C2
+        | 0x25AA..=0x25AB | 0x25B6 | 0x25C0 | 0x25FB..=0x25FC | 0x2600..=0x2604
+        | 0x260E | 0x2611 | 0x2618 | 0x261D | 0x2620 | 0x2622..=0x2623 | 0x2626
+        | 0x262A | 0x262E..=0x262F | 0x2638..=0x263A | 0x2640 | 0x2642
+        | 0x265F..=0x2660 | 0x2663 | 0x2665..=0x2666 | 0x2668 | 0x267B | 0x267E
+        | 0x2692..=0x2697 | 0x2699 | 0x269B..=0x269C | 0x26A0 | 0x26A7
+        | 0x26B0..=0x26B1 | 0x26C8 | 0x26CF | 0x26D1 | 0x26D3 | 0x26E9
+        | 0x26F0..=0x26F1 | 0x26F4 | 0x26F7..=0x26F9 | 0x2702 | 0x2708..=0x2709
+        | 0x270C..=0x270D | 0x270F | 0x2712 | 0x2714 | 0x2716 | 0x271D | 0x2721
+        | 0x2733..=0x2734 | 0x2744 | 0x2747 | 0x2763..=0x2764 | 0x27A1
+        | 0x2934..=0x2935 | 0x2B05..=0x2B07 | 0x2B1B..=0x2B1C | 0x3030 | 0x303D
+        | 0x3297 | 0x3299 | 0x1F170..=0x1F171 | 0x1F17E..=0x1F17F | 0x1F6CB
+        | 0x1F6CD..=0x1F6CF | 0x1F6E0..=0x1F6E5 | 0x1F6E9 | 0x1F6F0 | 0x1F6F3)
+}
+
 impl Grid {
     pub fn new(rows: usize, cols: usize) -> Self {
         let rows = rows.max(1);
@@ -1343,6 +1366,30 @@ impl Grid {
             self.lines[row][col].cluster = id;
         }
         self.cluster_scratch = s; // hand the buffer back for the next mark
+        // VS16 requests emoji presentation: promote the narrow base to a wide
+        // cell so the color glyph owns both columns. only when the selector
+        // directly follows its base mid-line — at the right margin there is no
+        // second column to claim, so the base stays narrow there
+        if c == '\u{FE0F}'
+            && char_width(cell.c) == 1
+            && emoji_vs_base(cell.c)
+            && !self.cursor.wrap_pending
+            && self.cursor.col == col + 1
+        {
+            let (fg, bg, attrs, link) = (cell.fg, cell.bg, cell.attrs, cell.link);
+            // the column being claimed may hold the lead of a wide pair: blank
+            // its orphaned continuation like put_char does on partial overwrite
+            if col + 2 < self.cols && self.lines[row][col + 2].c == '\0' {
+                self.lines[row][col + 2] = Cell { c: ' ', fg, bg, attrs, link, cluster: 0 };
+            }
+            self.lines[row][col + 1] = Cell { c: '\0', fg, bg, attrs, link, cluster: 0 };
+            if col + 2 >= self.cols {
+                self.cursor.col = self.cols - 1;
+                self.cursor.wrap_pending = self.autowrap;
+            } else {
+                self.cursor.col = col + 2;
+            }
+        }
     }
 
     /// fold a printable char into the previous cell when that cell's cluster
@@ -1354,7 +1401,14 @@ impl Grid {
             return false;
         };
         let cell = self.lines[row][col];
-        if char_width(cell.c) != 2 || !self.cluster_str(cell.cluster).ends_with('\u{200D}') {
+        if !self.cluster_str(cell.cluster).ends_with('\u{200D}') {
+            return false;
+        }
+        // a VS16-promoted base (the ❤️ in ❤️‍🔥) is narrow by char_width but
+        // owns two columns; its continuation cell marks it wide
+        let wide = char_width(cell.c) == 2
+            || (col + 1 < self.cols && self.lines[row][col + 1].c == '\0');
+        if !wide {
             return false;
         }
         let mut s = std::mem::take(&mut self.cluster_scratch);
@@ -1582,7 +1636,8 @@ mod tests {
         assert_eq!(g2.lines[0][1].c, '\u{0644}');
     }
 
-    // a variation selector (VS16) folds into the base cell's cluster like a mark
+    // a variation selector (VS16) folds into the base cell's cluster like a
+    // mark, and promotes an emoji-variation base to a wide cell
     #[test]
     fn variation_selector_folds_into_cluster() {
         let mut g = Grid::new(2, 8);
@@ -1590,7 +1645,52 @@ mod tests {
         g.put_char('\u{FE0F}'); // VS16 (emoji presentation)
         assert_eq!(g.lines[0][0].c, '#');
         assert_eq!(g.cluster_str(g.lines[0][0].cluster), "#\u{FE0F}");
-        assert_eq!(g.cursor.col, 1); // did not advance into a new cell
+        assert_eq!(g.lines[0][1].c, '\0'); // promoted: continuation claimed
+        assert_eq!(g.cursor.col, 2);
+        // a non-emoji base (mongolian VS one on a letter) stays narrow
+        let mut g2 = Grid::new(2, 8);
+        g2.put_char('a');
+        g2.put_char('\u{FE00}'); // VS1
+        assert_eq!(g2.cluster_str(g2.lines[0][0].cluster), "a\u{FE00}");
+        assert_eq!(g2.cursor.col, 1);
+    }
+
+    // VS16 promotion overwriting the lead of an old wide pair blanks the
+    // orphaned continuation, and a base at the right margin stays narrow
+    #[test]
+    fn vs16_promotion_edges() {
+        let mut g = Grid::new(2, 8);
+        g.put_char('x');
+        g.put_char('世'); // wide pair at cols 1-2
+        g.carriage_return();
+        g.put_char('\u{2764}'); // heart over the x
+        g.put_char('\u{FE0F}'); // promotion claims col 1, 世's lead
+        assert_eq!(g.lines[0][1].c, '\0'); // heart's continuation
+        assert_eq!(g.lines[0][2].c, ' '); // 世's orphan blanked
+        assert_eq!(g.cursor.col, 2);
+        // margin: base lands in the last column, nothing to claim
+        let mut g2 = Grid::new(2, 4);
+        for c in "abc\u{2764}\u{FE0F}".chars() {
+            g2.put_char(c);
+        }
+        assert_eq!(g2.lines[0][3].c, '\u{2764}');
+        assert_eq!(g2.cluster_str(g2.lines[0][3].cluster), "\u{2764}\u{FE0F}");
+        assert!(g2.cursor.wrap_pending); // still parked at the margin
+    }
+
+    // ❤️‍🔥: a VS16-promoted base continues a ZWJ sequence like a natively
+    // wide one
+    #[test]
+    fn vs16_promoted_base_joins_zwj_sequence() {
+        let mut g = Grid::new(2, 12);
+        for c in "\u{2764}\u{FE0F}\u{200D}\u{1F525}".chars() {
+            g.put_char(c);
+        }
+        assert_eq!(g.cursor.col, 2); // one wide cell
+        assert_eq!(
+            g.cluster_str(g.lines[0][0].cluster),
+            "\u{2764}\u{FE0F}\u{200D}\u{1F525}"
+        );
     }
 
     // interning is capped: past 16384 distinct clusters a cell falls back to its

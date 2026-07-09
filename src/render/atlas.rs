@@ -504,9 +504,11 @@ impl GlyphAtlas {
 
         // a ZWJ emoji sequence must shape inside the emoji font itself: through
         // the content font, fallback picks glyphs per codepoint and the GSUB
-        // ligature never fires — the family renders as its first member
-        let emoji_seq = text.contains('\u{200D}')
-            && text.chars().next().is_some_and(|c| c >= '\u{2600}');
+        // ligature never fires — the family renders as its first member. VS16
+        // anywhere marks emoji presentation the same way (❤️, keycap #️⃣)
+        let emoji_seq = (text.contains('\u{200D}')
+            && text.chars().next().is_some_and(|c| c >= '\u{2600}'))
+            || text.contains('\u{FE0F}');
         let family = if emoji_seq { "Segoe UI Emoji" } else { m.family };
         let mut attrs = Attrs::new().family(Family::Name(family));
         if bold {
