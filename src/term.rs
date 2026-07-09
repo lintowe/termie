@@ -1742,6 +1742,17 @@ mod tests {
     }
 
     #[test]
+    fn full_text_joins_wraps_and_reads_history() {
+        let mut t = Terminal::new(3, 8);
+        // four hard lines on a 3-row screen: "one" scrolls into history
+        feed(&mut t, b"one\r\ntwo\r\nthree\r\nfour");
+        // plus a soft-wrapped logical line longer than the width
+        feed(&mut t, b"\r\nabcdefghij");
+        let text = t.grid.full_text();
+        assert_eq!(text, "one\ntwo\nthree\nfour\nabcdefghij");
+    }
+
+    #[test]
     fn mode_12_controls_cursor_blink() {
         let mut t = Terminal::new(2, 10);
         assert_eq!(t.grid.cursor.shape_blink, None);

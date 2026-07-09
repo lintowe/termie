@@ -195,6 +195,8 @@ enum PaletteAction {
     ScrollTop,
     ScrollBottom,
     ClearScrollback,
+    /// write the focused pane's history + screen as plain text to Downloads
+    ExportScrollback,
     /// check for a newer release / confirm installing a pending one
     InstallUpdate,
     /// 0-based tab index (Ctrl+1..9)
@@ -231,6 +233,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("scroll to top", PaletteAction::ScrollTop),
     ("scroll to bottom", PaletteAction::ScrollBottom),
     ("clear scrollback", PaletteAction::ClearScrollback),
+    ("export scrollback", PaletteAction::ExportScrollback),
     ("install update", PaletteAction::InstallUpdate),
     ("broadcast input", PaletteAction::ToggleBroadcast),
     ("close pane", PaletteAction::CloseFocusedPane),
@@ -1636,6 +1639,36 @@ fn is_settings_hot(h: Hot) -> bool {
 fn config_path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")?;
     Some(std::path::PathBuf::from(base).join("termie").join("config"))
+}
+
+/// write exported scrollback text into Downloads (or the profile dir when
+/// Downloads is missing), timestamped so repeated exports never collide
+fn export_scrollback(text: &str) -> std::io::Result<std::path::PathBuf> {
+    let home = std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let downloads = home.join("Downloads");
+    let dir = if downloads.is_dir() { downloads } else { home };
+    let path = dir.join(format!("termie-scrollback-{}.txt", local_timestamp()));
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// local wall-clock time as YYYYMMDD-HHMMSS for export filenames
+#[cfg(windows)]
+fn local_timestamp() -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
+}
+
+#[cfg(not(windows))]
+fn local_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    format!("{secs}")
 }
 
 /// %APPDATA%\termie\termie.log — the `log` facade's sink. the release build is
@@ -3670,6 +3703,16 @@ impl App {
             PaletteAction::ClearScrollback => {
                 if let Some(g) = self.focused_grid_mut() {
                     g.clear_scrollback();
+                }
+                self.redraw();
+            }
+            PaletteAction::ExportScrollback => {
+                if let Some(g) = self.focused_grid_mut() {
+                    let text = g.full_text();
+                    match export_scrollback(&text) {
+                        Ok(path) => self.show_notice(&format!("exported to {}", path.display())),
+                        Err(e) => self.show_notice(&format!("export failed: {e}")),
+                    }
                 }
                 self.redraw();
             }

@@ -511,6 +511,42 @@ impl Grid {
         out
     }
 
+    /// all of history plus the live screen as plain text: soft-wrapped runs
+    /// join into one logical line (same rule as copy), hard lines keep their
+    /// breaks, trailing blank screen rows are dropped
+    pub fn full_text(&self) -> String {
+        let mut out = String::new();
+        let total = self.scrollback.len() + self.lines.len();
+        for i in 0..total {
+            let line = if i < self.scrollback.len() {
+                &self.scrollback[i]
+            } else {
+                &self.lines[i - self.scrollback.len()]
+            };
+            let mut s = String::new();
+            for cell in line.iter() {
+                if cell.cluster != 0 {
+                    s.push_str(self.cluster_str(cell.cluster));
+                } else if cell.c != '\0' {
+                    s.push(cell.c);
+                }
+            }
+            if !line.wrapped {
+                while s.ends_with(' ') {
+                    s.pop();
+                }
+            }
+            out.push_str(&s);
+            if !line.wrapped && i + 1 != total {
+                out.push('\n');
+            }
+        }
+        while out.ends_with('\n') {
+            out.pop();
+        }
+        out
+    }
+
     pub fn resize(&mut self, rows: usize, cols: usize) {
         let rows = rows.max(1);
         let cols = cols.max(1);
