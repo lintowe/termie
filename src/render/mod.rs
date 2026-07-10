@@ -3032,11 +3032,19 @@ impl Renderer {
             let find_view = self.find_view.as_ref();
             for (pv, info) in panes.iter().zip(&pane_info) {
                 let themed = pv.theme.filter(|&id| id != theme);
-                let pal = themed
+                let mut pal = themed
                     .and_then(|id| pane_palettes.iter().find(|(t, _)| *t == id))
                     .map(|(_, p)| p)
                     .unwrap_or(palette);
-                if themed.is_some() {
+                // dynamic OSC 4/10/11/12 colors layer over whatever palette
+                // the pane paints with (cheap: one ~1KB clone, only for panes
+                // whose program actually set colors)
+                let dyn_pal;
+                if pv.term.colors.any() {
+                    dyn_pal = pal.with_dyn(&pv.term.colors);
+                    pal = &dyn_pal;
+                }
+                if themed.is_some() || pv.term.colors.bg.is_some() {
                     // an overridden pane owns its background: draw_grid skips
                     // default-bg cells, which would otherwise show the window
                     // theme's wash behind this pane's content

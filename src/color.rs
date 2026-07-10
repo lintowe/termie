@@ -107,7 +107,50 @@ impl ThemeId {
     }
 }
 
+/// dynamic color overrides a program set at runtime (OSC 4/10/11/12); they
+/// layer over whatever palette the pane paints with and reset via OSC
+/// 104/110-112 or a hard reset. ansi remaps are sparse — theme scripts touch
+/// ~22 entries, never hundreds
+#[derive(Default)]
+pub struct DynColors {
+    pub fg: Option<Rgb>,
+    pub bg: Option<Rgb>,
+    pub cursor: Option<Rgb>,
+    ansi: Vec<(u8, Rgb)>,
+}
+
+impl DynColors {
+    pub fn any(&self) -> bool {
+        self.fg.is_some() || self.bg.is_some() || self.cursor.is_some() || !self.ansi.is_empty()
+    }
+
+    pub fn set_ansi(&mut self, n: u8, c: Rgb) {
+        if let Some(e) = self.ansi.iter_mut().find(|(i, _)| *i == n) {
+            e.1 = c;
+        } else {
+            self.ansi.push((n, c));
+        }
+    }
+
+    pub fn ansi(&self, n: u8) -> Option<Rgb> {
+        self.ansi.iter().find(|(i, _)| *i == n).map(|&(_, c)| c)
+    }
+
+    /// None resets every remapped entry (OSC 104 bare), Some(n) just that one
+    pub fn reset_ansi(&mut self, n: Option<u8>) {
+        match n {
+            None => self.ansi.clear(),
+            Some(n) => self.ansi.retain(|(i, _)| *i != n),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// full palette: chrome ladder + terminal colors for one theme
+#[derive(Clone)]
 pub struct Palette {
     // chrome ladder (dark→light for dark themes)
     pub ink0: Rgb,
@@ -129,6 +172,26 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// clone with a program's dynamic OSC overrides applied. the gradient
+    /// companion follows an overridden bg so the pane wash reads flat
+    pub fn with_dyn(&self, d: &DynColors) -> Palette {
+        let mut p = self.clone();
+        if let Some(c) = d.fg {
+            p.fg = c;
+        }
+        if let Some(c) = d.bg {
+            p.bg = c;
+            p.bg2 = c;
+        }
+        if let Some(c) = d.cursor {
+            p.cursor = c;
+        }
+        for &(i, c) in &d.ansi {
+            p.ansi[i as usize] = c;
+        }
+        p
+    }
+
     pub fn from_theme(id: ThemeId) -> Self {
         match id {
             ThemeId::Instrument => Self::instrument(),

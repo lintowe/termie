@@ -1,6 +1,6 @@
 use vte::{Params, Perform};
 
-use crate::color::{Color, Palette};
+use crate::color::{Color, DynColors, Palette};
 use crate::grid::{CursorShape, Grid, UnderlineStyle};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,11 +41,55 @@ pub fn format_color_reply(req: ColorReq, pal: &Palette) -> Vec<u8> {
         ColorReq::Cursor => ("12".to_string(), pal.cursor),
         ColorReq::Ansi(n) => (format!("4;{n}"), pal.ansi_color(n)),
     };
+    color_reply(&code, c)
+}
+
+fn color_reply(code: &str, c: crate::color::Rgb) -> Vec<u8> {
     format!(
         "\x1b]{};rgb:{:02x}{:02x}/{:02x}{:02x}/{:02x}{:02x}\x1b\\",
         code, c.r, c.r, c.g, c.g, c.b, c.b
     )
     .into_bytes()
+}
+
+/// parse an xterm color spec: `rgb:R/G/B` (1-4 hex digits per channel, most
+/// significant bits win) or `#RRGGBB` / `#RGB` — the forms theme scripts and
+/// editors actually emit when setting colors
+fn parse_color_spec(s: &[u8]) -> Option<crate::color::Rgb> {
+    fn channel(p: &str) -> Option<u8> {
+        let v = u32::from_str_radix(p, 16).ok()?;
+        Some(match p.len() {
+            1 => (v * 17) as u8,
+            2 => v as u8,
+            3 => (v >> 4) as u8,
+            4 => (v >> 8) as u8,
+            _ => return None,
+        })
+    }
+    let s = std::str::from_utf8(s).ok()?.trim();
+    if let Some(rest) = s.strip_prefix("rgb:") {
+        let mut it = rest.split('/');
+        let r = channel(it.next()?)?;
+        let g = channel(it.next()?)?;
+        let b = channel(it.next()?)?;
+        if it.next().is_some() {
+            return None;
+        }
+        return Some(crate::color::Rgb::new(r, g, b));
+    }
+    if let Some(hex) = s.strip_prefix('#') {
+        let v = u32::from_str_radix(hex, 16).ok()?;
+        return match hex.len() {
+            6 => Some(crate::color::Rgb::new((v >> 16) as u8, (v >> 8) as u8, v as u8)),
+            3 => Some(crate::color::Rgb::new(
+                (((v >> 8) & 0xf) * 17) as u8,
+                (((v >> 4) & 0xf) * 17) as u8,
+                ((v & 0xf) * 17) as u8,
+            )),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// kitty keyboard protocol flags termie honors: disambiguate (1) + report
@@ -77,6 +121,10 @@ pub struct Terminal {
     /// of rescanning every output chunk for the escape (which also missed an
     /// OSC-7 split across two reads and fired on the byte pattern in file data)
     pub cwd_dirty: bool,
+    /// dynamic colors a program set at runtime (OSC 4/10/11/12): base16-shell,
+    /// pywal, editors setting the background — layered over the pane's palette
+    /// at paint, reset by OSC 104/110-112 or a hard reset
+    pub colors: DynColors,
     pub last_osc133: Option<Osc133>,
     /// a command is executing (inside an OSC 133 C..D window) — drives the
     /// pane's "agent running" badge
@@ -141,6 +189,7 @@ impl Terminal {
             title_dirty: false,
             cwd: None,
             cwd_dirty: false,
+            colors: DynColors::default(),
             last_osc133: None,
             cmd_running: false,
             cmd_done: None,
@@ -1060,6 +1109,8 @@ impl Perform for Terminal {
                 self.progress = None;
                 self.dcs = None;
                 self.sixel_display_mode = false;
+                // dynamic OSC colors don't survive a hard reset (xterm)
+                self.colors.clear();
             }
             _ => {}
         }
@@ -1115,31 +1166,75 @@ impl Perform for Terminal {
                 }
             }
             b"10" | b"11" | b"12" => {
-                // OSC 10/11/12 ; ?  — query the default fg / bg / cursor color
-                if let Some(p) = params.get(1)
-                    && p.len() == 1
-                    && p[0] == b'?'
-                {
-                    self.color_queries.push(match kind {
-                        b"10" => ColorReq::Fg,
-                        b"11" => ColorReq::Bg,
-                        _ => ColorReq::Cursor,
-                    });
+                // OSC 10/11/12 — query (`?`) or SET the default fg / bg /
+                // cursor color; per xterm, extra params set the successive
+                // dynamic colors (OSC 10;fg;bg sets both). sets layer over the
+                // theme at paint and reset via OSC 110-112
+                let base = (kind[1] - b'0') as usize;
+                for (i, p) in params.iter().skip(1).enumerate() {
+                    let slot = base + i;
+                    if slot > 2 {
+                        break;
+                    }
+                    if p.len() == 1 && p[0] == b'?' {
+                        // answer an overridden color ourselves; the theme's
+                        // value needs the app's palette, so it round-trips
+                        let (set, req, code) = match slot {
+                            0 => (self.colors.fg, ColorReq::Fg, "10"),
+                            1 => (self.colors.bg, ColorReq::Bg, "11"),
+                            _ => (self.colors.cursor, ColorReq::Cursor, "12"),
+                        };
+                        match set {
+                            Some(c) => self.responses.extend_from_slice(&color_reply(code, c)),
+                            None => self.color_queries.push(req),
+                        }
+                    } else if let Some(c) = parse_color_spec(p) {
+                        match slot {
+                            0 => self.colors.fg = Some(c),
+                            1 => self.colors.bg = Some(c),
+                            _ => self.colors.cursor = Some(c),
+                        }
+                    }
                 }
             }
             b"4" => {
-                // OSC 4 ; n ; ?  — query palette color n
-                if let Some(q) = params.get(2)
-                    && q.len() == 1
-                    && q[0] == b'?'
-                    && let Some(n) = params
-                        .get(1)
-                        .and_then(|p| std::str::from_utf8(p).ok())
-                        .and_then(|s| s.parse::<u8>().ok())
-                {
-                    self.color_queries.push(ColorReq::Ansi(n));
+                // OSC 4 ; n ; spec [; n ; spec ...] — remap palette entry n
+                // (base16-shell / pywal territory); `?` as the spec queries it
+                let mut i = 1;
+                while let (Some(np), Some(sp)) = (params.get(i), params.get(i + 1)) {
+                    if let Some(n) = std::str::from_utf8(np).ok().and_then(|s| s.parse::<u8>().ok())
+                    {
+                        if sp.len() == 1 && sp[0] == b'?' {
+                            match self.colors.ansi(n) {
+                                Some(c) => self
+                                    .responses
+                                    .extend_from_slice(&color_reply(&format!("4;{n}"), c)),
+                                None => self.color_queries.push(ColorReq::Ansi(n)),
+                            }
+                        } else if let Some(c) = parse_color_spec(sp) {
+                            self.colors.set_ansi(n, c);
+                        }
+                    }
+                    i += 2;
                 }
             }
+            b"104" => {
+                // OSC 104 — reset remapped palette entries (all when bare)
+                if params.len() <= 1 {
+                    self.colors.reset_ansi(None);
+                } else {
+                    for p in &params[1..] {
+                        if let Some(n) =
+                            std::str::from_utf8(p).ok().and_then(|s| s.parse::<u8>().ok())
+                        {
+                            self.colors.reset_ansi(Some(n));
+                        }
+                    }
+                }
+            }
+            b"110" => self.colors.fg = None,
+            b"111" => self.colors.bg = None,
+            b"112" => self.colors.cursor = None,
             b"9" => {
                 // OSC 9 ; 4 ; state ; percent — ConEmu taskbar progress
                 if params.get(1).copied() == Some(b"4") {
@@ -1939,6 +2034,41 @@ mod tests {
         // RIS clears a live progress
         feed(&mut t, b"\x1b]9;4;1;10\x1b\\\x1bc");
         assert_eq!(t.progress, None);
+    }
+
+    #[test]
+    fn osc_dynamic_colors_set_query_and_reset() {
+        use crate::color::Rgb;
+        let mut t = Terminal::new(2, 10);
+        // set the background (base16-shell style) and remap ansi red
+        feed(&mut t, b"\x1b]11;#1e1e2e\x1b\\");
+        feed(&mut t, b"\x1b]4;1;rgb:ff/45/00\x1b\\");
+        assert_eq!(t.colors.bg, Some(Rgb::new(0x1e, 0x1e, 0x2e)));
+        assert_eq!(t.colors.ansi(1), Some(Rgb::new(0xff, 0x45, 0x00)));
+        // 16-bit-per-channel specs keep their most significant bits
+        feed(&mut t, b"\x1b]10;rgb:ffff/8080/0000\x1b\\");
+        assert_eq!(t.colors.fg, Some(Rgb::new(0xff, 0x80, 0x00)));
+        // a query for an overridden color answers directly, no app round-trip
+        t.color_queries.clear();
+        t.responses.clear();
+        feed(&mut t, b"\x1b]11;?\x1b\\");
+        assert!(t.color_queries.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&t.responses),
+            "\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"
+        );
+        // an un-overridden query still round-trips through the app
+        feed(&mut t, b"\x1b]12;?\x1b\\");
+        assert_eq!(t.color_queries, vec![ColorReq::Cursor]);
+        // targeted resets clear exactly what they name
+        feed(&mut t, b"\x1b]104;1\x1b\\");
+        assert_eq!(t.colors.ansi(1), None);
+        feed(&mut t, b"\x1b]111\x1b\\");
+        assert_eq!(t.colors.bg, None);
+        assert!(t.colors.fg.is_some(), "fg untouched by the bg reset");
+        // a hard reset drops everything
+        feed(&mut t, b"\x1bc");
+        assert!(!t.colors.any());
     }
 
     #[test]
