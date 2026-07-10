@@ -71,13 +71,42 @@ pub fn parse_index(text: &str) -> Vec<Entry> {
         .collect()
 }
 
+/// resolve a helper to an absolute path before spawning: CreateProcess searches
+/// the exe dir and the process cwd before PATH, and termie's cwd can be an
+/// arbitrary repo (an "open in termie" launch) where a planted curl.exe or
+/// gh.exe would win. system32 first (curl/tar ship there), then absolute PATH
+/// entries only; unresolved names become a clean spawn failure, never a hunt
+#[cfg(windows)]
+fn resolve_helper(name: &str) -> std::path::PathBuf {
+    let exe = format!("{name}.exe");
+    let sys32 = std::env::var_os("SystemRoot")
+        .map(|r| std::path::PathBuf::from(r).join("System32").join(&exe));
+    if let Some(p) = &sys32
+        && p.is_file()
+    {
+        return p.clone();
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if !dir.is_absolute() {
+                continue;
+            }
+            let cand = dir.join(&exe);
+            if cand.is_file() {
+                return cand;
+            }
+        }
+    }
+    sys32.unwrap_or_else(|| std::path::PathBuf::from(exe))
+}
+
 /// build a console command that won't flash a window: termie is a gui app, so a
 /// bare gh/curl/tar spawn pops a console window. CREATE_NO_WINDOW suppresses it
 #[cfg(windows)]
 pub(crate) fn quiet_command(program: &str) -> Command {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(resolve_helper(program));
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }
