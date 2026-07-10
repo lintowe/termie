@@ -3907,8 +3907,9 @@ impl Renderer {
         Self::stroke_rect(out, (bx, by, bw, bh), hair, RULE_2);
 
         let pad = 16.0 * s;
-        // search input row
-        let iy = (by + 8.0 * s + (row_h - chrome_h) / 2.0).round();
+        // search input row, centered in [by, by+row_h] — an extra top offset
+        // here used to push the caret and descenders 1px past the separator
+        let iy = (by + (row_h - chrome_h) / 2.0).round();
         let prompt = format!("\u{f002}  {}", query);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, iy, &prompt, TEXT_2, 1.0, track);
         let cwid = self.text_w(FontId::Chrome, &prompt, track);
