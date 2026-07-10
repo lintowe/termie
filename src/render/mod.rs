@@ -105,6 +105,10 @@ pub enum Hot {
     ThemeSet(ThemeId),
     /// follow the windows light/dark setting (theme=auto)
     ThemeAuto,
+    LineHeightDec,
+    LineHeightInc,
+    BoldBright,
+    Mica,
     ScrollbackDec,
     ScrollbackInc,
     CopyOnSelect,
@@ -260,6 +264,8 @@ pub struct SettingsView {
     pub load_profile: bool,
     /// theme=auto: the trailing chip is lit and the theme follows the OS
     pub theme_auto: bool,
+    /// win11 mica backdrop on/off (config `acrylic=`), toggled live
+    pub acrylic: bool,
     pub shell_name: &'static str,
     pub close_action_name: &'static str,
     pub backend_name: &'static str,
@@ -272,6 +278,7 @@ impl Default for SettingsView {
             copy_on_select: false,
             load_profile: false,
             theme_auto: false,
+            acrylic: false,
             shell_name: "auto",
             close_action_name: "quit",
             backend_name: "auto",
@@ -377,6 +384,9 @@ struct SettingsGeom {
     font_y: f32,
     pad_y: f32,
     opacity_y: f32,
+    line_height_y: f32,
+    boldbright_y: f32,
+    mica_y: f32,
     cursor_y: f32,
     blink_y: f32,
     theme_label_y: f32,
@@ -397,6 +407,10 @@ struct SettingsGeom {
     pad_inc: Rect,
     op_dec: Rect,
     op_inc: Rect,
+    lh_dec: Rect,
+    lh_inc: Rect,
+    boldbright_btn: Rect,
+    mica_btn: Rect,
     cursor_btn: Rect,
     blink_btn: Rect,
     // one extra slot: the trailing chip is the follow-the-OS "auto" toggle
@@ -2075,6 +2089,12 @@ impl Renderer {
         y += row;
         let opacity_l = y;
         y += row;
+        let line_height_l = y;
+        y += row;
+        let boldbright_l = y;
+        y += row;
+        let mica_l = y;
+        y += row;
         let theme_label_l = y;
         y += lh;
         let theme_chip_l = y;
@@ -2118,10 +2138,13 @@ impl Renderer {
         let (font_dec, font_inc) = stepper(val_x, font_l);
         let (pad_dec, pad_inc) = stepper(val_x, pad_l);
         let (op_dec, op_inc) = stepper(val_x, opacity_l);
+        let (lh_dec, lh_inc) = stepper(val_x, line_height_l);
         let (sb_dec, sb_inc) = stepper(val_x, scrollback_l);
         let fontfam_btn = (val_x, ay(fontfam_l), cluster, bh);
         let cursor_btn = (val_x, ay(cursor_l), cluster, bh);
         let blink_btn = (val_x, ay(blink_l), cluster, bh);
+        let boldbright_btn = (val_x, ay(boldbright_l), cluster, bh);
+        let mica_btn = (val_x, ay(mica_l), cluster, bh);
         let copysel_btn = (val_x, ay(copysel_l), cluster, bh);
         let shell_btn = (val_x, ay(shell_l), cluster, bh);
         let profile_btn = (val_x, ay(profile_l), cluster, bh);
@@ -2162,6 +2185,10 @@ impl Renderer {
             (Hot::PadInc, pad_inc),
             (Hot::OpacityDec, op_dec),
             (Hot::OpacityInc, op_inc),
+            (Hot::LineHeightDec, lh_dec),
+            (Hot::LineHeightInc, lh_inc),
+            (Hot::BoldBright, boldbright_btn),
+            (Hot::Mica, mica_btn),
             (Hot::CursorCycle, cursor_btn),
             (Hot::CursorBlink, blink_btn),
             (Hot::ScrollbackDec, sb_dec),
@@ -2206,6 +2233,9 @@ impl Renderer {
             font_y: ay(font_l),
             pad_y: ay(pad_l),
             opacity_y: ay(opacity_l),
+            line_height_y: ay(line_height_l),
+            boldbright_y: ay(boldbright_l),
+            mica_y: ay(mica_l),
             cursor_y: ay(cursor_l),
             blink_y: ay(blink_l),
             theme_label_y: ay(theme_label_l),
@@ -2224,6 +2254,10 @@ impl Renderer {
             pad_inc,
             op_dec,
             op_inc,
+            lh_dec,
+            lh_inc,
+            boldbright_btn,
+            mica_btn,
             cursor_btn,
             blink_btn,
             theme_chips,
@@ -3577,6 +3611,14 @@ impl Renderer {
         self.stepper(out, g.pad_dec, g.pad_inc, &format!("{pad_px}"), Hot::PadDec, Hot::PadInc, g.val_w, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.opacity_y), "OPACITY", MUTE, 1.0, wide);
         self.stepper(out, g.op_dec, g.op_inc, &format!("{opacity_pct}%"), Hot::OpacityDec, Hot::OpacityInc, g.val_w, track);
+        let lh_label = format!("{:.2}", self.content_line_height);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.line_height_y), "LINE HEIGHT", MUTE, 1.0, wide);
+        self.stepper(out, g.lh_dec, g.lh_inc, &lh_label, Hot::LineHeightDec, Hot::LineHeightInc, g.val_w, track);
+        let bb = self.bold_as_bright;
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.boldbright_y), "BOLD AS BRIGHT", MUTE, 1.0, wide);
+        self.toggle_btn(out, g.boldbright_btn, bb, Hot::BoldBright, track);
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.mica_y), "MICA BACKDROP", MUTE, 1.0, wide);
+        self.toggle_btn(out, g.mica_btn, sv.acrylic, Hot::Mica, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.cursor_y), "CURSOR", MUTE, 1.0, wide);
         self.cycle_btn(out, g.cursor_btn, cur_name, Hot::CursorCycle, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.blink_y), "CURSOR BLINK", MUTE, 1.0, wide);

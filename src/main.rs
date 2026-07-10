@@ -276,6 +276,8 @@ enum PaletteAction {
     JumpPromptNext,
     /// focus the next pane whose command failed / rang / finished / is running
     JumpAttention,
+    /// keep this window above every other (toggles; quake uses its own level)
+    ToggleOnTop,
     /// keyboard scrollback: a page (or straight to an end) of history
     ScrollPageUp,
     ScrollPageDown,
@@ -308,6 +310,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("pane mode", PaletteAction::PaneMode),
     ("mark mode", PaletteAction::MarkMode),
     ("jump to attention", PaletteAction::JumpAttention),
+    ("always on top", PaletteAction::ToggleOnTop),
     ("zoom pane", PaletteAction::ToggleZoom),
     ("toggle fullscreen", PaletteAction::ToggleFullscreen),
     ("rename tab", PaletteAction::RenameTab),
@@ -1829,6 +1832,10 @@ fn is_settings_hot(h: Hot) -> bool {
             | Hot::CursorBlink
             | Hot::ThemeSet(_)
             | Hot::ThemeAuto
+            | Hot::LineHeightDec
+            | Hot::LineHeightInc
+            | Hot::BoldBright
+            | Hot::Mica
             | Hot::ScrollbackDec
             | Hot::ScrollbackInc
             | Hot::CopyOnSelect
@@ -2264,6 +2271,8 @@ struct PaneWindow {
     maximized: bool,
     pane_mode: bool,
     settings_open: bool,
+    /// user-toggled always-on-top (palette action), per window
+    on_top: bool,
     // os focus (drives this window's cursor blink/render) + its in-flight ime
     // composition; both are per-window and must not leak through the swap
     focused: bool,
@@ -2462,6 +2471,7 @@ impl App {
                 maximized: false,
                 pane_mode: false,
                 settings_open: false,
+                on_top: false,
                 focused: true,
                 ime_composing: false,
                 pane_menu: None,
@@ -2571,7 +2581,7 @@ impl App {
             && let RawWindowHandle::Win32(h) = handle.as_raw() {
                 win::apply_window_effects(h.hwnd.get());
                 if self.persisted.acrylic {
-                    win::apply_backdrop(h.hwnd.get());
+                    win::apply_backdrop(h.hwnd.get(), true);
                 }
             }
 
@@ -3657,6 +3667,7 @@ impl App {
                 copy_on_select: config.copy_on_select,
                 load_profile: config.load_profile,
                 theme_auto: self.persisted.theme_auto,
+                acrylic: self.persisted.acrylic,
                 shell_name: config.shell.label(),
                 close_action_name: config.close_action.label(),
                 backend_name: config.backend.label(),
@@ -4249,6 +4260,18 @@ impl App {
             PaletteAction::PaneMode => self.set_pane_mode(true),
             PaletteAction::MarkMode => self.set_mark_mode(true),
             PaletteAction::JumpAttention => self.jump_attention(),
+            PaletteAction::ToggleOnTop => {
+                self.pw.on_top = !self.pw.on_top;
+                if let Some(w) = self.pw.window.as_ref() {
+                    w.set_window_level(if self.pw.on_top {
+                        WindowLevel::AlwaysOnTop
+                    } else {
+                        WindowLevel::Normal
+                    });
+                }
+                self.show_notice(if self.pw.on_top { "always on top" } else { "normal stacking" });
+                self.redraw();
+            }
             PaletteAction::DefaultTerminal => {
                 let msg = if win::defterm_registered() {
                     if win::unregister_defterm() {
@@ -4878,6 +4901,36 @@ impl App {
                 }
                 self.redraw();
             }
+            Hot::LineHeightDec | Hot::LineHeightInc => {
+                let d = if hot == Hot::LineHeightInc { 0.04 } else { -0.04 };
+                if let Some(r) = self.pw.renderer.as_mut() {
+                    let lh = r.line_height();
+                    r.set_line_height(lh + d);
+                }
+                // cell height changed, so every pane's grid needs re-fitting
+                self.relayout_all();
+                self.redraw();
+            }
+            Hot::BoldBright => {
+                if let Some(r) = self.pw.renderer.as_mut() {
+                    let on = !r.bold_as_bright();
+                    r.set_bold_as_bright(on);
+                }
+                self.redraw();
+            }
+            Hot::Mica => {
+                self.persisted.acrylic = !self.persisted.acrylic;
+                let on = self.persisted.acrylic;
+                for pw in std::iter::once(&self.pw).chain(self.satellites.iter()) {
+                    if let Some(w) = pw.window.as_ref()
+                        && let Ok(handle) = w.window_handle()
+                        && let RawWindowHandle::Win32(h) = handle.as_raw()
+                    {
+                        win::apply_backdrop(h.hwnd.get(), on);
+                    }
+                }
+                self.redraw();
+            }
             Hot::CursorCycle => {
                 if let Some(r) = self.pw.renderer.as_mut() {
                     r.cycle_cursor();
@@ -5470,6 +5523,7 @@ impl App {
             maximized: false,
             pane_mode: false,
             settings_open: false,
+            on_top: false,
             focused: true,
             ime_composing: false,
             pane_menu: None,
@@ -5700,7 +5754,10 @@ impl App {
         };
         if self.quake_shown {
             win.set_visible(false);
-            win.set_window_level(WindowLevel::Normal);
+            // a user-toggled always-on-top survives quake dismissal
+            if !self.pw.on_top {
+                win.set_window_level(WindowLevel::Normal);
+            }
             self.quake_shown = false;
             return;
         }
