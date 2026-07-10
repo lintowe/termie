@@ -5665,14 +5665,19 @@ impl App {
         if self.mouse_report(if up { 64 } else { 65 }, true, false) {
             return;
         }
-        let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 3.0,
-            MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as f32,
-        };
         if let Some(id) = self.pane_at(cx, cy)
             && let Some(tab) = self.pw.tabs.get_mut(self.pw.active_tab)
                 && let Some(root) = tab.root.as_mut()
                     && let Some(p) = find_pane_mut(root, id) {
+                        let lines = match delta {
+                            // honor the windows wheel-lines setting per notch;
+                            // the page sentinel scrolls a pane height
+                            MouseScrollDelta::LineDelta(_, y) => match win::wheel_scroll_lines() {
+                                u32::MAX => y * p.term.grid.rows.saturating_sub(1).max(1) as f32,
+                                n => y * n.max(1) as f32,
+                            },
+                            MouseScrollDelta::PixelDelta(px) => (px.y / 20.0) as f32,
+                        };
                         // fractional accumulator: a slow precision-touchpad
                         // scroll delivers a few px per event, which used to
                         // round to zero lines and go nowhere

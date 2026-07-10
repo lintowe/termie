@@ -225,6 +225,30 @@ pub fn flash_taskbar(hwnd_handle: isize) {
 #[cfg(not(windows))]
 pub fn flash_taskbar(_hwnd_handle: isize) {}
 
+/// the user's "roll the wheel to scroll N lines" setting; u32::MAX is the
+/// "one screen at a time" sentinel (WHEEL_PAGESCROLL)
+#[cfg(windows)]
+pub fn wheel_scroll_lines() -> u32 {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+    };
+    let mut lines: u32 = 3;
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some(&mut lines as *mut u32 as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    if ok.is_err() { 3 } else { lines }
+}
+
+#[cfg(not(windows))]
+pub fn wheel_scroll_lines() -> u32 {
+    3
+}
+
 #[cfg(windows)]
 pub fn local_hm() -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;
