@@ -1135,6 +1135,10 @@ impl Perform for Terminal {
             }
             b"7" => {
                 if let Some(u) = params.get(1) {
+                    // real paths are small; bound the stored copy like the
+                    // title/notify handlers so a hostile stream can't pin an
+                    // oversized cwd string
+                    let u = &u[..u.len().min(4096)];
                     self.cwd = Some(String::from_utf8_lossy(u).into_owned());
                     self.cwd_dirty = true;
                 }
@@ -1255,6 +1259,8 @@ impl Perform for Terminal {
                     // cmd's shell integration reports its current directory as
                     // OSC 9;9;$P, which has a plain Windows path instead of OSC 7's URI
                     if let Some(path) = params.get(2).filter(|path| !path.is_empty()) {
+                        // bounded like OSC 7 above
+                        let path = &path[..path.len().min(4096)];
                         self.cwd = Some(String::from_utf8_lossy(path).into_owned());
                         self.cwd_dirty = true;
                     }
