@@ -3330,10 +3330,16 @@ impl Renderer {
             let avail = (label_end - (tx + 10.0 * self.scale)).max(0.0);
             let maxc = (avail / cw_c).floor().max(0.0) as usize;
             // borrow the already-owned snapshot label; only allocate when the
-            // label actually needs truncating (the common case fits as-is)
+            // label actually needs truncating (the common case fits as-is).
+            // a strip too packed even for "x…" keeps maxc chars bare — the old
+            // full-label fallback overflowed into every neighboring tab
             let truncated;
-            let lab: &str = if label.chars().count() > maxc && maxc > 1 {
-                truncated = label.chars().take(maxc.saturating_sub(1)).collect::<String>() + "\u{2026}";
+            let lab: &str = if label.chars().count() > maxc {
+                truncated = if maxc > 1 {
+                    label.chars().take(maxc - 1).collect::<String>() + "\u{2026}"
+                } else {
+                    label.chars().take(maxc).collect()
+                };
                 &truncated
             } else {
                 label
