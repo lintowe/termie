@@ -33,6 +33,10 @@ struct Pending {
     format: u32,
     width: u32,
     height: u32,
+    /// display request (c=, r= cell box) captured from the chunk that carried
+    /// a=T — continuation chunks parse with the default action, so the intent
+    /// must survive until the transfer completes
+    display: Option<(u16, u16)>,
     data: Vec<u8>,
 }
 
@@ -50,8 +54,13 @@ pub struct ImageStore {
 }
 
 impl ImageStore {
-    /// feed one transmit chunk; returns Some(id) once an image is fully received
-    /// and decoded, or None while more chunks (m=1) are still expected
+    /// feed one transmit chunk; returns (id, display request) once an image is
+    /// fully received and decoded, or None while more chunks (m=1) are still
+    /// expected. `display` is Some on a chunk that asked to show the image
+    /// (a=T) and is remembered across the whole chunked transfer
+    // the parameters mirror the kitty control keys one-to-one; a struct would
+    // only relocate them
+    #[allow(clippy::too_many_arguments)]
     pub fn transmit(
         &mut self,
         id: u32,
@@ -59,8 +68,9 @@ impl ImageStore {
         width: u32,
         height: u32,
         more: bool,
+        display: Option<(u16, u16)>,
         chunk: &[u8],
-    ) -> Option<u32> {
+    ) -> Option<(u32, Option<(u16, u16)>)> {
         let anonymous = id == 0;
         let id = if anonymous {
             match self.anon {
@@ -85,8 +95,12 @@ impl ImageStore {
             format: 32,
             width: 0,
             height: 0,
+            display: None,
             data: Vec::new(),
         });
+        if display.is_some() {
+            p.display = display;
+        }
         if format != 0 {
             p.format = format;
         }
@@ -114,8 +128,9 @@ impl ImageStore {
         }
         let p = self.pending.remove(&id)?;
         let img = decode(p.format, p.width, p.height, &p.data)?;
+        let disp = p.display;
         self.store(id, img);
-        Some(id)
+        Some((id, disp))
     }
 
     /// store an already-decoded RGBA image (the sixel path), minting a fresh id
@@ -270,7 +285,8 @@ mod tests {
         let mut s = ImageStore::default();
         // a 2x1 RGB image: red, green
         let data = [255, 0, 0, 0, 255, 0];
-        let id = s.transmit(7, 24, 2, 1, false, &data).expect("decoded");
+        let (id, disp) = s.transmit(7, 24, 2, 1, false, None, &data).expect("decoded");
+        assert_eq!(disp, None);
         assert_eq!(id, 7);
         let img = s.get(7).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
@@ -290,7 +306,7 @@ mod tests {
             w.write_image_data(&[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
         }
         let mut s = ImageStore::default();
-        let id = s.transmit(9, 100, 0, 0, false, &bytes).expect("png decoded");
+        let (id, _) = s.transmit(9, 100, 0, 0, false, None, &bytes).expect("png decoded");
         let img = s.get(id).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(img.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
@@ -300,8 +316,8 @@ mod tests {
     fn reassembles_chunks_before_decoding() {
         let mut s = ImageStore::default();
         // 1x1 RGBA split across two chunks
-        assert!(s.transmit(3, 32, 1, 1, true, &[1, 2]).is_none());
-        let id = s.transmit(3, 0, 0, 0, false, &[3, 4]).expect("decoded");
+        assert!(s.transmit(3, 32, 1, 1, true, None, &[1, 2]).is_none());
+        let (id, _) = s.transmit(3, 0, 0, 0, false, None, &[3, 4]).expect("decoded");
         assert_eq!(id, 3);
         assert_eq!(s.get(3).unwrap().rgba, vec![1, 2, 3, 4]);
     }
@@ -309,7 +325,7 @@ mod tests {
     #[test]
     fn delete_forgets_the_image() {
         let mut s = ImageStore::default();
-        s.transmit(5, 32, 1, 1, false, &[9, 9, 9, 9]);
+        s.transmit(5, 32, 1, 1, false, None, &[9, 9, 9, 9]);
         assert!(s.get(5).is_some());
         s.delete(5);
         assert!(s.get(5).is_none());
@@ -318,8 +334,8 @@ mod tests {
     #[test]
     fn clear_forgets_every_image() {
         let mut s = ImageStore::default();
-        s.transmit(1, 32, 1, 1, false, &[1, 1, 1, 1]);
-        s.transmit(2, 32, 1, 1, false, &[2, 2, 2, 2]);
+        s.transmit(1, 32, 1, 1, false, None, &[1, 1, 1, 1]);
+        s.transmit(2, 32, 1, 1, false, None, &[2, 2, 2, 2]);
         assert!(s.get(1).is_some() && s.get(2).is_some());
         s.clear();
         assert!(s.get(1).is_none() && s.get(2).is_none());
@@ -331,8 +347,8 @@ mod tests {
     fn anon_chunked_continuation_uses_one_id() {
         let mut s = ImageStore::default();
         // a 1x2 RGBA image (8 bytes) split across two anonymous chunks
-        assert!(s.transmit(0, 32, 1, 2, true, &[1, 2, 3, 4]).is_none()); // more=true
-        let id = s.transmit(0, 0, 0, 0, false, &[5, 6, 7, 8]).expect("completes");
+        assert!(s.transmit(0, 32, 1, 2, true, None, &[1, 2, 3, 4]).is_none()); // more=true
+        let (id, _) = s.transmit(0, 0, 0, 0, false, None, &[5, 6, 7, 8]).expect("completes");
         assert_eq!(s.get(id).unwrap().rgba, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
@@ -342,7 +358,7 @@ mod tests {
         let mut s = ImageStore::default();
         let n = MAX_IMAGES as u32 + 1;
         for i in 1..=n {
-            s.transmit(i, 32, 1, 1, false, &[i as u8, 0, 0, 255]);
+            s.transmit(i, 32, 1, 1, false, None, &[i as u8, 0, 0, 255]);
         }
         assert!(s.get(1).is_none(), "the oldest image is evicted");
         assert!(s.get(n).is_some(), "the newest image is kept");
@@ -357,7 +373,7 @@ mod tests {
         let px = 4096u32; // 4096×4096 RGBA = 64 MB
         let big = vec![0u8; (px * px * 4) as usize];
         for i in 1..=5u32 {
-            s.transmit(i, 32, px, px, false, &big);
+            s.transmit(i, 32, px, px, false, None, &big);
         }
         assert!(s.get(1).is_none(), "oldest evicted to stay inside the byte budget");
         assert!(s.get(5).is_some());
@@ -370,15 +386,18 @@ mod tests {
     fn pending_reassembly_buffers_are_capped() {
         let mut s = ImageStore::default();
         for i in 1..=MAX_PENDING as u32 {
-            assert!(s.transmit(i, 32, 1, 1, true, &[1, 2]).is_none());
+            assert!(s.transmit(i, 32, 1, 1, true, None, &[1, 2]).is_none());
         }
         // a fifth concurrent transfer is dropped outright
         let over = MAX_PENDING as u32 + 1;
-        assert!(s.transmit(over, 32, 1, 1, true, &[1, 2]).is_none());
-        assert!(s.transmit(over, 0, 0, 0, false, &[3, 4]).is_none(), "rejected id never completes");
+        assert!(s.transmit(over, 32, 1, 1, true, None, &[1, 2]).is_none());
+        assert!(
+            s.transmit(over, 0, 0, 0, false, None, &[3, 4]).is_none(),
+            "rejected id never completes"
+        );
         // the in-cap transfers all complete
         for i in 1..=MAX_PENDING as u32 {
-            assert_eq!(s.transmit(i, 0, 0, 0, false, &[3, 4]), Some(i));
+            assert_eq!(s.transmit(i, 0, 0, 0, false, None, &[3, 4]), Some((i, None)));
         }
     }
 }

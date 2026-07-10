@@ -143,7 +143,11 @@ impl KittyCmd {
         };
         let mut cmd = KittyCmd {
             action: b't',
-            format: 32,
+            // 0 = unspecified: a continuation chunk carries no f= key, and a
+            // 32 default here clobbered a chunked RGB transfer's format so its
+            // byte count never matched and the image silently vanished. the
+            // store owns the RGBA default instead
+            format: 0,
             width: 0,
             height: 0,
             id: 0,
@@ -315,8 +319,11 @@ mod tests {
     // KittyCmd::parse default-fill + malformed/None branches
     #[test]
     fn kittycmd_parse_defaults_and_malformed() {
+        // format defaults to 0 = unspecified: a continuation chunk has no f=
+        // and must not clobber the pending transfer's format (the store owns
+        // the RGBA default)
         let d = KittyCmd::parse(b"G").expect("bare G");
-        assert_eq!((d.action, d.format, d.width, d.id, d.more, d.quiet), (b't', 32, 0, 0, false, 0));
+        assert_eq!((d.action, d.format, d.width, d.id, d.more, d.quiet), (b't', 0, 0, 0, false, 0));
         let q = KittyCmd::parse(b"Ga=q,q=2;").expect("query");
         assert_eq!((q.action, q.quiet), (b'q', 2));
         assert!(KittyCmd::parse(b"Gf=notanumber;AAAA").is_none()); // bad int -> None

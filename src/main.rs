@@ -1384,6 +1384,10 @@ struct CliArgs {
     /// shell label or custom profile name for the first tab (jump list, scripts)
     shell: Option<String>,
     command: Option<Vec<String>>,
+    /// inject a kitty-graphics gradient into the first pane once it's up:
+    /// ConPTY strips APC, so no shell can deliver one — this is the way to
+    /// see the decoder + image pipeline work on a live window
+    kitty_demo: bool,
 }
 
 impl CliArgs {
@@ -1418,7 +1422,58 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
             }
         } else if let Some(name) = a.strip_prefix("--shell=") {
             out.shell = Some(name.to_string());
+        } else if a == "--kitty-demo" {
+            out.kitty_demo = true;
         }
+    }
+    out
+}
+
+/// a 96x96 gradient as real kitty-graphics bytes (chunked transmit+display),
+/// pushed through the same pump as pty output so the whole APC → store → GPU
+/// path is exercised; a trailing caption prints below the image
+fn kitty_demo_bytes() -> Vec<u8> {
+    const W: usize = 96;
+    const H: usize = 96;
+    let mut px = Vec::with_capacity(W * H * 3);
+    for y in 0..H {
+        for x in 0..W {
+            px.push((255 * x / (W - 1)) as u8);
+            px.push((255 * y / (H - 1)) as u8);
+            px.push(96);
+        }
+    }
+    let b64 = base64_encode(&px);
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < b64.len() {
+        let end = (pos + 4096).min(b64.len());
+        let more = if end < b64.len() { 1 } else { 0 };
+        if pos == 0 {
+            out.extend_from_slice(format!("\x1b_Ga=T,f=24,s={W},v={H},m={more};").as_bytes());
+        } else {
+            out.extend_from_slice(format!("\x1b_Gm={more};").as_bytes());
+        }
+        out.extend_from_slice(&b64[pos..end]);
+        out.extend_from_slice(b"\x1b\\");
+        pos = end;
+    }
+    out.extend_from_slice(
+        b"\r\nkitty demo: gradient above went through the real APC path\r\n",
+    );
+    out
+}
+
+fn base64_encode(data: &[u8]) -> Vec<u8> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63]);
+        out.push(T[(n >> 12) as usize & 63]);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] } else { b'=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] } else { b'=' });
     }
     out
 }
@@ -1515,11 +1570,17 @@ fn pump_bytes(pane: &mut Pane, bytes: &[u8]) {
 fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
     match cmd.action {
         b't' | b'T' => {
-            if let Some(id) =
-                term.images.transmit(cmd.id, cmd.format, cmd.width, cmd.height, cmd.more, &cmd.payload)
+            // the display intent (and its c=/r= box) belongs to the a=T chunk;
+            // the store carries it across a chunked transfer, whose completing
+            // chunk parses with the default action
+            let display = (cmd.action == b'T')
+                .then(|| (cmd.cols.min(500) as u16, cmd.rows.min(500) as u16));
+            if let Some((id, disp)) = term
+                .images
+                .transmit(cmd.id, cmd.format, cmd.width, cmd.height, cmd.more, display, &cmd.payload)
             {
-                if cmd.action == b'T' {
-                    term.grid.place_image(id, cmd.cols.min(500) as u16, cmd.rows.min(500) as u16);
+                if let Some((c, r)) = disp {
+                    term.grid.place_image(id, c, r);
                 }
                 // ack with the resolved id (an i=0 transmit gets an auto id)
                 if cmd.quiet == 0 {
@@ -2316,6 +2377,8 @@ struct App {
     selection: Option<Sel>,
     /// keyboard mark mode state; Some while active (selection mirrors it)
     mark: Option<MarkState>,
+    /// --kitty-demo: inject the gradient into the first pane's first output
+    kitty_demo_pending: bool,
     selecting: bool,
     /// drag-selection autoscroll: signed lines/tick while the pointer is held
     /// past the pane edge, plus the next tick deadline (about_to_wait drives it)
@@ -2454,9 +2517,11 @@ impl App {
         // install profiles before anything derives from them (palette entries,
         // shell labels in a restored session)
         pty::set_profiles(p.profiles.clone());
+        let cli = parse_args(std::env::args().skip(1));
         App {
             proxy,
-            cli: parse_args(std::env::args().skip(1)),
+            kitty_demo_pending: cli.kitty_demo,
+            cli,
             #[cfg(windows)]
             handoff: None,
             // captured now, before any window of ours exists, so it still names the
@@ -7082,6 +7147,22 @@ impl ApplicationHandler<UserEvent> for App {
                 // a pane that just became ready may need its deferred resize
                 if newly_ready {
                     self.relayout_all();
+                    // --kitty-demo injects AFTER the deferred resize: the
+                    // column-change reflow clears image placements, so a
+                    // gradient placed on the raw first output wouldn't survive
+                    if self.kitty_demo_pending {
+                        self.kitty_demo_pending = false;
+                        let demo = kitty_demo_bytes();
+                        if let Some(p) = self
+                            .pw.tabs
+                            .get_mut(self.pw.active_tab)
+                            .and_then(|t| t.root.as_mut())
+                            .and_then(|r| find_pane_mut(r, id))
+                        {
+                            pump_bytes(p, &demo);
+                        }
+                        self.redraw();
+                    }
                 }
                 // let plugins react to the bell (host -> plugin event direction)
                 if rang && !self.plugins.is_empty() {
@@ -7952,6 +8033,43 @@ mod tests {
         // a stale reflow generation hides the selection instead of lying
         let stale = Sel { reflow_gen: sel.reflow_gen.wrapping_add(1), ..sel };
         assert!(sel_view_span(&g, &stale).is_none());
+    }
+
+    #[test]
+    fn kitty_demo_bytes_store_an_image_and_place_it() {
+        let demo = kitty_demo_bytes();
+        // stage 1: the scanner must split out every chunk of the transfer
+        let mut sc = apc::ApcScanner::default();
+        let (_, imgs) = sc.feed(&demo);
+        assert_eq!(imgs.len(), 9, "scanner should split out all 9 APC chunks");
+        // stage 2: every chunk must parse, the first carrying the display action
+        let cmds: Vec<apc::KittyCmd> =
+            imgs.iter().filter_map(|raw| apc::KittyCmd::parse(raw)).collect();
+        assert_eq!(cmds.len(), 9, "every chunk should parse");
+        assert_eq!(cmds[0].action, b'T');
+        assert!(cmds[0].more);
+        assert!(!cmds[8].more);
+        assert_eq!(cmds.iter().map(|c| c.payload.len()).sum::<usize>(), 96 * 96 * 3);
+        // stage 3: the full pump stores and places the image
+        let mut p = tp(1);
+        pump_bytes(&mut p, &demo);
+        assert_eq!(p.term.grid.placements().len(), 1, "demo image should be placed");
+        let pl = p.term.grid.placements()[0];
+        assert!(p.term.images.get(pl.image_id).is_some(), "demo image should be stored");
+    }
+
+    #[test]
+    fn kitty_demo_base64_round_trips() {
+        for data in [&b""[..], b"a", b"ab", b"abc", b"the quick brown fox \x00\xff\x10"] {
+            let enc = base64_encode(data);
+            let dec = term::base64_decode(&enc).expect("valid base64");
+            assert_eq!(dec, data);
+        }
+        // the demo stream is well-formed: starts with the APC intro and every
+        // chunk terminates with ST
+        let demo = kitty_demo_bytes();
+        assert!(demo.starts_with(b"\x1b_Ga=T,f=24,s=96,v=96,m=1;"));
+        assert!(demo.windows(2).filter(|w| w == b"\x1b\\").count() >= 2);
     }
 
     #[test]
