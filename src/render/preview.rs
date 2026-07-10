@@ -3,10 +3,14 @@
 //! glyph coverage and colors match what the GPU blits; the decoration geometry
 //! mirrors the renderer in mod.rs. compiled out of release
 
+#[cfg(debug_assertions)]
 use super::atlas::{FontId, GlyphAtlas, GlyphKey};
+#[cfg(debug_assertions)]
 use crate::color::{Palette, Rgb, ThemeId};
+#[cfg(debug_assertions)]
 use crate::term::Terminal;
 
+#[cfg(debug_assertions)]
 pub fn render_png(
     term: &Terminal,
     theme: ThemeId,
@@ -164,12 +168,14 @@ pub fn render_png(
     Ok((iw, ih))
 }
 
+#[cfg(debug_assertions)]
 fn lin3(c: Rgb) -> [f32; 3] {
     let l = c.to_linear_f32();
     [l[0], l[1], l[2]]
 }
 
 /// one srgb-encoded byte to linear light (for color-emoji compositing)
+#[cfg(debug_assertions)]
 fn srgb_to_lin(c: u8) -> f32 {
     let s = c as f32 / 255.0;
     if s <= 0.04045 {
@@ -179,6 +185,7 @@ fn srgb_to_lin(c: u8) -> f32 {
     }
 }
 
+#[cfg(debug_assertions)]
 fn fill(fb: &mut [[f32; 3]], dims: (usize, usize), x: usize, y: usize, w: usize, h: usize, col: [f32; 3]) {
     let (iw, ih) = dims;
     for yy in y..(y + h).min(ih) {
@@ -188,6 +195,7 @@ fn fill(fb: &mut [[f32; 3]], dims: (usize, usize), x: usize, y: usize, w: usize,
     }
 }
 
+#[cfg(debug_assertions)]
 fn srgb(l: f32) -> u8 {
     let l = l.clamp(0.0, 1.0);
     let s = if l <= 0.0031308 {

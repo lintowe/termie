@@ -1,6 +1,6 @@
 mod atlas;
 mod boxdraw;
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 pub mod preview;
 
 use std::sync::Arc;
@@ -480,7 +480,7 @@ pub struct Renderer {
     /// offscreen render target + readback buffer for the headless harness; None
     /// for the normal windowed renderer, which draws straight to the surface.
     /// only read by the debug-only capture path, so release sees it as unused
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    #[cfg_attr(not(any(test, debug_assertions)), allow(dead_code))]
     offscreen: Option<(wgpu::Texture, wgpu::Buffer)>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1873,7 +1873,7 @@ impl Renderer {
     /// mark the overlay as already shown so the next build skips the bloom-in and
     /// renders it at full opacity — used by the headless capture harness so an
     /// overlay scene isn't caught mid-fade
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub fn settle_overlay(&mut self) {
         self.overlay_shown = true;
     }
@@ -4472,7 +4472,7 @@ impl Renderer {
     /// dev capture harness: a surfaceless renderer that draws into an offscreen
     /// texture so the full chrome (tab strip, buttons, menus, panes) can be
     /// rendered to a PNG without a window. compiled out of release
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub fn new_headless(width: u32, height: u32, content_pt: f32, chrome_pt: f32, scale: f32) -> Renderer {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         desc.backends = wgpu::Backends::all();
@@ -4529,7 +4529,7 @@ impl Renderer {
 
     /// dev capture harness: render the scene into the offscreen target and write
     /// it to `path` as a PNG. only valid on a renderer from `new_headless`
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     pub fn render_png(
         &mut self,
         panes: &[PaneView],
@@ -4947,7 +4947,7 @@ mod tests {
 }
 
 /// round a tightly-packed RGBA row up to wgpu's 256-byte copy alignment
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 fn padded_bytes_per_row(width: u32) -> u32 {
     let unpadded = width * 4;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
