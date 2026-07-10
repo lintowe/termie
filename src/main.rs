@@ -6274,8 +6274,8 @@ impl App {
     /// motion, divider drag. operates on self.pw so the swap reuses it for any
     /// window
     // clear transient input state on focus loss: a stuck modifier (winit can
-    // miss the release on windows) plus a latched ctrl-hover link would
-    // underline every hovered path until the next real key event
+    // miss the release on windows), and drop any hover-link underline so it
+    // doesn't linger over the window while it's unfocused
     fn release_held_input(&mut self) {
         self.mods = ModifiersState::empty();
         // a drag in flight must not survive losing focus, or it would resume the
@@ -6398,10 +6398,11 @@ impl App {
                     self.redraw();
                 }
             }
-            // ctrl-hover a url: underline it and show a hand (click opens). read
-            // the real ctrl key, not tracked mods, so a missed release can't
-            // leave it latched on and underline whatever the mouse passes over
-            let new_link = if win::ctrl_held() && !self.pw.settings_open {
+            // hover a url: underline it and show a hand so links read as
+            // clickable without holding a modifier. opening still needs
+            // ctrl+click (checked against the real key at click time); a plain
+            // click here still starts a selection
+            let new_link = if !self.pw.settings_open {
                 self.focused_url_at(px, py).map(|(r, a, b, _)| (r, a, b))
             } else {
                 None
@@ -7940,12 +7941,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
-                // releasing ctrl removes a link underline even without moving
-                if !self.mods.control_key() && self.link.is_some() {
-                    self.link = None;
-                    self.set_pointer(CursorIcon::Default);
-                    self.redraw();
-                }
             }
             WindowEvent::CursorMoved { position, .. } => self.on_cursor_moved(position),
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
