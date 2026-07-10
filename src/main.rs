@@ -106,6 +106,36 @@ struct Pane {
     flash: Option<Instant>,
     /// kitty-graphics APC scanner state, buffering image sequences across reads
     apc: apc::ApcScanner,
+    /// OSC 133-derived command status for the pane badge: running while a
+    /// command executes, done (with exit) until the pane is next viewed
+    status: PaneStatus,
+}
+
+/// what a pane's shell is doing, for the corner badge + tab strip rollup —
+/// the cockpit answer to "which agents are still working, which finished"
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaneStatus {
+    Idle,
+    Running,
+    Done(Option<i32>),
+}
+
+impl PaneStatus {
+    /// severity for tab rollup + paint: 0 none, 1 running, 2 done-ok, 4 failed
+    /// (3 is the bell-attention slot, which stays tab-level)
+    fn rank(self) -> u8 {
+        match self {
+            PaneStatus::Idle => 0,
+            PaneStatus::Running => 1,
+            PaneStatus::Done(code) => {
+                if code.unwrap_or(0) == 0 {
+                    2
+                } else {
+                    4
+                }
+            }
+        }
+    }
 }
 
 impl Pane {
@@ -244,6 +274,8 @@ enum PaletteAction {
     /// prompt-jump passes through to the program when there are no OSC-133 marks
     JumpPromptPrev,
     JumpPromptNext,
+    /// focus the next pane whose command failed / rang / finished / is running
+    JumpAttention,
     /// keyboard scrollback: a page (or straight to an end) of history
     ScrollPageUp,
     ScrollPageDown,
@@ -275,6 +307,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
     ("mark mode", PaletteAction::MarkMode),
+    ("jump to attention", PaletteAction::JumpAttention),
     ("zoom pane", PaletteAction::ToggleZoom),
     ("toggle fullscreen", PaletteAction::ToggleFullscreen),
     ("rename tab", PaletteAction::RenameTab),
@@ -830,6 +863,8 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
         (cs, chr("o"), A::SplitH),
         // keyboard selection, the windows terminal chord
         (cs, chr("m"), A::MarkMode),
+        // cockpit: hop to the pane that needs eyes
+        (cs, chr("a"), A::JumpAttention),
     ];
     for n in 1u8..=9 {
         v.push((ctrl, chr(&n.to_string()), A::SelectTab(n - 1)));
@@ -1548,6 +1583,7 @@ fn build_pane(
         ready: false,
         flash: None,
         apc: apc::ApcScanner::default(),
+        status: PaneStatus::Idle,
     })
 }
 
@@ -2718,6 +2754,7 @@ impl App {
             ready: true,
             flash: None,
             apc: apc::ApcScanner::default(),
+            status: PaneStatus::Idle,
         };
         pane.resize(rows, cols);
         self.start_reader(&mut pane);
@@ -3645,6 +3682,7 @@ impl App {
                                         .iter()
                                         .find(|(n, _)| n == p.shell.label())
                                         .map(|&(_, id)| id),
+                                    status: p.status.rank(),
                                 })
                             })
                             .collect()
@@ -3736,14 +3774,33 @@ impl App {
     }
 
     fn sync_tabs(&mut self) {
-        // viewing a tab in a focused window acknowledges its bell
+        // viewing a tab in a focused window acknowledges its bell, and its
+        // finished panes are seen — their done badges retire
         if self.pw.focused
             && let Some(t) = self.pw.tabs.get_mut(self.pw.active_tab)
         {
             t.attention = false;
+            if let Some(root) = t.root.as_mut() {
+                each_pane_mut(root, &mut |p| {
+                    if matches!(p.status, PaneStatus::Done(_)) {
+                        p.status = PaneStatus::Idle;
+                    }
+                });
+            }
         }
         let labels: Vec<String> = self.pw.tabs.iter().map(tab_label).collect();
-        let attention: Vec<bool> = self.pw.tabs.iter().map(|t| t.attention).collect();
+        // per-tab badge rollup: failed > bell > done > running > nothing
+        let attention: Vec<u8> = self
+            .pw.tabs
+            .iter()
+            .map(|t| {
+                let mut s = if t.attention { 3 } else { 0 };
+                if let Some(root) = t.root.as_ref() {
+                    each_pane(root, &mut |p| s = s.max(p.status.rank()));
+                }
+                s
+            })
+            .collect();
         let active = self.pw.active_tab;
         let cwd: Option<String> = self
             .pw.tabs
@@ -3757,7 +3814,7 @@ impl App {
         }
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_tabs(labels, active);
-            r.set_tab_attention(attention);
+            r.set_tab_status(attention);
         }
         // sync_tabs runs after every structural / focus / cwd change (never per
         // frame), so it's the chokepoint to schedule a debounced session write
@@ -4146,6 +4203,7 @@ impl App {
             PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
             PaletteAction::MarkMode => self.set_mark_mode(true),
+            PaletteAction::JumpAttention => self.jump_attention(),
             PaletteAction::DefaultTerminal => {
                 let msg = if win::defterm_registered() {
                     if win::unregister_defterm() {
@@ -5153,6 +5211,61 @@ impl App {
         self.mark = Some(MarkState { cur, anchor });
         self.selection =
             Some(Sel { pane, start: anchor.unwrap_or(cur_abs), end: cur_abs, block: false, reflow_gen });
+        self.redraw();
+    }
+
+    /// focus the pane that most needs eyes: failed command beats a bell beats
+    /// finished beats still-running; ties go to the nearest tab ahead of the
+    /// current one, so repeated presses walk the whole set (viewing a done
+    /// pane retires its badge, which naturally drains the queue)
+    fn jump_attention(&mut self) {
+        let n = self.pw.tabs.len();
+        if n == 0 {
+            return;
+        }
+        let cur_pane = self.active_focused_id();
+        // (severity, tab distance, tab index, pane id)
+        let mut best: Option<(u8, usize, usize, usize)> = None;
+        for off in 0..n {
+            let ti = (self.pw.active_tab + off) % n;
+            let Some(tab) = self.pw.tabs.get(ti) else {
+                continue;
+            };
+            let Some(root) = tab.root.as_ref() else {
+                continue;
+            };
+            each_pane(root, &mut |p| {
+                let mut rank = p.status.rank();
+                // the tab's bell counts for its focused pane
+                if tab.attention && p.id == tab.focused {
+                    rank = rank.max(3);
+                }
+                if rank == 0 || (off == 0 && Some(p.id) == cur_pane) {
+                    return;
+                }
+                let better = match best {
+                    None => true,
+                    Some((br, bd, ..)) => rank > br || (rank == br && off < bd),
+                };
+                if better {
+                    best = Some((rank, off, ti, p.id));
+                }
+            });
+        }
+        let Some((_, _, ti, id)) = best else {
+            self.show_notice("nothing needs attention");
+            return;
+        };
+        let before = self.focus_identity();
+        self.switch_tab(ti);
+        if let Some(tab) = self.pw.tabs.get_mut(ti)
+            && tab.focused != id
+        {
+            tab.focused = id;
+            self.focus_anim = Some(Instant::now());
+            self.sync_tabs();
+            self.after_focus_context_change(before);
+        }
         self.redraw();
     }
 
@@ -6550,6 +6663,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut note: Option<String> = None;
                 let mut newly_ready = false;
                 let mut cwd_changed = false;
+                let mut status_changed = false;
                 for (ti, tab) in self.pw.tabs.iter_mut().enumerate() {
                     if let Some(root) = tab.root.as_mut()
                         && let Some(p) = find_pane_mut(root, id) {
@@ -6567,6 +6681,26 @@ impl ApplicationHandler<UserEvent> for App {
                             if p.term.title_dirty {
                                 p.term.title_dirty = false;
                                 cwd_changed = true;
+                            }
+                            // derive the pane's command badge from OSC 133; a
+                            // command finishing in the viewed pane is already
+                            // seen, so it never earns a done badge
+                            let viewed =
+                                self.pw.focused && ti == self.pw.active_tab && tab.focused == id;
+                            let status = if p.term.cmd_running {
+                                p.term.cmd_done = None;
+                                PaneStatus::Running
+                            } else if let Some(code) = p.term.cmd_done.take() {
+                                if viewed { PaneStatus::Idle } else { PaneStatus::Done(code) }
+                            } else if p.status == PaneStatus::Running {
+                                // the C..D window closed without a done event
+                                PaneStatus::Idle
+                            } else {
+                                p.status
+                            };
+                            if status != p.status {
+                                p.status = status;
+                                status_changed = true;
                             }
                             in_sync = p.term.sync_output;
                             if !p.term.responses.is_empty() {
@@ -6605,6 +6739,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut sat_color: Vec<term::ColorReq> = Vec::new();
                     let mut sat_ready = false;
                     let mut sat_cwd = false;
+                    let mut sat_status = false;
                     let mut sat_rang = false;
                     let mut sat_rang_tab: Option<usize> = None;
                     let mut sat_note: Option<String> = None;
@@ -6624,6 +6759,24 @@ impl ApplicationHandler<UserEvent> for App {
                             if p.term.title_dirty {
                                 p.term.title_dirty = false;
                                 sat_cwd = true;
+                            }
+                            // same badge derivation as the main window, scoped
+                            // to the swapped-in satellite's focus state
+                            let viewed =
+                                self.pw.focused && ti == self.pw.active_tab && tab.focused == id;
+                            let status = if p.term.cmd_running {
+                                p.term.cmd_done = None;
+                                PaneStatus::Running
+                            } else if let Some(code) = p.term.cmd_done.take() {
+                                if viewed { PaneStatus::Idle } else { PaneStatus::Done(code) }
+                            } else if p.status == PaneStatus::Running {
+                                PaneStatus::Idle
+                            } else {
+                                p.status
+                            };
+                            if status != p.status {
+                                p.status = status;
+                                sat_status = true;
                             }
                             if !p.term.responses.is_empty() {
                                 sat_responses = Some(std::mem::take(&mut p.term.responses));
@@ -6669,7 +6822,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if sat_ready {
                         self.relayout_all();
                     }
-                    if sat_cwd {
+                    if sat_cwd || sat_status {
                         self.sync_tabs();
                     }
                     // the swapped-in renderer is the satellite's own, so the
@@ -6788,9 +6941,13 @@ impl ApplicationHandler<UserEvent> for App {
                             sp.pty.write(&r);
                         }
                 }
-                // relabel tabs only when a tab pane's cwd or title actually changed
-                if cwd_changed {
+                // relabel tabs only when a tab pane's cwd or title actually
+                // changed; a status flip also refreshes the strip's badges
+                if cwd_changed || status_changed {
                     self.sync_tabs();
+                }
+                if status_changed {
+                    self.redraw();
                 }
                 if self.pw.layout_cache.iter().any(|(pid, _)| *pid == id) {
                     if in_sync {
@@ -8019,6 +8176,7 @@ mod tests {
             ready: true,
             flash: None,
             apc: apc::ApcScanner::default(),
+            status: PaneStatus::Idle,
         }
     }
     fn leaf(id: usize) -> Node {

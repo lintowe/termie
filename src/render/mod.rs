@@ -131,6 +131,9 @@ pub struct PaneView<'a> {
     /// paints with that theme's palette while the window chrome keeps the
     /// global theme; None follows the window
     pub theme: Option<ThemeId>,
+    /// command badge severity for the pane's corner dot (0 none, 1 running,
+    /// 2 done, 4 failed — same scale as the tab strip)
+    pub status: u8,
 }
 
 /// command-palette display state
@@ -280,8 +283,8 @@ type PaneInfo = (f32, f32, bool, Rect);
 /// alt+drag rectangular selection
 pub type SelSpan = ((usize, usize), (usize, usize), bool);
 /// snapshot of a tab row for painting: index, tab rect, close rect, label,
-/// active, hovered, close-hovered, attention (bell in a background tab)
-type TabItem = (usize, Rect, Rect, String, bool, bool, bool, bool);
+/// active, hovered, close-hovered, badge severity (0 none .. 4 failed)
+type TabItem = (usize, Rect, Rect, String, bool, bool, bool, u8);
 
 /// GPU backend choice for compatibility; persisted + applied at startup
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -576,8 +579,9 @@ pub struct Renderer {
     pane_mode: bool,
     mark_mode: bool,
     tabs: Vec<String>,
-    /// parallel to `tabs`: true = a bell rang there while backgrounded
-    tab_attention: Vec<bool>,
+    /// parallel to `tabs`: badge severity — 0 none, 1 running, 2 done,
+    /// 3 bell, 4 failed (the tab dot colors by it)
+    tab_status: Vec<u8>,
     active_tab: usize,
     status_git: Option<String>,
     status_clock: String,
@@ -1245,7 +1249,7 @@ impl Renderer {
             pane_mode: false,
             mark_mode: false,
             tabs: Vec::new(),
-            tab_attention: Vec::new(),
+            tab_status: Vec::new(),
             active_tab: 0,
             status_git: None,
             status_clock: String::new(),
@@ -1793,10 +1797,11 @@ impl Renderer {
         (self.cols, self.rows)
     }
 
-    /// per-tab bell markers, parallel to `tabs`; a background tab whose shell
-    /// rang shows a dot where its close icon would sit
-    pub fn set_tab_attention(&mut self, attention: Vec<bool>) {
-        self.tab_attention = attention;
+    /// per-tab badge severities, parallel to `tabs`; a background tab with a
+    /// bell / running / finished command shows a colored dot where its close
+    /// icon would sit (0 none, 1 running, 2 done, 3 bell, 4 failed)
+    pub fn set_tab_status(&mut self, status: Vec<u8>) {
+        self.tab_status = status;
     }
 
     /// transient status-bar notification text (None clears the readout)
@@ -3036,6 +3041,20 @@ impl Renderer {
             if pv.flash > 0.0 {
                 Self::stroke_rect_a(&mut out, info.3, hair * 2.0, PAPER, pv.flash);
             }
+            // command badge: a corner dot answering "which agents are still
+            // working, which finished" at a glance across splits
+            if pv.status != 0 {
+                let (rx, ry, rw, _rh) = info.3;
+                let d = (6.0 * self.scale).round().max(4.0);
+                let pad = (6.0 * self.scale).round();
+                let (dot, da) = match pv.status {
+                    1 => (self.palette.mute, 0.9),
+                    2 => (self.palette.ansi_color(2), 1.0),
+                    4 => (self.palette.ansi_color(1), 1.0),
+                    _ => (PAPER, 1.0),
+                };
+                Self::push_rect(&mut out, rx + rw - d - pad, ry + pad, d, d, dot, da);
+            }
         }
         // last use of pane_info — hand the buffer back so its capacity persists
         self.pane_scratch = pane_info;
@@ -3090,7 +3109,7 @@ impl Renderer {
                         *i == active_tab,
                         self.hovered == Some(Hot::Tab(*i)),
                         self.hovered == Some(Hot::TabClose(*i)),
-                        self.tab_attention.get(*i).copied().unwrap_or(false),
+                        self.tab_status.get(*i).copied().unwrap_or(0),
                     )
                 })
                 .collect();
@@ -3139,14 +3158,22 @@ impl Renderer {
                 let _ = Self::draw_text(
                     &mut self.atlas, &mut out, FontId::Chrome, cgx, cy.round(), "\u{f00d}", cc, 1.0, track,
                 );
-            } else if *attn {
-                // bell dot in the close icon's slot, so it never shifts the
-                // label; hovering swaps it back for the close icon
+            } else if *attn != 0 {
+                // badge dot in the close icon's slot, so it never shifts the
+                // label; hovering swaps it back for the close icon. color says
+                // what happened: bell keeps the classic paper dot, a finished
+                // command goes green (red when it failed), running stays dim
                 let d = (5.0 * self.scale).round().max(3.0);
                 let (cx, _cy, ccw, _cch) = *close;
                 let dx = (cx + (ccw - d) / 2.0).round();
                 let dy = ((self.title_bar_h - d) / 2.0).round();
-                Self::push_rect(&mut out, dx, dy, d, d, PAPER, 1.0);
+                let (dot, da) = match *attn {
+                    1 => (self.palette.mute, 0.9),
+                    2 => (self.palette.ansi_color(2), 1.0),
+                    4 => (self.palette.ansi_color(1), 1.0),
+                    _ => (PAPER, 1.0),
+                };
+                Self::push_rect(&mut out, dx, dy, d, d, dot, da);
             }
         }
 

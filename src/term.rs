@@ -78,6 +78,13 @@ pub struct Terminal {
     /// OSC-7 split across two reads and fired on the byte pattern in file data)
     pub cwd_dirty: bool,
     pub last_osc133: Option<Osc133>,
+    /// a command is executing (inside an OSC 133 C..D window) — drives the
+    /// pane's "agent running" badge
+    pub cmd_running: bool,
+    /// sticky command-finished event (exit code), drained by the app like
+    /// bell/notify; last_osc133 alone misses it because the next prompt's A/B
+    /// usually arrives in the same chunk
+    pub cmd_done: Option<Option<i32>>,
     pub bell: bool,
     /// the message body of an OSC 9 / OSC 777 notification, drained by the app
     /// into the status-bar readout (the bell flag carries the attention signal)
@@ -135,6 +142,8 @@ impl Terminal {
             cwd: None,
             cwd_dirty: false,
             last_osc133: None,
+            cmd_running: false,
+            cmd_done: None,
             bell: false,
             notify: None,
             responses: Vec::new(),
@@ -1183,7 +1192,10 @@ impl Perform for Terminal {
                             Some(Osc133::PromptStart)
                         }
                         Some(b'B') => Some(Osc133::PromptEnd),
-                        Some(b'C') => Some(Osc133::CommandStart),
+                        Some(b'C') => {
+                            self.cmd_running = true;
+                            Some(Osc133::CommandStart)
+                        }
                         Some(b'D') => {
                             let code = params
                                 .get(2)
@@ -1194,6 +1206,8 @@ impl Perform for Terminal {
                             if !self.using_alt {
                                 self.grid.set_last_prompt_exit(code);
                             }
+                            self.cmd_running = false;
+                            self.cmd_done = Some(code);
                             Some(Osc133::CommandDone(code))
                         }
                         _ => self.last_osc133,
@@ -1925,6 +1939,20 @@ mod tests {
         // RIS clears a live progress
         feed(&mut t, b"\x1b]9;4;1;10\x1b\\\x1bc");
         assert_eq!(t.progress, None);
+    }
+
+    #[test]
+    fn osc133_tracks_command_running_and_done() {
+        let mut t = Terminal::new(2, 10);
+        assert!(!t.cmd_running);
+        feed(&mut t, b"\x1b]133;C\x1b\\");
+        assert!(t.cmd_running);
+        assert_eq!(t.cmd_done, None);
+        // D ends the window and leaves a sticky done event with the exit code,
+        // even when the next prompt's A/B arrive in the same chunk
+        feed(&mut t, b"\x1b]133;D;1\x1b\\\x1b]133;A\x1b\\\x1b]133;B\x1b\\");
+        assert!(!t.cmd_running);
+        assert_eq!(t.cmd_done.take(), Some(Some(1)));
     }
 
     #[test]

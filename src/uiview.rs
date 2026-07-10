@@ -36,12 +36,13 @@ pub fn maybe_run() -> bool {
             r.set_hovered(Some(Hot::SplitV));
         }
         "attention" => {
-            // a bell rang in the two background tabs
-            r.set_tab_attention(vec![false, true, true]);
+            // a bell rang in one background tab; the other finished a command
+            // (one ok, shown green) — the full badge spread in one shot
+            r.set_tab_status(vec![0, 3, 2]);
         }
         "notice" => {
             // an OSC 9 notification's text on the status bar
-            r.set_tab_attention(vec![false, true, false]);
+            r.set_tab_status(vec![0, 3, 0]);
             r.set_notice(Some("claude: waiting for your approval in web-ui".into()));
         }
         "gear" => {
@@ -169,6 +170,8 @@ pub fn maybe_run() -> bool {
             flash: 0.0,
             link: None,
             theme: None,
+            // the attention scene also shows a pane's running badge
+            status: if scene == "attention" && i == 1 { 1 } else { 0 },
         })
         .collect();
 
