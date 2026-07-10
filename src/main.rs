@@ -4885,11 +4885,15 @@ impl App {
             return;
         };
         let cwd = self.focused_cwd();
-        // a known cwd means spawn fresh there (pool shells live in home); else
-        // prefer a ready pool shell (instant — relayout resizes it to the split
-        // rect, safe since it's past startup), spawning fresh at the post-split
+        // splitting a wsl/cmd/custom pane keeps that shell, like duplicate-tab
+        let shell = self.focused_shell().filter(|&s| s != self.config.shell);
+        // a known cwd or an inherited non-default shell means spawn fresh
+        // (pool shells live in home and run the default shell); else prefer a
+        // ready pool shell (instant — relayout resizes it to the split rect,
+        // safe since it's past startup), spawning fresh at the post-split
         // rect only as a fallback so pwsh is never resized mid-startup
         let pane = if cwd.is_none()
+            && shell.is_none()
             && let Some(i) = self.pool.iter().position(|p| p.ready)
         {
             self.pool.remove(i)
@@ -4916,7 +4920,7 @@ impl App {
                 }
                 _ => self.content_pane_size(),
             };
-            let Ok(p) = self.spawn_pane(cols, rows, cwd, None, None) else {
+            let Ok(p) = self.spawn_pane(cols, rows, cwd, shell, None) else {
                 return;
             };
             p
