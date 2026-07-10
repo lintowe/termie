@@ -9,6 +9,44 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// can cache packed images without colliding across panes or re-transmissions
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
+/// reserve a fresh atlas-cache key outside the kitty decode path (the window
+/// background image shares the same color-atlas cache as kitty placements)
+pub fn alloc_key() -> u64 {
+    NEXT_KEY.fetch_add(1, Ordering::Relaxed)
+}
+
+/// box-downscale an RGBA image so its long side is at most `max_side`,
+/// preserving aspect; the input comes back untouched when it already fits
+pub fn downscale_rgba(rgba: &[u8], w: u32, h: u32, max_side: u32) -> (Vec<u8>, u32, u32) {
+    if w <= max_side && h <= max_side {
+        return (rgba.to_vec(), w, h);
+    }
+    let scale = max_side as f32 / w.max(h) as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    let mut out = Vec::with_capacity((nw * nh * 4) as usize);
+    for y in 0..nh {
+        let sy0 = (y as u64 * h as u64 / nh as u64) as u32;
+        let sy1 = (((y as u64 + 1) * h as u64).div_ceil(nh as u64) as u32).clamp(sy0 + 1, h);
+        for x in 0..nw {
+            let sx0 = (x as u64 * w as u64 / nw as u64) as u32;
+            let sx1 = (((x as u64 + 1) * w as u64).div_ceil(nw as u64) as u32).clamp(sx0 + 1, w);
+            let mut acc = [0u64; 4];
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let i = ((sy * w + sx) * 4) as usize;
+                    for (c, a) in acc.iter_mut().enumerate() {
+                        *a += rgba[i + c] as u64;
+                    }
+                }
+            }
+            let n = ((sy1 - sy0) * (sx1 - sx0)) as u64;
+            out.extend(acc.iter().map(|&a| (a / n) as u8));
+        }
+    }
+    (out, nw, nh)
+}
+
 /// a hard cap on a single image's transmitted bytes, so a hostile stream can't
 /// grow the reassembly buffer without bound
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -225,7 +263,7 @@ fn decode(format: u32, w: u32, h: u32, data: &[u8]) -> Option<Image> {
 /// header. EXPAND|STRIP_16 normalizes paletted / low-bit / 16-bit down to 8-bit,
 /// leaving grayscale / grayscale-alpha / rgb / rgba, which we widen to RGBA8. the
 /// decoded-size guard rejects a decompression bomb before allocating
-fn decode_png(data: &[u8]) -> Option<Image> {
+pub(crate) fn decode_png(data: &[u8]) -> Option<Image> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
@@ -339,6 +377,26 @@ mod tests {
         assert!(s.get(1).is_some() && s.get(2).is_some());
         s.clear();
         assert!(s.get(1).is_none() && s.get(2).is_none());
+    }
+
+    // box-downscale halves a checkerboard into averaged pixels and leaves an
+    // already-small image untouched
+    #[test]
+    fn downscale_averages_and_preserves_small_images() {
+        // 2x2: white, black / black, white -> one mid-gray pixel
+        let src = [255u8, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255];
+        let (out, w, h) = downscale_rgba(&src, 2, 2, 1);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(&out[..3], &[127, 127, 127]);
+        assert_eq!(out[3], 255);
+        // fits already: bytes come back unchanged
+        let (same, w, h) = downscale_rgba(&src, 2, 2, 4);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(same, src);
+        // aspect is preserved on the long side
+        let wide = vec![9u8; 8 * 2 * 4];
+        let (_, w, h) = downscale_rgba(&wide, 8, 2, 4);
+        assert_eq!((w, h), (4, 1));
     }
 
     // an anonymous (i=0) chunked transfer continues into ONE image, not a fresh

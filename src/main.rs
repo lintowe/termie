@@ -2214,6 +2214,10 @@ struct Persisted {
     /// minimum WCAG contrast ratio text is lifted to against its cell bg
     /// (`min_contrast=`, 1-21; 1 = off). wt's minimumContrastRatio
     min_contrast: f32,
+    /// window background image png (`background_image=` path) drawn behind
+    /// panes at `background_image_opacity=` (0..1)
+    background_image: Option<String>,
+    background_image_opacity: f32,
     opacity: i32,
     quake_key: Option<(u32, u32)>,
     /// the quake_key line as written, kept so save_config can re-emit it —
@@ -2274,6 +2278,8 @@ impl Default for Persisted {
             font: None,
             font_weight: 400,
             min_contrast: 1.0,
+            background_image: None,
+            background_image_opacity: 0.3,
             opacity: 85,
             quake_key: None,
             quake_key_raw: None,
@@ -2776,6 +2782,12 @@ fn parse_persisted(text: &str) -> Persisted {
             "min_contrast" => {
                 if let Ok(x) = v.parse::<f32>() {
                     p.min_contrast = x.clamp(1.0, 21.0);
+                }
+            }
+            "background_image" => p.background_image = (!v.is_empty()).then(|| v.to_string()),
+            "background_image_opacity" => {
+                if let Ok(x) = v.parse::<f32>() {
+                    p.background_image_opacity = x.clamp(0.0, 1.0);
                 }
             }
             "quake_key" => {
@@ -3302,6 +3314,17 @@ impl App {
                 }
                 r.set_font_weight(p.font_weight);
                 r.set_min_contrast(p.min_contrast);
+                if let Some(path) = p.background_image.as_deref() {
+                    match std::fs::read(path).ok().and_then(|d| image::decode_png(&d)) {
+                        Some(img) => {
+                            // bound the atlas cost: a wallpaper-sized png box-filters
+                            // down to a wash-sized texture nobody reads text off of
+                            let scaled = image::downscale_rgba(&img.rgba, img.width, img.height, 1024);
+                            r.set_background_image(Some(scaled), p.background_image_opacity);
+                        }
+                        None => log::warn!("background_image: couldn't load {path} (png only)"),
+                    }
+                }
                 r.set_content_pt(p.font_size);
             }
         }
@@ -6162,6 +6185,10 @@ impl App {
         }
         if r.min_contrast() > 1.0 {
             let _ = writeln!(s, "min_contrast={}", r.min_contrast());
+        }
+        if let Some(bi) = &self.persisted.background_image {
+            let _ = writeln!(s, "background_image={bi}");
+            let _ = writeln!(s, "background_image_opacity={}", self.persisted.background_image_opacity);
         }
         if let Some(q) = &self.persisted.quake_key_raw {
             // an opt-in the panel can't edit; dropping it here silently killed

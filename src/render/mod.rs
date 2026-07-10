@@ -630,6 +630,10 @@ pub struct Renderer {
     content_weight: u16,
     /// minimum WCAG contrast ratio for text (1.0 = off)
     min_contrast: f32,
+    /// window background image: (atlas cache key, rgba, w, h), drawn over the
+    /// theme wash at bg_image_alpha; panes show it through their default bg
+    bg_image: Option<(u64, Vec<u8>, u32, u32)>,
+    bg_image_alpha: f32,
     fonts: Vec<&'static str>,
     font_idx: usize,
     /// the gpu backend actually resolved at init (for the settings ABOUT block)
@@ -1320,6 +1324,8 @@ impl Renderer {
             content_font: None,
             content_weight: 400,
             min_contrast: 1.0,
+            bg_image: None,
+            bg_image_alpha: 0.3,
             backend_label: "wgpu",
             fonts,
             font_idx: 0,
@@ -1781,6 +1787,12 @@ impl Renderer {
 
     pub fn min_contrast(&self) -> f32 {
         self.min_contrast
+    }
+
+    /// set (or clear) the decoded window background image; opacity in 0..1
+    pub fn set_background_image(&mut self, img: Option<(Vec<u8>, u32, u32)>, opacity: f32) {
+        self.bg_image = img.map(|(rgba, w, h)| (crate::image::alloc_key(), rgba, w, h));
+        self.bg_image_alpha = opacity.clamp(0.0, 1.0);
     }
 
     pub fn bold_as_bright(&self) -> bool {
@@ -3190,6 +3202,24 @@ impl Renderer {
             self.gradient_key = grad_key;
         }
         out.extend_from_slice(&self.gradient_cache);
+
+        // background image over the wash, under everything else: scaled to
+        // cover the window and centered, the viewport cropping the overflow
+        if let Some((key, rgba, iw, ih)) = &self.bg_image
+            && let Some(g) = self.atlas.get_image(*key, rgba, *iw, *ih)
+        {
+            let scale = (w / g.width).max(h / g.height);
+            let (dw, dh) = (g.width * scale, g.height * scale);
+            out.push(Instance {
+                pos: [((w - dw) / 2.0).round(), ((h - dh) / 2.0).round()],
+                size: [dw, dh],
+                uv_min: g.uv_min,
+                uv_max: g.uv_max,
+                color: [0.0, 0.0, 0.0, self.bg_image_alpha],
+                kind: 3,
+                _pad: [0; 3],
+            });
+        }
 
         // pre-resolve pane grid origins (immutable self) before borrowing the
         // atlas; reuse a persistent buffer like scratch to avoid a per-frame alloc
