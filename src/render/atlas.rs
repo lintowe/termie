@@ -551,6 +551,145 @@ impl GlyphAtlas {
         }
     }
 
+    /// fetch (and cache) a composited ligature-run strip: `text` (ascii
+    /// punctuation, one cell per byte) shaped as one string so the font's
+    /// calt/liga rules fire across cells. shares the cluster cache — the
+    /// style prefix range '4'-'7' keeps run keys clear of cluster keys, and
+    /// a grapheme cluster can never equal a multi-char ascii string anyway
+    pub fn get_run(&mut self, text: &str, bold: bool, italic: bool) -> Option<AtlasGlyph> {
+        self.cluster_key.clear();
+        self.cluster_key.push((b'4' + (bold as u8) + ((italic as u8) << 1)) as char);
+        self.cluster_key.push_str(text);
+        if let Some(g) = self.cluster_cache.get(self.cluster_key.as_str()) {
+            return *g;
+        }
+        match self.rasterize_run(text, bold, italic) {
+            RasterOutcome::Glyph(g) => {
+                let key = self.cluster_key.clone();
+                self.cluster_cache.insert(key, Some(g));
+                Some(g)
+            }
+            RasterOutcome::Empty => {
+                let key = self.cluster_key.clone();
+                self.cluster_cache.insert(key, None);
+                None
+            }
+            RasterOutcome::NoSpace => {
+                const MAX_DIM: u32 = 2048;
+                self.repack_at(MAX_DIM);
+                match self.rasterize_run(text, bold, italic) {
+                    RasterOutcome::Glyph(g) => {
+                        let key = self.cluster_key.clone();
+                        self.cluster_cache.insert(key, Some(g));
+                        Some(g)
+                    }
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// composite a ligature run into one strip `text.len()` cells wide,
+    /// baseline-aligned like rasterize_cluster. each glyph anchors to its
+    /// source cell (its byte offset — ascii input) instead of the shaped pen
+    /// position, so identity-shaped chars land pixel-identical to the
+    /// per-cell path and only true ligature glyphs span cell boundaries
+    fn rasterize_run(&mut self, text: &str, bold: bool, italic: bool) -> RasterOutcome {
+        let m = self.metrics(FontId::Content);
+        let cell_w = m.cell_w.ceil() as u32;
+        let ch = m.line_height.ceil() as u32;
+        let cw = cell_w * text.len() as u32;
+        if cell_w == 0 || ch == 0 || text.is_empty() {
+            return RasterOutcome::Empty;
+        }
+        let baseline = m.ascent.round() as i32;
+        let mut attrs = Attrs::new()
+            .family(Family::Name(m.family))
+            .weight(if bold { bolded(m.weight) } else { m.weight });
+        if italic {
+            attrs = attrs.style(Style::Italic);
+        }
+        self.buffer.set_metrics(Metrics::new(m.px, m.line_height));
+        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let mut keys: Vec<(i32, _)> = Vec::new();
+        if let Some(run) = self.buffer.layout_runs().next() {
+            for g in run.glyphs.iter() {
+                let p = g.physical((0.0, 0.0), 1.0);
+                keys.push(((g.start as u32 * cell_w) as i32, p.cache_key));
+            }
+        }
+        if keys.is_empty() {
+            return RasterOutcome::Empty;
+        }
+
+        let mut canvas = vec![0u8; (cw * ch) as usize];
+        let mut any = false;
+        for (pen_x, ck) in keys {
+            let extracted = {
+                let img = self.swash.get_image(&mut self.font_system, ck);
+                let Some(img) = img.as_ref() else {
+                    continue;
+                };
+                if matches!(img.content, SwashContent::Color) {
+                    return RasterOutcome::Empty;
+                }
+                let (gw, gh) = (img.placement.width, img.placement.height);
+                if gw == 0 || gh == 0 {
+                    continue;
+                }
+                let cov = to_alpha(&img.data, gw as usize, gh as usize, img.content);
+                (gw, gh, img.placement.left, img.placement.top, cov)
+            };
+            let (gw, gh, gleft, gtop, cov) = extracted;
+            let ox = pen_x + gleft;
+            let oy = baseline - gtop;
+            for gy in 0..gh as i32 {
+                let cy = oy + gy;
+                if cy < 0 || cy >= ch as i32 {
+                    continue;
+                }
+                for gx in 0..gw as i32 {
+                    let cx = ox + gx;
+                    if cx < 0 || cx >= cw as i32 {
+                        continue;
+                    }
+                    let s = cov[(gy as u32 * gw + gx as u32) as usize];
+                    let di = (cy as u32 * cw + cx as u32) as usize;
+                    if s > canvas[di] {
+                        canvas[di] = s;
+                        any = true;
+                    }
+                }
+            }
+        }
+        if !any {
+            return RasterOutcome::Empty;
+        }
+
+        let (x, y) = match self.alloc(cw, ch) {
+            Some(p) => p,
+            None => return RasterOutcome::NoSpace,
+        };
+        for row in 0..ch {
+            let dst = ((y + row) * self.dim + x) as usize;
+            let src = (row * cw) as usize;
+            self.data[dst..dst + cw as usize].copy_from_slice(&canvas[src..src + cw as usize]);
+        }
+        self.mark_dirty_rows(y, y + ch);
+        let d = self.dim as f32;
+        RasterOutcome::Glyph(AtlasGlyph {
+            uv_min: [x as f32 / d, y as f32 / d],
+            uv_max: [(x + cw) as f32 / d, (y + ch) as f32 / d],
+            width: cw as f32,
+            height: ch as f32,
+            left: 0.0,
+            top: m.ascent,
+            color: false,
+        })
+    }
+
     /// composite a grapheme cluster into one cell-sized coverage slot, baseline-
     /// aligned. emoji/color clusters return Empty (per-char fallback). the cell-
     /// aligned slot makes left=0, top=ascent so the caller's normal placement math
@@ -1006,6 +1145,21 @@ mod tests {
         // cached blank (the no-cache-on-NoSpace invariant, observed end to end)
         let g = atlas.get(GlyphKey { font: FontId::Content, c: 'A', bold: false, italic: false });
         assert!(g.is_some(), "a normal glyph must still rasterize after the atlas grows");
+    }
+
+    // a ligature run composites into one strip exactly run-length cells wide,
+    // anchored like a cluster (left 0, top = ascent); a refetch is the cached
+    // strip, and bold caches separately from regular
+    #[test]
+    fn get_run_strip_spans_its_cells_and_caches() {
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
+        let cell_w = atlas.metrics(FontId::Content).cell_w.ceil();
+        let first = atlas.get_run("==>", false, false).expect("strip");
+        assert_eq!(first.width, cell_w * 3.0);
+        assert_eq!(first.left, 0.0);
+        assert_eq!(atlas.get_run("==>", false, false), Some(first));
+        let bold = atlas.get_run("==>", true, false).expect("bold strip");
+        assert_ne!(bold, first);
     }
 
     // a cluster cache hit returns the same glyph the first (rasterizing) call did

@@ -333,6 +333,15 @@ type PaneInfo = (f32, f32, bool, Rect);
 /// a selection span in viewport cells: (start, end, block) — block marks an
 /// alt+drag rectangular selection
 pub type SelSpan = ((usize, usize), (usize, usize), bool);
+/// ascii punctuation that programming fonts chain into ligatures (==> !=
+/// :: -> ...); letters and digits never join a run, so prose costs nothing
+fn liga_char(c: char) -> bool {
+    matches!(
+        c,
+        '=' | '<' | '>' | '!' | '&' | '|' | '+' | '-' | '*' | '/' | '~' | ':' | ';' | '?' | '#' | '_' | '^' | '.' | '%' | '$' | '@'
+    )
+}
+
 /// snapshot of a tab row for painting: index, tab rect, close rect, label,
 /// active, hovered, close-hovered, badge severity (0 none .. 4 failed),
 /// user-picked tint (ansi palette index)
@@ -634,6 +643,8 @@ pub struct Renderer {
     /// theme wash at bg_image_alpha; panes show it through their default bg
     bg_image: Option<(u64, Vec<u8>, u32, u32)>,
     bg_image_alpha: f32,
+    /// shape punctuation runs through the font's ligature rules (default on)
+    ligatures: bool,
     fonts: Vec<&'static str>,
     font_idx: usize,
     /// the gpu backend actually resolved at init (for the settings ABOUT block)
@@ -1326,6 +1337,7 @@ impl Renderer {
             min_contrast: 1.0,
             bg_image: None,
             bg_image_alpha: 0.3,
+            ligatures: true,
             backend_label: "wgpu",
             fonts,
             font_idx: 0,
@@ -1787,6 +1799,14 @@ impl Renderer {
 
     pub fn min_contrast(&self) -> f32 {
         self.min_contrast
+    }
+
+    pub fn set_ligatures(&mut self, on: bool) {
+        self.ligatures = on;
+    }
+
+    pub fn ligatures(&self) -> bool {
+        self.ligatures
     }
 
     /// set (or clear) the decoded window background image; opacity in 0..1
@@ -2741,6 +2761,7 @@ impl Renderer {
         matches: &[(usize, usize, usize, bool)],
         bold_as_bright: bool,
         min_contrast: f32,
+        ligatures: bool,
     ) {
         let sel_col = palette.sel;
         let m = atlas.metrics(FontId::Content);
@@ -2766,8 +2787,11 @@ impl Renderer {
             }
         }
 
+        let mut run_buf = String::new();
         for r in 0..grid.rows {
             let line = grid.line_at(r);
+            // cells whose glyph a ligature strip already covers this row
+            let mut liga_until = 0usize;
             for c in 0..grid.cols {
                 let cell = line.get(c).copied().unwrap_or_default();
                 if cell.attrs.hidden {
@@ -2878,40 +2902,89 @@ impl Renderer {
                 if !blink_hidden && cell.c != ' ' && cell.c != '\0' {
                     // box-drawing / block glyphs are drawn procedurally so they
                     // tile seamlessly (font glyphs leave gaps at cell edges)
-                    if Self::draw_box(out, x, y, cell_w, cell_h, cell.c, fg) {
+                    if c < liga_until {
+                        // this cell's glyph is inside the run strip pushed at
+                        // the run's first cell; bg/cursor/decorations above
+                        // and below stay per-cell
+                    } else if Self::draw_box(out, x, y, cell_w, cell_h, cell.c, fg) {
                         // handled
                     } else {
-                        let gk = GlyphKey {
-                            font: FontId::Content,
-                            c: cell.c,
-                            bold: cell.attrs.bold,
-                            italic: cell.attrs.italic,
-                        };
-                        // a cell carrying combining marks or an emoji ZWJ
-                        // sequence composites/ligates its whole grapheme
-                        // cluster; fall back to the base char if that yields
-                        // nothing (e.g. the font can't ligate the sequence)
-                        let glyph = if cell.cluster != 0 {
-                            let cg = atlas.get_cluster(
-                                grid.cluster_str(cell.cluster),
-                                cell.attrs.bold,
-                                cell.attrs.italic,
-                            );
-                            if cg.is_some() { cg } else { atlas.get(gk) }
-                        } else {
-                            atlas.get(gk)
-                        };
-                        if let Some(g) = glyph {
-                            let lin = fg.to_linear_f32();
-                            out.push(Instance {
-                                pos: [x + g.left, y + ascent - g.top],
-                                size: [g.width, g.height],
-                                uv_min: g.uv_min,
-                                uv_max: g.uv_max,
-                                color: [lin[0], lin[1], lin[2], 1.0],
-                                kind: if g.color { 3 } else { 1 },
-                                _pad: [0; 3],
-                            });
+                        // a chain of shapeable punctuation with identical
+                        // style opens a ligature run; the cursor cell never
+                        // joins one (a block cursor recolors only its own fg)
+                        let mut run_len = 1;
+                        if ligatures && !is_cursor && cell.cluster == 0 && liga_char(cell.c) {
+                            while run_len < 32 {
+                                let Some(nc) = line.get(c + run_len) else { break };
+                                if (show_cursor && r == crow && c + run_len == ccol)
+                                    || nc.cluster != 0
+                                    || !liga_char(nc.c)
+                                    || nc.fg != cell.fg
+                                    || nc.bg != cell.bg
+                                    || nc.attrs.bold != cell.attrs.bold
+                                    || nc.attrs.italic != cell.attrs.italic
+                                    || nc.attrs.dim != cell.attrs.dim
+                                    || nc.attrs.inverse != cell.attrs.inverse
+                                    || nc.attrs.hidden
+                                    || nc.attrs.blink != cell.attrs.blink
+                                {
+                                    break;
+                                }
+                                run_len += 1;
+                            }
+                        }
+                        let mut ran = false;
+                        if run_len >= 2 {
+                            run_buf.clear();
+                            run_buf.extend(line[c..c + run_len].iter().map(|n| n.c));
+                            if let Some(g) = atlas.get_run(&run_buf, cell.attrs.bold, cell.attrs.italic) {
+                                let lin = fg.to_linear_f32();
+                                out.push(Instance {
+                                    pos: [x + g.left, y + ascent - g.top],
+                                    size: [g.width, g.height],
+                                    uv_min: g.uv_min,
+                                    uv_max: g.uv_max,
+                                    color: [lin[0], lin[1], lin[2], 1.0],
+                                    kind: 1,
+                                    _pad: [0; 3],
+                                });
+                                liga_until = c + run_len;
+                                ran = true;
+                            }
+                        }
+                        if !ran {
+                            let gk = GlyphKey {
+                                font: FontId::Content,
+                                c: cell.c,
+                                bold: cell.attrs.bold,
+                                italic: cell.attrs.italic,
+                            };
+                            // a cell carrying combining marks or an emoji ZWJ
+                            // sequence composites/ligates its whole grapheme
+                            // cluster; fall back to the base char if that yields
+                            // nothing (e.g. the font can't ligate the sequence)
+                            let glyph = if cell.cluster != 0 {
+                                let cg = atlas.get_cluster(
+                                    grid.cluster_str(cell.cluster),
+                                    cell.attrs.bold,
+                                    cell.attrs.italic,
+                                );
+                                if cg.is_some() { cg } else { atlas.get(gk) }
+                            } else {
+                                atlas.get(gk)
+                            };
+                            if let Some(g) = glyph {
+                                let lin = fg.to_linear_f32();
+                                out.push(Instance {
+                                    pos: [x + g.left, y + ascent - g.top],
+                                    size: [g.width, g.height],
+                                    uv_min: g.uv_min,
+                                    uv_max: g.uv_max,
+                                    color: [lin[0], lin[1], lin[2], 1.0],
+                                    kind: if g.color { 3 } else { 1 },
+                                    _pad: [0; 3],
+                                });
+                            }
                         }
                     }
                 }
@@ -3247,6 +3320,7 @@ impl Renderer {
         let cursor_style = self.cursor_style;
         let bold_as_bright = self.bold_as_bright;
         let min_contrast = self.min_contrast;
+        let ligatures = self.ligatures;
         {
             let palette = &self.palette;
             let pane_palettes = &self.pane_palettes;
@@ -3296,6 +3370,7 @@ impl Renderer {
                     fmatches,
                     bold_as_bright,
                     min_contrast,
+                    ligatures,
                 );
                 if let Some(pre) = pv.preedit
                     && pv.focused
@@ -5260,7 +5335,7 @@ impl Renderer {
         let run = |atlas: &mut GlyphAtlas, out: &mut Vec<Instance>| {
             out.clear();
             Self::draw_grid(
-                atlas, &palette, out, term, 0.0, 0.0, true, true, true, 2.0, CursorShape::Block, None, None, &[], true, 1.0,
+                atlas, &palette, out, term, 0.0, 0.0, true, true, true, 2.0, CursorShape::Block, None, None, &[], true, 1.0, true,
             );
         };
         for _ in 0..(iters / 8).max(1) {
@@ -5337,12 +5412,50 @@ mod tests {
                 &[],
                 true,
                 1.0,
+                true,
             );
             out.len()
         };
 
         let empty = Terminal::new(2, 4);
         assert_eq!(draw(&term), draw(&empty) + 2);
+    }
+
+    // "x ==> y" paints its punctuation as ONE ligature strip instance where
+    // the per-cell path pushed three glyphs; ligatures=false restores those
+    #[test]
+    fn ligature_run_collapses_to_one_instance() {
+        let mut term = Terminal::new(2, 12);
+        let mut p = vte::Parser::new();
+        p.advance(&mut term, b"x ==> y");
+        let mut atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let palette = Palette::from_theme(ThemeId::Instrument);
+        let draw = |liga: bool, atlas: &mut GlyphAtlas| {
+            let mut out = Vec::new();
+            Renderer::draw_grid(
+                atlas,
+                &palette,
+                &mut out,
+                &term,
+                0.0,
+                0.0,
+                true,
+                true,
+                true,
+                2.0,
+                CursorShape::Block,
+                None,
+                None,
+                &[],
+                true,
+                1.0,
+                liga,
+            );
+            out.len()
+        };
+        let per_cell = draw(false, &mut atlas);
+        let ligated = draw(true, &mut atlas);
+        assert_eq!(ligated, per_cell - 2, "three run cells collapse into one strip");
     }
 
     #[test]
@@ -5473,6 +5586,7 @@ mod tests {
                 &[],
                 true,
                 1.0,
+                true,
             );
             out.len()
         };
@@ -5509,6 +5623,7 @@ mod tests {
             &[],
             true,
             1.0,
+            true,
         );
         let tick = out.last().unwrap();
         let bg = palette.bg.to_linear_f32();

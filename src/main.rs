@@ -2218,6 +2218,9 @@ struct Persisted {
     /// panes at `background_image_opacity=` (0..1)
     background_image: Option<String>,
     background_image_opacity: f32,
+    /// shape punctuation runs through the font's ligature rules (`ligatures=`,
+    /// default on; fonts without liga/calt render identically)
+    ligatures: bool,
     opacity: i32,
     quake_key: Option<(u32, u32)>,
     /// the quake_key line as written, kept so save_config can re-emit it —
@@ -2280,6 +2283,7 @@ impl Default for Persisted {
             min_contrast: 1.0,
             background_image: None,
             background_image_opacity: 0.3,
+            ligatures: true,
             opacity: 85,
             quake_key: None,
             quake_key_raw: None,
@@ -2784,6 +2788,7 @@ fn parse_persisted(text: &str) -> Persisted {
                     p.min_contrast = x.clamp(1.0, 21.0);
                 }
             }
+            "ligatures" => p.ligatures = v != "false" && v != "off",
             "background_image" => p.background_image = (!v.is_empty()).then(|| v.to_string()),
             "background_image_opacity" => {
                 if let Ok(x) = v.parse::<f32>() {
@@ -3314,6 +3319,7 @@ impl App {
                 }
                 r.set_font_weight(p.font_weight);
                 r.set_min_contrast(p.min_contrast);
+                r.set_ligatures(p.ligatures);
                 if let Some(path) = p.background_image.as_deref() {
                     match std::fs::read(path).ok().and_then(|d| image::decode_png(&d)) {
                         Some(img) => {
@@ -6189,6 +6195,9 @@ impl App {
         if let Some(bi) = &self.persisted.background_image {
             let _ = writeln!(s, "background_image={bi}");
             let _ = writeln!(s, "background_image_opacity={}", self.persisted.background_image_opacity);
+        }
+        if !r.ligatures() {
+            let _ = writeln!(s, "ligatures=false");
         }
         if let Some(q) = &self.persisted.quake_key_raw {
             // an opt-in the panel can't edit; dropping it here silently killed
