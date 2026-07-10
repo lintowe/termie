@@ -2232,8 +2232,13 @@ fn parse_persisted(text: &str) -> Persisted {
         let (k, v) = (k.trim(), v.trim());
         match k {
             "scrollback" => {
-                if let Ok(n) = v.parse() {
-                    p.scrollback = n;
+                if let Ok(n) = v.parse::<usize>() {
+                    // same ceiling as the settings control: history is stored
+                    // as full-width lines, so an uncapped value is an OOM knob
+                    if n > 100_000 {
+                        log::warn!("scrollback={n} clamped to 100000");
+                    }
+                    p.scrollback = n.min(100_000);
                 }
             }
             "copy_on_select" => p.copy_on_select = v == "true",
