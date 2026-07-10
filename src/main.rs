@@ -586,6 +586,21 @@ fn tab_label(tab: &Tab) -> String {
     cwd_label(pane.and_then(|p| p.term.cwd.as_deref()))
 }
 
+/// serialize a pane's badge state for the plugin bus (read_output-gated)
+fn pane_state_event(pane: usize, status: PaneStatus, title: &str) -> plugin::HostEvent {
+    let (state, exit) = match status {
+        PaneStatus::Idle => ("idle", None),
+        PaneStatus::Running => ("running", None),
+        PaneStatus::Done(code) => ("done", code),
+    };
+    plugin::HostEvent::PaneState {
+        pane: pane as u64,
+        state: state.to_string(),
+        exit,
+        title: title.to_string(),
+    }
+}
+
 /// turn an OSC-7 file:// uri into a filesystem path (forward slashes are fine for std::fs)
 fn cwd_path(cwd: Option<&str>) -> Option<String> {
     let u = cwd?;
@@ -2975,6 +2990,16 @@ impl App {
     fn plugins_broadcast(&mut self, ev: &plugin::HostEvent) {
         for p in &mut self.plugins {
             p.send(ev);
+        }
+    }
+
+    /// broadcast an event only to plugins granted `perm` (permissioned events
+    /// like pane_state stay invisible to plugins that never asked)
+    fn plugins_broadcast_gated(&mut self, perm: &str, ev: &plugin::HostEvent) {
+        for (p, granted) in self.plugins.iter_mut().zip(&self.plugin_granted) {
+            if granted.iter().any(|g| g == perm) {
+                p.send(ev);
+            }
         }
     }
 
@@ -6664,6 +6689,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let mut newly_ready = false;
                 let mut cwd_changed = false;
                 let mut status_changed = false;
+                let mut state_event: Option<plugin::HostEvent> = None;
                 for (ti, tab) in self.pw.tabs.iter_mut().enumerate() {
                     if let Some(root) = tab.root.as_mut()
                         && let Some(p) = find_pane_mut(root, id) {
@@ -6701,6 +6727,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if status != p.status {
                                 p.status = status;
                                 status_changed = true;
+                                state_event = Some(pane_state_event(id, status, &p.term.title));
                             }
                             in_sync = p.term.sync_output;
                             if !p.term.responses.is_empty() {
@@ -6740,6 +6767,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let mut sat_ready = false;
                     let mut sat_cwd = false;
                     let mut sat_status = false;
+                    let mut sat_state_event: Option<plugin::HostEvent> = None;
                     let mut sat_rang = false;
                     let mut sat_rang_tab: Option<usize> = None;
                     let mut sat_note: Option<String> = None;
@@ -6777,6 +6805,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if status != p.status {
                                 p.status = status;
                                 sat_status = true;
+                                sat_state_event = Some(pane_state_event(id, status, &p.term.title));
                             }
                             if !p.term.responses.is_empty() {
                                 sat_responses = Some(std::mem::take(&mut p.term.responses));
@@ -6856,6 +6885,11 @@ impl ApplicationHandler<UserEvent> for App {
                     if sat_rang && !self.plugins.is_empty() {
                         self.plugins_broadcast(&plugin::HostEvent::Bell { pane: id as u64 });
                     }
+                    if let Some(ev) = sat_state_event
+                        && !self.plugins.is_empty()
+                    {
+                        self.plugins_broadcast_gated("read_output", &ev);
+                    }
                 }
                 // a pane that just became ready may need its deferred resize
                 if newly_ready {
@@ -6864,6 +6898,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // let plugins react to the bell (host -> plugin event direction)
                 if rang && !self.plugins.is_empty() {
                     self.plugins_broadcast(&plugin::HostEvent::Bell { pane: id as u64 });
+                }
+                // pane badge flips go to plugins that hold read_output — the
+                // feed a status-panel plugin builds on
+                if let Some(ev) = state_event
+                    && !self.plugins.is_empty()
+                {
+                    self.plugins_broadcast_gated("read_output", &ev);
                 }
                 // a notification's text shows in the status bar for a few seconds
                 if let Some(text) = note {

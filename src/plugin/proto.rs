@@ -129,6 +129,10 @@ pub enum HostEvent {
     TabChanged { tab: usize },
     CwdChanged { cwd: String },
     Bell { pane: u64 },
+    /// a pane's command status changed (running / done / idle), with the exit
+    /// code when done and the pane's current OSC title. gated on the
+    /// read_output permission — this is what a status-panel plugin consumes
+    PaneState { pane: u64, state: String, exit: Option<i32>, title: String },
     WidgetClicked { id: String },
     /// a message published by another plugin on the in-process bus
     Message { from: String, topic: String, body: Json },
@@ -161,6 +165,13 @@ impl HostEvent {
             HostEvent::Bell { pane } => Json::obj([
                 ("t", Json::Str("bell".into())),
                 ("pane", Json::Num(*pane as f64)),
+            ]),
+            HostEvent::PaneState { pane, state, exit, title } => Json::obj([
+                ("t", Json::Str("pane_state".into())),
+                ("pane", Json::Num(*pane as f64)),
+                ("state", Json::Str(state.clone())),
+                ("exit", exit.map(|c| Json::Num(c as f64)).unwrap_or(Json::Null)),
+                ("title", Json::Str(title.clone())),
             ]),
             HostEvent::WidgetClicked { id } => Json::obj([
                 ("t", Json::Str("widget_clicked".into())),
@@ -287,6 +298,32 @@ mod tests {
         let v = Json::parse(&line).unwrap();
         assert_eq!(v.get_str("t"), Some("hello"));
         assert_eq!(v.get("api_version").and_then(Json::as_f64), Some(API_VERSION as f64));
+    }
+
+    #[test]
+    fn pane_state_serializes() {
+        let line = HostEvent::PaneState {
+            pane: 7,
+            state: "done".into(),
+            exit: Some(1),
+            title: "build".into(),
+        }
+        .to_line();
+        let v = Json::parse(&line).unwrap();
+        assert_eq!(v.get_str("t"), Some("pane_state"));
+        assert_eq!(v.get("pane").and_then(Json::as_f64), Some(7.0));
+        assert_eq!(v.get_str("state"), Some("done"));
+        assert_eq!(v.get("exit").and_then(Json::as_f64), Some(1.0));
+        assert_eq!(v.get_str("title"), Some("build"));
+        // a running pane has no exit code: the field serializes as null
+        let line = HostEvent::PaneState {
+            pane: 7,
+            state: "running".into(),
+            exit: None,
+            title: String::new(),
+        }
+        .to_line();
+        assert!(line.contains("\"exit\":null"));
     }
 
     #[test]
