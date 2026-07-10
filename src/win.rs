@@ -440,13 +440,21 @@ pub fn unregister_defterm() -> bool {
 }
 
 /// keep the COM server path current: after an update or a moved install, the
-/// registration must point at the exe that is actually running
+/// registration must point at the exe that is actually running. a cargo build
+/// tree is exempt — running a dev binary once must not hijack the delegation
+/// onto a path that the next rebuild locks or replaces
 #[cfg(windows)]
 pub fn refresh_defterm_server_path() {
     if !defterm_registered() {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
+        let dev_tree = exe.ancestors().any(|p| {
+            p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("target")) || p.join("Cargo.toml").is_file()
+        });
+        if dev_tree {
+            return;
+        }
         let server = format!("\"{}\" -Embedding", exe.display());
         let _ = reg::write_sz(&format!("{CLSID_KEY}\\LocalServer32"), "", &server);
     }
