@@ -247,6 +247,8 @@ enum PaletteAction {
     MoveTabLeft,
     MoveTabRight,
     CloseTab,
+    /// re-spawn the most recently closed tab from its launch spec (Ctrl+Shift+T)
+    ReopenTab,
     Settings,
     PaneMode,
     /// keyboard selection: move a cursor through screen + scrollback and copy
@@ -309,6 +311,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("move tab left", PaletteAction::MoveTabLeft),
     ("move tab right", PaletteAction::MoveTabRight),
     ("close tab", PaletteAction::CloseTab),
+    ("reopen closed tab", PaletteAction::ReopenTab),
     ("settings", PaletteAction::Settings),
     ("pane mode", PaletteAction::PaneMode),
     ("mark mode", PaletteAction::MarkMode),
@@ -481,6 +484,27 @@ enum ConfirmAction {
 struct RenameState {
     tab: usize,
     buf: String,
+}
+
+/// the launch spec of a closed tab, kept so Ctrl+Shift+T can re-spawn it. only
+/// the focused pane's shell + cwd and a custom title are restored, not splits,
+/// scrollback, or running processes
+struct ClosedTab {
+    shell: ShellKind,
+    cwd: Option<String>,
+    title: Option<String>,
+}
+
+/// how many closed tabs the reopen stack remembers; older ones drop off
+const CLOSED_TAB_CAP: usize = 10;
+
+/// push a closed-tab spec onto the bounded reopen stack, dropping the oldest
+/// once it passes the cap
+fn push_closed_tab(stack: &mut Vec<ClosedTab>, closed: ClosedTab) {
+    stack.push(closed);
+    if stack.len() > CLOSED_TAB_CAP {
+        stack.remove(0);
+    }
 }
 
 /// modal yes/no overlay state; captures keys until resolved
@@ -907,7 +931,7 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
         (ctrl, Key::Named(NamedKey::ArrowDown), A::JumpPromptNext),
         (ctrl, chr("p"), A::OpenPalette),
         (ctrl, chr("t"), A::NewTab),
-        (cs, chr("t"), A::NewTab),
+        (cs, chr("t"), A::ReopenTab),
         (cs, chr("d"), A::DuplicateTab),
         (cs, chr("c"), A::Copy),
         (cs, chr("v"), A::Paste),
@@ -2463,6 +2487,8 @@ struct App {
     /// a tab being drag-reordered along the strip: its current index, updated
     /// live as it swaps past neighbors; cleared on release or focus loss
     tab_drag: Option<usize>,
+    /// recently closed tabs' launch specs, newest last; Ctrl+Shift+T pops one
+    closed_tabs: Vec<ClosedTab>,
     /// hold find-follow during a temporary active_tab switch (background pane
     /// exit): close_focused_pane_by_id still runs, but match lists stay on the
     /// viewer's grid until the final after_focus_context_change
@@ -2636,6 +2662,7 @@ impl App {
             market: None,
             pressed: None,
             tab_drag: None,
+            closed_tabs: Vec::new(),
             find_follow_hold: false,
             last_title: String::new(),
             config: Config {
@@ -4500,6 +4527,7 @@ impl App {
                 let i = self.pw.active_tab;
                 self.close_tab(i, event_loop);
             }
+            PaletteAction::ReopenTab => self.reopen_closed_tab(),
             PaletteAction::Settings => self.open_settings(),
             PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
@@ -4860,10 +4888,44 @@ impl App {
         }
     }
 
+    /// stash a closing tab's launch spec on the reopen stack (bounded, oldest
+    /// dropped) so Ctrl+Shift+T can bring it back
+    fn remember_closed_tab(&mut self, idx: usize) {
+        let Some(tab) = self.pw.tabs.get(idx) else {
+            return;
+        };
+        let Some(pane) = tab.root.as_ref().and_then(|r| find_pane(r, tab.focused)) else {
+            return;
+        };
+        let closed = ClosedTab {
+            shell: pane.shell,
+            cwd: cwd_path(pane.term.cwd.as_deref()),
+            title: tab.title.clone(),
+        };
+        push_closed_tab(&mut self.closed_tabs, closed);
+    }
+
+    /// re-spawn the most recently closed tab from its stored launch spec, or
+    /// show a notice when nothing has been closed
+    fn reopen_closed_tab(&mut self) {
+        let Some(spec) = self.closed_tabs.pop() else {
+            self.show_notice("no closed tabs");
+            return;
+        };
+        self.new_tab_cwd(spec.cwd, Some(spec.shell));
+        if let Some(title) = spec.title
+            && let Some(tab) = self.pw.tabs.get_mut(self.pw.active_tab)
+        {
+            tab.title = Some(title);
+            self.sync_tabs();
+        }
+    }
+
     fn do_close_tab(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         if idx >= self.pw.tabs.len() {
             return;
         }
+        self.remember_closed_tab(idx);
         // capture *before* remove: after remove the active slot already points
         // at a surviving tab (or is out of range), so a post-remove capture
         // compares the new identity to itself and skips find recompute — leaving
@@ -4936,6 +4998,12 @@ impl App {
             return;
         }
         self.tab_drag = None;
+        // remember the doomed tabs in strip order before they're killed
+        for i in 0..self.pw.tabs.len() {
+            if i != keep {
+                self.remember_closed_tab(i);
+            }
+        }
         let before = self.focus_identity();
         for (i, tab) in self.pw.tabs.iter_mut().enumerate() {
             if i != keep
@@ -8658,6 +8726,21 @@ mod tests {
     }
 
     #[test]
+    fn reopen_stack_is_bounded_and_pops_lifo() {
+        let mk = |tag: usize| ClosedTab { shell: ShellKind::Pwsh, cwd: Some(tag.to_string()), title: None };
+        let mut stack: Vec<ClosedTab> = Vec::new();
+        let n = CLOSED_TAB_CAP + 3;
+        for i in 0..n {
+            push_closed_tab(&mut stack, mk(i));
+        }
+        // the cap holds and the three oldest (0, 1, 2) fell off the bottom
+        assert_eq!(stack.len(), CLOSED_TAB_CAP);
+        assert_eq!(stack.first().unwrap().cwd.as_deref(), Some("3"));
+        // pop is last-in-first-out: the most recently closed comes back first
+        assert_eq!(stack.pop().unwrap().cwd.as_deref(), Some((n - 1).to_string().as_str()));
+    }
+
+    #[test]
     fn config_parses_per_profile_themes() {
         let p = parse_persisted("theme=paper\ntheme.cmd=nord\ntheme.git-bash=gruvbox\ntheme.=broken\ntheme.wsl=\n");
         // the global theme key is untouched by the per-profile lines
@@ -8779,6 +8862,9 @@ mod tests {
             d.iter().any(|(mm, k, aa)| *mm == m && key_matches(&Key::Character(key.into()), k) && *aa == a)
         };
         assert!(has(ctrl, "t", PaletteAction::NewTab));
+        // Ctrl+Shift+T reopens the last closed tab (chrome/vscode muscle memory);
+        // Ctrl+T stays new-tab for WT switchers
+        assert!(has(cs, "t", PaletteAction::ReopenTab));
         assert!(has(cs, "d", PaletteAction::DuplicateTab));
         assert!(has(cs, "e", PaletteAction::SplitV));
         assert!(has(ctrl, "1", PaletteAction::SelectTab(0)));
@@ -8803,6 +8889,7 @@ mod tests {
         assert_eq!(action_from_label("mark mode"), Some(PaletteAction::MarkMode));
         // label resolution covers palette + keybinding-only + select-tab
         assert_eq!(action_from_label("new tab"), Some(PaletteAction::NewTab));
+        assert_eq!(action_from_label("reopen closed tab"), Some(PaletteAction::ReopenTab));
         assert_eq!(action_from_label("copy"), Some(PaletteAction::Copy));
         assert_eq!(action_from_label("select tab 3"), Some(PaletteAction::SelectTab(2)));
         assert_eq!(action_from_label("bogus action"), None);
