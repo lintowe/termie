@@ -16,6 +16,10 @@ const PWSH_PROMPT_HOOK: &str = r#"$global:__termie_prompt = $function:prompt; fu
 // cmd expands $e to ESC and %PROMPT% before it installs the new prompt
 const CMD_PROMPT_HOOK: &str = r#"$e]133;D$e\$e]133;A$e\$e]9;9;$P$e\%PROMPT%$e]133;B$e\"#;
 
+// WSLENV names which windows env vars cross into the linux side, so colors and
+// terminal identity reach programs running inside a distro
+const WSLENV_FORWARD: &str = "TERM/u:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u:TERMIE/u";
+
 /// which shell a new pane should launch
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ShellKind {
@@ -143,6 +147,11 @@ impl Pty {
                 for a in &argv[1..] {
                     c.arg(a.as_str());
                 }
+                // a custom profile (e.g. a synthetic "WSL: <distro>") that launches
+                // wsl needs the same env bridge the built-in wsl shell gets
+                if argv[0].to_ascii_lowercase().ends_with("wsl.exe") {
+                    c.env("WSLENV", WSLENV_FORWARD);
+                }
                 c
             }
             None => {
@@ -172,10 +181,7 @@ impl Pty {
                         c.arg("-d");
                         c.arg(d);
                     }
-                    c.env(
-                        "WSLENV",
-                        "TERM/u:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u:TERMIE/u",
-                    );
+                    c.env("WSLENV", WSLENV_FORWARD);
                 }
                 c
             }

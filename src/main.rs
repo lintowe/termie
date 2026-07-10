@@ -388,6 +388,22 @@ fn all_palette_actions() -> &'static [(&'static str, PaletteAction)] {
     })
 }
 
+/// fold the installed wsl distros into the profile list as synthetic
+/// "WSL: <name>" entries (wsl.exe -d <name>), skipping any that would collide
+/// with a user-defined profile of the same name
+fn with_wsl_profiles(
+    mut profiles: Vec<(String, Vec<String>)>,
+    distros: Vec<String>,
+) -> Vec<(String, Vec<String>)> {
+    for distro in distros {
+        let name = format!("WSL: {distro}");
+        if !profiles.iter().any(|(n, _)| n == &name) {
+            profiles.push((name, vec!["wsl.exe".to_string(), "-d".to_string(), distro]));
+        }
+    }
+    profiles
+}
+
 /// the new-tab '+' dropdown rows: the three built-in shells then one per custom
 /// profile, as (menu label, shell to spawn). the ordering is the click index
 fn new_tab_menu_entries() -> Vec<(String, ShellKind)> {
@@ -2560,8 +2576,11 @@ impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         let p = load_persisted();
         // install profiles before anything derives from them (palette entries,
-        // shell labels in a restored session)
-        pty::set_profiles(p.profiles.clone());
+        // shell labels in a restored session). each installed wsl distro joins
+        // the config profiles as a synthetic "WSL: <name>" so it appears in the
+        // palette, jump list, and '+' dropdown; the global wsl_distro still sets
+        // the default distro for the plain wsl shell
+        pty::set_profiles(with_wsl_profiles(p.profiles.clone(), win::wsl_distros()));
         let cli = parse_args(std::env::args().skip(1));
         App {
             proxy,
@@ -2759,11 +2778,6 @@ impl App {
         if !self.conf_watch_spawned {
             self.conf_watch_spawned = true;
             spawn_conf_watcher(self.proxy.clone());
-        }
-        // surface installed WSL distros so the user knows valid wsl_distro values
-        let distros = win::wsl_distros();
-        if !distros.is_empty() {
-            log::info!("wsl distros available: {}", distros.join(", "));
         }
         // an explicit --cwd/command, or a bare launch from a specific folder
         // (e.g. `termie` typed in the explorer address bar), opens the first tab
@@ -8617,6 +8631,30 @@ mod tests {
         assert_eq!(p.profiles[1], ("nu".to_string(), vec!["nu.exe".to_string()]));
         // the raw lines round-trip for save_config
         assert_eq!(p.profiles_raw[1], ("nu".to_string(), "nu.exe".to_string()));
+    }
+
+    #[test]
+    fn wsl_distros_become_synthetic_profiles() {
+        let base = vec![("nu".to_string(), vec!["nu.exe".to_string()])];
+        let merged = with_wsl_profiles(base, vec!["Ubuntu".to_string(), "Arch".to_string()]);
+        // config profiles keep their slot; each distro appends as wsl.exe -d <name>
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].0, "nu");
+        assert_eq!(merged[1].0, "WSL: Ubuntu");
+        assert_eq!(merged[1].1, ["wsl.exe", "-d", "Ubuntu"]);
+        assert_eq!(
+            merged[2],
+            ("WSL: Arch".to_string(), vec!["wsl.exe".to_string(), "-d".to_string(), "Arch".to_string()])
+        );
+    }
+
+    #[test]
+    fn wsl_synthetic_profile_yields_to_a_user_profile_of_the_same_name() {
+        let base = vec![("WSL: Ubuntu".to_string(), vec!["custom.exe".to_string()])];
+        let merged = with_wsl_profiles(base, vec!["Ubuntu".to_string()]);
+        // the user's own definition wins; no duplicate synthetic entry is added
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].1, ["custom.exe"]);
     }
 
     #[test]
