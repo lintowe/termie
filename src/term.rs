@@ -1092,9 +1092,14 @@ impl Perform for Terminal {
             }
             b"52" => {
                 // OSC 52 ; targets ; base64 — clipboard write. ignore "?" (a
-                // read query) so a remote program can't exfiltrate the clipboard
+                // read query) so a remote program can't exfiltrate the clipboard.
+                // bounded at 1MB decoded so a hostile stream can't stuff the OS
+                // clipboard without limit; the app shows a notice when this
+                // lands so a silent hijack is at least visible
+                const MAX_CLIPBOARD: usize = 1024 * 1024;
                 if let Some(&data) = params.get(2)
                     && data != b"?"
+                    && data.len() <= MAX_CLIPBOARD / 3 * 4
                     && let Some(bytes) = base64_decode(data)
                 {
                     self.clipboard = Some(String::from_utf8_lossy(&bytes).into_owned());
@@ -1887,6 +1892,12 @@ mod tests {
         // a read query ("?") must be ignored, not answered
         t.clipboard = None;
         feed(&mut t, b"\x1b]52;c;?\x1b\\");
+        assert_eq!(t.clipboard, None);
+        // a payload past the 1MB cap is dropped whole, not truncated
+        let mut huge = b"\x1b]52;c;".to_vec();
+        huge.resize(huge.len() + 1024 * 1024 * 4 / 3 + 4, b'A');
+        huge.extend_from_slice(b"\x1b\\");
+        feed(&mut t, &huge);
         assert_eq!(t.clipboard, None);
     }
 

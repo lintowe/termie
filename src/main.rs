@@ -6637,6 +6637,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if let Some(t) = clip {
                     win::clipboard_set(&t);
+                    // OSC 52 is useful (nvim/tmux yank) but it is a program
+                    // writing the user's clipboard — say so on the status bar
+                    self.show_notice("clipboard set by program");
                 }
                 // answer OSC 4/10/11/12 color queries from the active palette
                 if !color_reqs.is_empty()
