@@ -95,8 +95,10 @@ pub struct Handoff {
 unsafe impl Send for Handoff {}
 
 /// where a received session goes: a channel for the `-Embedding` cold path, a
-/// proxy hop into the event loop for a running instance
-type Deliver = Arc<dyn Fn(Handoff) -> bool + Send + Sync>;
+/// proxy hop into the event loop for a running instance. None means a session
+/// was refused (hidden) — the embedding server uses it to exit instead of
+/// idling out its activation window
+type Deliver = Arc<dyn Fn(Option<Handoff>) -> bool + Send + Sync>;
 
 #[implement(ITerminalHandoff3)]
 struct TerminalHandoff {
@@ -114,6 +116,22 @@ impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
         client: HANDLE,
         startup_info: *const TerminalStartupInfo,
     ) -> HRESULT {
+        // a hidden session (STARTF_USESHOWWINDOW + SW_HIDE: build tooling, IDE
+        // helpers, anything spawned windowless) must not become a termie
+        // window — refusing it BEFORE any pipe exists sends the console host
+        // back to plain conhost, which honors the hidden flag. hosting these
+        // boots a full window per spawn and stalls every windowless launcher
+        // on the machine
+        let hidden = unsafe {
+            startup_info
+                .as_ref()
+                .is_some_and(|si| si.dwFlags & 0x1 != 0 && si.wShowWindow == 0)
+        };
+        if hidden {
+            log::info!("defterm: refusing hidden console session (conhost keeps it)");
+            (self.deliver)(None);
+            return E_FAIL;
+        }
         // pipe A: console host reads its VT input from a_read, termie writes
         // keystrokes into a_write. pipe B: console host writes rendered VT into
         // b_write, termie reads from b_read
@@ -156,7 +174,7 @@ impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
         };
         log::info!("defterm: received console handoff (title={:?})", h.title);
         // refused deliveries fall back to a plain console window
-        if (self.deliver)(h) {
+        if (self.deliver)(Some(h)) {
             S_OK
         } else {
             log::warn!("defterm: handoff delivery refused");
@@ -265,7 +283,9 @@ pub fn serve_embedding() -> Option<Handoff> {
         )
         .ok()?
     };
-    let got = rx.recv_timeout(Duration::from_secs(30)).ok();
+    // a refused (hidden) session arrives as None: exit right away instead of
+    // sitting out the timeout as an invisible process
+    let got = rx.recv_timeout(Duration::from_secs(30)).ok().flatten();
     unsafe {
         let _ = CoRevokeClassObject(cookie);
         // release this MTA so the main thread is clean for winit's STA
@@ -281,7 +301,7 @@ pub fn serve_embedding() -> Option<Handoff> {
 /// `-Embedding` launch (per-user LocalServer32 activation can be hardened
 /// off) — a live class object is found either way. call once; safe to call
 /// again after registering as default terminal (subsequent calls no-op)
-pub fn serve_running(deliver: impl Fn(Handoff) -> bool + Send + Sync + 'static) {
+pub fn serve_running(deliver: impl Fn(Option<Handoff>) -> bool + Send + Sync + 'static) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::SeqCst) {

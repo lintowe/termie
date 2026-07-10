@@ -3228,7 +3228,10 @@ impl App {
         #[cfg(windows)]
         if win::defterm_registered() {
             let proxy = self.proxy.clone();
-            defterm::serve_running(move |h| proxy.send_event(UserEvent::Handoff(h)).is_ok());
+            defterm::serve_running(move |h| match h {
+                Some(h) => proxy.send_event(UserEvent::Handoff(h)).is_ok(),
+                None => true,
+            });
         }
         Ok(())
     }
@@ -4957,8 +4960,9 @@ impl App {
                 } else if win::register_defterm() {
                     // start serving immediately so it works without a relaunch
                     let proxy = self.proxy.clone();
-                    defterm::serve_running(move |h| {
-                        proxy.send_event(UserEvent::Handoff(h)).is_ok()
+                    defterm::serve_running(move |h| match h {
+                        Some(h) => proxy.send_event(UserEvent::Handoff(h)).is_ok(),
+                        None => true,
                     });
                     "termie is now the default terminal — console apps open here"
                 } else {
