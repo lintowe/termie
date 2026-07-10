@@ -381,12 +381,13 @@ impl GlyphAtlas {
         // fallback resolved to a color emoji glyph re-routes through the
         // monochrome symbol font, so ❤ draws as a one-cell text glyph rather
         // than a color heart overflowing its cell
-        if shaped.4 && key.font == FontId::Content && crate::grid::emoji_vs_base(key.c) {
-            if let Some(mono) = self.shape_char_image(text, "Segoe UI Symbol", key.bold, key.italic)
-                && !mono.4
-            {
-                shaped = mono;
-            }
+        if shaped.4
+            && key.font == FontId::Content
+            && crate::grid::emoji_vs_base(key.c)
+            && let Some(mono) = self.shape_char_image(text, "Segoe UI Symbol", key.bold, key.italic)
+            && !mono.4
+        {
+            shaped = mono;
         }
         let (w, h, left, top, is_color, pixels) = shaped;
 

@@ -1206,17 +1206,10 @@ impl Perform for Terminal {
     fn put(&mut self, byte: u8) {
         match self.dcs.as_mut() {
             Some(Dcs::Sixel(dec)) => dec.put(byte),
-            Some(Dcs::Rqss(req)) => {
-                if req.len() < RQSS_CAP {
-                    req.push(byte);
-                }
-            }
-            Some(Dcs::Tcap(req)) => {
-                if req.len() < TCAP_CAP {
-                    req.push(byte);
-                }
-            }
-            None => {}
+            Some(Dcs::Rqss(req)) if req.len() < RQSS_CAP => req.push(byte),
+            Some(Dcs::Tcap(req)) if req.len() < TCAP_CAP => req.push(byte),
+            // a full rqss/tcap buffer drops further bytes; no dcs ignores them
+            _ => {}
         }
     }
 
