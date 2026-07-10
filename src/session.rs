@@ -34,6 +34,8 @@ pub struct TabSnap {
     pub root: NodeSnap,
     /// user-given tab name overriding the cwd label (None = use the cwd)
     pub title: Option<String>,
+    /// user-picked tab tint, an ansi palette index 1-6
+    pub color: Option<u8>,
 }
 
 pub enum NodeSnap {
@@ -113,6 +115,9 @@ impl TabSnap {
         if let Some(t) = &self.title {
             pairs.push(("title".to_string(), Json::Str(t.clone())));
         }
+        if let Some(c) = self.color {
+            pairs.push(("color".to_string(), Json::Num(c as f64)));
+        }
         Json::Obj(pairs.into_iter().collect())
     }
 
@@ -120,7 +125,12 @@ impl TabSnap {
         let focused_leaf = v.get("focused_leaf").and_then(Json::as_f64).unwrap_or(0.0) as usize;
         let root = NodeSnap::from_json(v.get("root")?)?;
         let title = v.get("title").and_then(Json::as_str).map(str::to_string);
-        Some(TabSnap { focused_leaf, root, title })
+        let color = v
+            .get("color")
+            .and_then(Json::as_f64)
+            .map(|n| n as u8)
+            .filter(|c| (1..=6).contains(c));
+        Some(TabSnap { focused_leaf, root, title, color })
     }
 }
 
@@ -178,6 +188,7 @@ mod tests {
                     focused_leaf: 0,
                     root: NodeSnap::Leaf { cwd: Some("C:/a".into()), shell: "pwsh".into() },
                     title: None,
+                    color: None,
                 },
                 TabSnap {
                     focused_leaf: 1,
@@ -188,6 +199,7 @@ mod tests {
                         b: Box::new(NodeSnap::Leaf { cwd: Some("C:/b".into()), shell: "wsl".into() }),
                     },
                     title: Some("build".into()),
+                    color: Some(4),
                 },
             ],
             window: Some(WindowBounds { x: -12, y: 40, width: 1200, height: 800, maximized: true }),
@@ -207,6 +219,8 @@ mod tests {
         assert_eq!(back.tabs[1].focused_leaf, 1);
         assert_eq!(back.tabs[0].title, None);
         assert_eq!(back.tabs[1].title.as_deref(), Some("build"));
+        assert_eq!(back.tabs[0].color, None);
+        assert_eq!(back.tabs[1].color, Some(4));
         match &back.tabs[1].root {
             NodeSnap::Split { vertical, ratio, a, b } => {
                 assert!(*vertical);

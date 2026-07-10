@@ -175,6 +175,9 @@ struct Tab {
     /// a bell rang here while the tab was in the background (or the window
     /// unfocused); draws a dot on the tab until it is viewed. transient
     attention: bool,
+    /// user-picked tint, an ansi palette index 1-6 so it follows the theme
+    /// (wt's per-tab color; persisted with the session)
+    color: Option<u8>,
 }
 
 /// a torn-off pane living in its own OS-decorated window. its pty reader still
@@ -504,6 +507,8 @@ struct PaneMenu {
 /// index, or the new-tab '+' (whose items are shell profiles)
 #[derive(Clone, Copy)]
 enum MenuTarget {
+    /// the per-tab color swatch list, reached from the tab menu's color row
+    TabColor(usize),
     Pane,
     Tab(usize),
     NewTab,
@@ -3407,6 +3412,7 @@ impl App {
             zoom: None,
             title: None,
             attention: false,
+            color: None,
         });
         self.pw.active_tab = 0;
         self.relayout_all();
@@ -4409,13 +4415,32 @@ impl App {
         let config = self.config;
         let settings_open = self.pw.settings_open;
         let settings_p = self.settings_p();
+        let tab_color_of = |t: usize| self.pw.tabs.get(t).and_then(|tab| tab.color);
         let pane_menu_view = self.pw.pane_menu.as_ref().map(|m| {
             let items: Vec<String> = match m.target {
                 MenuTarget::Pane => render::PANE_MENU_ITEMS.iter().map(|s| s.to_string()).collect(),
                 MenuTarget::Tab(_) => render::TAB_MENU_ITEMS.iter().map(|s| s.to_string()).collect(),
+                MenuTarget::TabColor(t) => {
+                    let current = tab_color_of(t);
+                    render::TAB_COLOR_ITEMS
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let sel = if i == 0 { current.is_none() } else { current == Some(i as u8) };
+                            if sel { format!("{s} \u{f00c}") } else { s.to_string() }
+                        })
+                        .collect()
+                }
                 MenuTarget::NewTab => new_tab_menu_entries().into_iter().map(|(l, _)| l).collect(),
             };
-            render::PaneMenuView { x: m.x, y: m.y, hovered: m.hovered, items }
+            // the color menu's rows carry their swatch tint (row 0 is "none")
+            let accents = match m.target {
+                MenuTarget::TabColor(_) => {
+                    (0..render::TAB_COLOR_ITEMS.len()).map(|i| (i > 0).then_some(i as u8)).collect()
+                }
+                _ => Vec::new(),
+            };
+            render::PaneMenuView { x: m.x, y: m.y, hovered: m.hovered, items, accents }
         });
         let hud = if self.persisted.latency_hud { self.lat.hud() } else { None };
         if let Some(r) = self.pw.renderer.as_mut() {
@@ -4643,9 +4668,11 @@ impl App {
             self.pw.git = git_branch(cwd.as_deref());
             self.pw.last_git_cwd = cwd;
         }
+        let colors: Vec<Option<u8>> = self.pw.tabs.iter().map(|t| t.color).collect();
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_tabs(labels, active);
             r.set_tab_status(attention);
+            r.set_tab_colors(colors);
         }
         // sync_tabs runs after every structural / focus / cwd change (never per
         // frame), so it's the chokepoint to schedule a debounced session write
@@ -4806,6 +4833,7 @@ impl App {
             zoom: None,
             title: (!title.is_empty()).then_some(title),
             attention: false,
+            color: None,
         });
         self.pw.active_tab = self.pw.tabs.len() - 1;
         self.relayout_all();
@@ -4854,6 +4882,7 @@ impl App {
                 zoom: None,
                 title: None,
                 attention: false,
+                color: None,
             });
             self.pw.active_tab = self.pw.tabs.len() - 1;
             self.relayout_all();
@@ -5509,14 +5538,21 @@ impl App {
         // confirm is open; their captured indices go stale as slots shift left.
         // re-target the menu (or drop it with its tab), and dismiss a pending
         // close confirm whose prompt no longer matches reality
-        if let Some(MenuTarget::Tab(t)) = self.pw.pane_menu.as_ref().map(|m| m.target) {
-            if t == idx {
+        match self.pw.pane_menu.as_ref().map(|m| m.target) {
+            Some(MenuTarget::Tab(t)) | Some(MenuTarget::TabColor(t)) if t == idx => {
                 self.pw.pane_menu = None;
-            } else if t > idx
-                && let Some(m) = self.pw.pane_menu.as_mut()
-            {
-                m.target = MenuTarget::Tab(t - 1);
             }
+            Some(MenuTarget::Tab(t)) if t > idx => {
+                if let Some(m) = self.pw.pane_menu.as_mut() {
+                    m.target = MenuTarget::Tab(t - 1);
+                }
+            }
+            Some(MenuTarget::TabColor(t)) if t > idx => {
+                if let Some(m) = self.pw.pane_menu.as_mut() {
+                    m.target = MenuTarget::TabColor(t - 1);
+                }
+            }
+            _ => {}
         }
         if self
             .pw.confirm
@@ -6096,7 +6132,7 @@ impl App {
             let mut leaf_ids = Vec::new();
             let root = node_to_snap(root, &mut leaf_ids);
             let focused_leaf = leaf_ids.iter().position(|&id| id == tab.focused).unwrap_or(0);
-            tabs.push(session::TabSnap { focused_leaf, root, title: tab.title.clone() });
+            tabs.push(session::TabSnap { focused_leaf, root, title: tab.title.clone(), color: tab.color });
         }
         // capture the window's outer position + inner size for next launch; a
         // minimized window reports zero size, so fall back to the last good
@@ -6217,7 +6253,14 @@ impl App {
                 .copied()
                 .or_else(|| leaf_ids.first().copied())
                 .unwrap_or(0);
-            self.pw.tabs.push(Tab { focused, root: Some(root), zoom: None, title: tab.title.clone(), attention: false });
+            self.pw.tabs.push(Tab {
+                focused,
+                root: Some(root),
+                zoom: None,
+                title: tab.title.clone(),
+                attention: false,
+                color: tab.color,
+            });
         }
         if self.pw.tabs.is_empty() {
             return;
@@ -6452,7 +6495,7 @@ impl App {
     /// (0 copy, 1 split vertical, 2 split horizontal, 3 pop out, 4 close pane,
     /// 5 paste; copy no-ops with no selection); tab items index TAB_MENU_ITEMS
     /// (0 rename, 1 duplicate, 2 move left, 3 move right, 4 close, 5 close others)
-    fn pane_menu_action(&mut self, target: MenuTarget, idx: usize, event_loop: &ActiveEventLoop) {
+    fn pane_menu_action(&mut self, target: MenuTarget, idx: usize, at: (f32, f32), event_loop: &ActiveEventLoop) {
         match target {
             MenuTarget::Pane => match idx {
                 0 => {
@@ -6483,12 +6526,27 @@ impl App {
                     let (cwd, shell) = ctx.map_or((None, None), |(c, s)| (c, Some(s)));
                     self.new_tab_cwd(cwd, shell);
                 }
-                2 => self.move_tab(i, i.saturating_sub(1)),
-                3 => self.move_tab(i, i + 1),
-                4 => self.close_tab(i, event_loop),
-                5 => self.close_others(i),
+                // swap the menu for the swatch list, anchored where it was
+                2 => {
+                    self.pw.pane_menu =
+                        Some(PaneMenu { x: at.0, y: at.1, hovered: None, target: MenuTarget::TabColor(i) });
+                    self.redraw();
+                }
+                3 => self.move_tab(i, i.saturating_sub(1)),
+                4 => self.move_tab(i, i + 1),
+                5 => self.close_tab(i, event_loop),
+                6 => self.close_others(i),
                 _ => {}
             },
+            MenuTarget::TabColor(i) => {
+                if idx < render::TAB_COLOR_ITEMS.len()
+                    && let Some(tab) = self.pw.tabs.get_mut(i)
+                {
+                    tab.color = (idx > 0).then_some(idx as u8);
+                    self.sync_tabs();
+                    self.redraw();
+                }
+            }
             MenuTarget::NewTab => {
                 if let Some((_, shell)) = new_tab_menu_entries().into_iter().nth(idx) {
                     let cwd = self.focused_cwd();
@@ -6579,6 +6637,7 @@ impl App {
                 zoom: None,
                 title: None,
                 attention: false,
+                color: None,
             }],
             active_tab: 0,
             layout_cache: Vec::new(),
@@ -6807,7 +6866,14 @@ impl App {
     fn dock_loose_pane(&mut self, pane: Pane) {
         let before = self.focus_identity();
         let fid = pane.id;
-        self.pw.tabs.push(Tab { focused: fid, root: Some(Node::Leaf(pane)), zoom: None, title: None, attention: false });
+        self.pw.tabs.push(Tab {
+            focused: fid,
+            root: Some(Node::Leaf(pane)),
+            zoom: None,
+            title: None,
+            attention: false,
+            color: None,
+        });
         self.pw.active_tab = self.pw.tabs.len() - 1;
         self.relayout_all();
         self.sync_tabs();
@@ -7356,10 +7422,11 @@ impl App {
                     && state == ElementState::Pressed
                 {
                     let target = menu.target;
+                    let at = (menu.x, menu.y);
                     let item = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(cx, cy));
                     self.pw.pane_menu = None;
                     if let Some(i) = item {
-                        self.pane_menu_action(target, i, event_loop);
+                        self.pane_menu_action(target, i, at, event_loop);
                     }
                     self.redraw();
                     return;

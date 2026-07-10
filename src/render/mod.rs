@@ -181,13 +181,19 @@ pub struct PaneMenuView {
     pub y: f32,
     pub hovered: Option<usize>,
     pub items: Vec<String>,
+    /// per-row swatch tints (ansi palette indices) for the tab-color menu;
+    /// empty for every other menu. a None row draws a hollow "none" box
+    pub accents: Vec<Option<u8>>,
 }
 
 pub const PANE_MENU_ITEMS: [&str; 6] =
     ["copy", "split vertical", "split horizontal", "pop out to window", "close pane", "paste"];
 
-pub const TAB_MENU_ITEMS: [&str; 6] =
-    ["rename", "duplicate", "move left", "move right", "close", "close others"];
+pub const TAB_MENU_ITEMS: [&str; 7] =
+    ["rename", "duplicate", "color", "move left", "move right", "close", "close others"];
+
+/// rows of the per-tab color menu; index n > 0 is ansi palette color n
+pub const TAB_COLOR_ITEMS: [&str; 7] = ["none", "red", "green", "yellow", "blue", "magenta", "cyan"];
 
 /// find-in-scrollback overlay display state. `matches` are on-screen rects
 /// (viewport row, col, len, is_current) for the focused pane
@@ -328,8 +334,9 @@ type PaneInfo = (f32, f32, bool, Rect);
 /// alt+drag rectangular selection
 pub type SelSpan = ((usize, usize), (usize, usize), bool);
 /// snapshot of a tab row for painting: index, tab rect, close rect, label,
-/// active, hovered, close-hovered, badge severity (0 none .. 4 failed)
-type TabItem = (usize, Rect, Rect, String, bool, bool, bool, u8);
+/// active, hovered, close-hovered, badge severity (0 none .. 4 failed),
+/// user-picked tint (ansi palette index)
+type TabItem = (usize, Rect, Rect, String, bool, bool, bool, u8, Option<u8>);
 
 /// GPU backend choice for compatibility; persisted + applied at startup
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -644,6 +651,8 @@ pub struct Renderer {
     /// parallel to `tabs`: badge severity — 0 none, 1 running, 2 done,
     /// 3 bell, 4 failed (the tab dot colors by it)
     tab_status: Vec<u8>,
+    /// parallel to `tabs`: user-picked tint (ansi palette index 1-6)
+    tab_colors: Vec<Option<u8>>,
     active_tab: usize,
     status_git: Option<String>,
     status_clock: String,
@@ -1320,6 +1329,7 @@ impl Renderer {
             elevated: false,
             tabs: Vec::new(),
             tab_status: Vec::new(),
+            tab_colors: Vec::new(),
             active_tab: 0,
             status_git: None,
             status_clock: String::new(),
@@ -1898,6 +1908,11 @@ impl Renderer {
     /// icon would sit (0 none, 1 running, 2 done, 3 bell, 4 failed)
     pub fn set_tab_status(&mut self, status: Vec<u8>) {
         self.tab_status = status;
+    }
+
+    /// per-tab user tints, parallel to `tabs` (ansi palette indices)
+    pub fn set_tab_colors(&mut self, colors: Vec<Option<u8>>) {
+        self.tab_colors = colors;
     }
 
     /// transient status-bar notification text (None clears the readout)
@@ -3351,6 +3366,7 @@ impl Renderer {
                         self.hovered == Some(Hot::Tab(*i)),
                         self.hovered == Some(Hot::TabClose(*i)),
                         self.tab_status.get(*i).copied().unwrap_or(0),
+                        self.tab_colors.get(*i).copied().flatten(),
                     )
                 })
                 .collect();
@@ -3360,13 +3376,20 @@ impl Renderer {
         let newtab_menu_hover = self.hovered == Some(Hot::NewTabMenu);
         let he = self.hover_ease();
 
-        for (_, rect, close, label, active, hov, close_hov, attn) in &tab_items {
+        for (_, rect, close, label, active, hov, close_hov, attn, tint) in &tab_items {
             let (tx, _ty, tw, _th) = *rect;
             if *active {
                 Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_4, 1.0);
                 // the accent underline is drawn after the loop so it can slide
             } else if *hov {
                 Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, INK_3, he);
+            }
+            // a user-picked tab color washes over the base fill, stronger on
+            // the active tab so the tint reads without drowning the label
+            if let Some(ci) = tint {
+                let c = self.palette.ansi_color(*ci);
+                let a = if *active { 0.28 } else { 0.14 };
+                Self::push_rect(&mut out, tx, hair, tw, self.title_bar_h - hair * 2.0, c, a);
             }
             Self::push_rect(&mut out, tx, hair, hair, self.title_bar_h - hair * 2.0, RULE, 1.0);
 
@@ -3437,7 +3460,9 @@ impl Renderer {
                 Some(((ox, _, ow, _), e)) => (ox + (ax - ox) * e, ow + (aw - ow) * e),
                 None => (ax, aw),
             };
-            Self::push_rect(&mut out, ux, self.title_bar_h - hair * 2.0, uw, hair * 2.0, PAPER, 1.0);
+            // a tinted active tab colors its rail too
+            let rail = item.8.map(|ci| self.palette.ansi_color(ci)).unwrap_or(PAPER);
+            Self::push_rect(&mut out, ux, self.title_bar_h - hair * 2.0, uw, hair * 2.0, rail, 1.0);
         }
 
         // new-tab button (nerd-font plus) and its profile-menu chevron; the two
@@ -4061,6 +4086,7 @@ impl Renderer {
         let (mx, my, hovered) = (v.x, v.y, v.hovered);
         // owned so the pane_menu_view borrow ends before the atlas is drawn into
         let items = v.items.clone();
+        let accents = v.accents.clone();
         let (bx, by, mw, row_h, pad) = self.pane_menu_geom(mx, my, items.len());
         let INK_0 = self.palette.ink0;
         let INK_1 = self.palette.ink1;
@@ -4083,7 +4109,18 @@ impl Renderer {
             }
             let ty = (ry + (row_h - chrome_h) / 2.0).round();
             let col = if hovered == Some(i) { PAPER } else { TEXT_2 };
-            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad + 4.0 * s, ty, lbl, col, 1.0, track);
+            let mut lx = bx + pad + 4.0 * s;
+            // color-menu rows lead with their swatch; "none" gets a hollow box
+            if !accents.is_empty() {
+                let d = (chrome_h * 0.55).round().max(4.0);
+                let sy = (ry + (row_h - d) / 2.0).round();
+                match accents.get(i).copied().flatten() {
+                    Some(ci) => Self::push_rect(out, lx, sy, d, d, self.palette.ansi_color(ci), 1.0),
+                    None => Self::stroke_rect(out, (lx, sy, d, d), hair, RULE_2),
+                }
+                lx += d + 6.0 * s;
+            }
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, lx, ty, lbl, col, 1.0, track);
         }
     }
 
@@ -5720,7 +5757,7 @@ mod hit_tests {
         // the tab menu carries a different item list than the pane menu; the
         // shared geometry must resolve each of its rows and reject the outside
         let items: Vec<String> = TAB_MENU_ITEMS.iter().map(|s| s.to_string()).collect();
-        r.set_pane_menu(Some(PaneMenuView { x: 60.0, y: 60.0, hovered: None, items }));
+        r.set_pane_menu(Some(PaneMenuView { x: 60.0, y: 60.0, hovered: None, items, accents: Vec::new() }));
         let (bx, by, mw, row_h, pad) = r.pane_menu_geom(60.0, 60.0, TAB_MENU_ITEMS.len());
         for i in 0..TAB_MENU_ITEMS.len() {
             let cy = by + pad + row_h * (i as f32 + 0.5);

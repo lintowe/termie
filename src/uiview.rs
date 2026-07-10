@@ -58,6 +58,7 @@ pub fn maybe_run() -> bool {
                 y: 150.0,
                 hovered: Some(0),
                 items: render::PANE_MENU_ITEMS.iter().map(|s| s.to_string()).collect(),
+                accents: Vec::new(),
             }));
             r.settle_overlay();
         }
