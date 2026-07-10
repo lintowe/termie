@@ -79,11 +79,13 @@ A shell or profile can carry its own theme — `theme.<name>=<theme>` paints tha
 
 Drop files in `%APPDATA%\termie\`:
 
-- `config` — general settings the in-app panel also writes (`shell`, `theme`, `scrollback`, …). Opt-ins live here too: `quake_key=ctrl+grave` (drop-down hotkey), `plugin_sandbox=appcontainer` (sandbox every plugin), `latency_hud=true` (input-to-photon readout), `acrylic=true` (Win11 Mica backdrop behind a translucent window; `mica=true` also works), `right_click=paste` (right-click pastes, or copies an active selection and clears it, instead of opening the context menu — Windows Terminal style; `Shift+right-click` still opens the menu), `term_program=ghostty` (override `$TERM_PROGRAM` for apps that only enable the kitty keyboard protocol on a hard-coded host allowlist; default is `termie`).
+- `config` — general settings the in-app panel also writes (`shell`, `theme`, `scrollback`, …). Opt-ins live here too: `quake_key=ctrl+grave` (drop-down hotkey), `plugin_sandbox=appcontainer` (sandbox every plugin), `latency_hud=true` (input-to-photon readout), `acrylic=true` (Win11 Mica backdrop behind a translucent window; `mica=true` also works), `right_click=paste` (right-click pastes, or copies an active selection and clears it, instead of opening the context menu — Windows Terminal style; `Shift+right-click` still opens the menu), `term_program=ghostty` (override `$TERM_PROGRAM` for apps that only enable the kitty keyboard protocol on a hard-coded host allowlist; default is `termie`), `font_weight=semibold` (base weight for regular text, a name or 100–900), `min_contrast=3` (lift low-contrast text to a WCAG ratio, up to 21), `background_image=<path.png>` with `background_image_opacity=0.3` (a picture behind the panes).
 - `colors.conf` — override theme colors, one `key=color` per line (`fg`, `bg`, `cursor`, `sel`, `ansi0`..`ansi255`; `#rrggbb`, `#rgb`, or `r,g,b`).
 - `keybindings.conf` — rebind keys, one `combo=action` per line, e.g. `ctrl+alt+t=new tab here`.
 
 Mistyped lines in any of these are reported to `%APPDATA%\termie\termie.log`.
+
+The command line takes Windows Terminal's layout verbs too: `termie new-tab -d C:\src ; split-pane -H --shell cmd` opens a window with that layout (`nt`/`sp` for short; `-V` splits beside, `-H` below). Scripted windows never overwrite your saved session.
 
 ## build from source
 
