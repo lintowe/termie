@@ -4761,7 +4761,21 @@ impl Renderer {
             ..Default::default()
         }))
         .expect("headless device");
+        Self::new_headless_on(device, queue, width, height, content_pt, chrome_pt, scale)
+    }
 
+    /// headless renderer on an existing device, so tests can share one device
+    /// across the whole binary instead of enumerating adapters per test
+    #[cfg(any(test, debug_assertions))]
+    fn new_headless_on(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+        content_pt: f32,
+        chrome_pt: f32,
+        scale: f32,
+    ) -> Renderer {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -5225,11 +5239,22 @@ fn padded_bytes_per_row(width: u32) -> u32 {
     unpadded.div_ceil(align) * align
 }
 
+/// serialize every gpu-using test: the ci vm's software adapter intermittently
+/// dies with STATUS_ACCESS_VIOLATION when device work runs concurrently from
+/// the parallel test harness
 #[cfg(test)]
-mod gpu_tests {
-    // a surfaceless device, or None when no GPU adapter is present (e.g. CI),
-    // in which case the validation tests skip rather than fail
-    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+fn gpu_serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// one adapter enumeration + device shared by every gpu test (device and queue
+/// are cloneable handles); per-test enumeration serialized behind gpu_serial
+/// costs over a minute of wall clock. None when the machine has no adapter
+#[cfg(test)]
+fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    static DEV: std::sync::OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = std::sync::OnceLock::new();
+    DEV.get_or_init(|| {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         desc.backends = wgpu::Backends::all();
         let instance = wgpu::Instance::new(desc);
@@ -5240,18 +5265,29 @@ mod gpu_tests {
         }))
         .ok()?;
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("headless-test-device"),
+            label: Some("termie-test-shared"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             ..Default::default()
         }))
         .ok()
+    })
+    .clone()
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    // the shared surfaceless device, or None when no adapter is present
+    // (validation tests skip rather than fail)
+    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        super::test_device()
     }
 
     // validate shader.wgsl through naga's front-end without a window — catches
     // wgsl syntax/type errors (a malformed binding or fragment branch)
     #[test]
     fn shader_validates() {
+        let _gpu = super::gpu_serial();
         let Some((device, _queue)) = headless_device() else {
             return;
         };
@@ -5269,6 +5305,7 @@ mod gpu_tests {
     // shader.wgsl and build_atlas_bgl ever drift apart
     #[test]
     fn pipeline_validates() {
+        let _gpu = super::gpu_serial();
         let Some((device, _queue)) = headless_device() else {
             return;
         };
@@ -5286,21 +5323,13 @@ mod gpu_tests {
 mod hit_tests {
     use super::*;
 
-    // a real headless renderer, or None when no gpu adapter is present (e.g. CI),
-    // so these skip rather than fail — mirrors gpu_tests::headless_device
+    // a real headless renderer on the shared test device, or None when no gpu
+    // adapter is present (e.g. CI), so these skip rather than fail
     fn headless() -> Option<Renderer> {
-        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        desc.backends = wgpu::Backends::all();
-        let instance = wgpu::Instance::new(desc);
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok()?;
+        let (device, queue) = test_device()?;
         // tall enough that both market rows render, so two distinct rows can be
         // routed; scale 1.0 keeps the layout math simple
-        Some(Renderer::new_headless(1280, 900, 14.0, 12.5, 1.0))
+        Some(Renderer::new_headless_on(device, queue, 1280, 900, 14.0, 12.5, 1.0))
     }
 
     fn tmp_png(tag: &str) -> String {
@@ -5311,6 +5340,7 @@ mod hit_tests {
 
     #[test]
     fn market_clicks_route_to_close_chip_and_card() {
+        let _gpu = gpu_serial();
         let Some(mut r) = headless() else {
             return;
         };
@@ -5347,6 +5377,7 @@ mod hit_tests {
 
     #[test]
     fn palette_rows_and_find_buttons_are_hittable() {
+        let _gpu = gpu_serial();
         let Some(mut r) = headless() else {
             return;
         };
@@ -5409,6 +5440,7 @@ mod hit_tests {
 
     #[test]
     fn context_menu_rows_route_to_their_index() {
+        let _gpu = gpu_serial();
         let Some(mut r) = headless() else {
             return;
         };
@@ -5428,6 +5460,7 @@ mod hit_tests {
 
     #[test]
     fn newtab_chevron_is_a_distinct_hit_zone() {
+        let _gpu = gpu_serial();
         let Some(mut r) = headless() else {
             return;
         };
@@ -5442,6 +5475,7 @@ mod hit_tests {
 
     #[test]
     fn dock_tier2_widget_is_hittable_and_paints() {
+        let _gpu = gpu_serial();
         let Some(mut r) = headless() else {
             return;
         };
