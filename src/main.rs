@@ -6697,6 +6697,7 @@ impl App {
                         ke.state,
                         ke.repeat,
                         self.mods,
+                        ke.location,
                         app_cursor,
                         kbd,
                     ) {
@@ -8650,6 +8651,7 @@ impl ApplicationHandler<UserEvent> for App {
                     event.state,
                     event.repeat,
                     self.mods,
+                    event.location,
                     app_cursor,
                     kbd_flags,
                 ) {

@@ -92,10 +92,12 @@ fn parse_color_spec(s: &[u8]) -> Option<crate::color::Rgb> {
     None
 }
 
-/// kitty keyboard protocol flags termie honors: disambiguate (1) + report
-/// event types (2). bits an app requests outside this mask are dropped, so a
+/// kitty keyboard protocol flags termie honors: disambiguate (1), report
+/// event types (2), report all keys as escape codes (8), report associated
+/// text (16). alternate-keys (4) needs the layout's base key, which winit
+/// doesn't surface. bits an app requests outside this mask are dropped, so a
 /// CSI ? u query always reports exactly what we apply
-const KBD_SUPPORTED: u8 = 0b11;
+const KBD_SUPPORTED: u8 = 0b11011;
 /// bound the flag stack so a misbehaving app can't grow it without limit
 const KBD_STACK_CAP: usize = 16;
 
@@ -1778,15 +1780,17 @@ mod tests {
         assert_eq!(t.kbd_flags(), 3);
         feed(&mut t, b"\x1b[=2;3u"); // mode 3 clears bit 2
         assert_eq!(t.kbd_flags(), 1);
-        feed(&mut t, b"\x1b[=8;2u"); // mode 2 OR-in flag 8, which is unsupported -> masked off
-        assert_eq!(t.kbd_flags(), 1);
+        feed(&mut t, b"\x1b[=8;2u"); // mode 2 OR-in flag 8 (report all keys)
+        assert_eq!(t.kbd_flags(), 9);
+        feed(&mut t, b"\x1b[=4;2u"); // alternate-keys (4) is unsupported -> masked off
+        assert_eq!(t.kbd_flags(), 9);
     }
 
     #[test]
     fn kitty_unsupported_bits_masked_on_push() {
         let mut t = Terminal::new(4, 20);
-        feed(&mut t, b"\x1b[>13u"); // 1|4|8; only disambiguate(1) is supported
-        assert_eq!(t.kbd_flags(), 1);
+        feed(&mut t, b"\x1b[>31u"); // 1|2|4|8|16; alternate-keys (4) is the unsupported bit
+        assert_eq!(t.kbd_flags(), 27);
     }
 
     #[test]
