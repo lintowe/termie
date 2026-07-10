@@ -7466,6 +7466,7 @@ impl App {
             && self.market.is_none()
             && self.find.is_none()
             && self.palette.is_none()
+            && self.font_pick.is_none()
             && !self.pw.settings_open
             && !self.pw.pane_mode
             && self.mark.is_none()
@@ -7489,6 +7490,7 @@ impl App {
         if self.market.is_none()
             && self.find.is_none()
             && self.palette.is_none()
+            && self.font_pick.is_none()
             && !self.pw.settings_open
             && !self.pw.pane_mode
             && self.mark.is_none()
