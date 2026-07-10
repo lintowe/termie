@@ -717,6 +717,19 @@ impl Grid {
             .filter_map(|m| m.line.checked_sub(prompt_base).map(|row| (row, m.exit)))
             .filter_map(|(row, exit)| (row < physical.len() as u64).then_some((row as usize, exit)))
             .collect();
+        // image placements ride the same translation, so a width change keeps
+        // kitty graphics anchored to their content instead of dropping them
+        let mut placement_rows: Vec<(usize, Placement)> = self
+            .placements
+            .drain(..)
+            .filter_map(|pl| {
+                pl.abs_line
+                    .checked_sub(prompt_base)
+                    .filter(|&row| row < physical.len() as u64)
+                    .map(|row| (row as usize, pl))
+            })
+            .collect();
+        placement_rows.sort_by_key(|&(row, pl)| (row, pl.col));
 
         // drop blank lines below the content/cursor so empty screen space can't
         // push real content into scrollback when the width shrinks
@@ -730,7 +743,10 @@ impl Grid {
         // cursor's logical line index + character offset within it
         let mut logical: Vec<Vec<Cell>> = Vec::new();
         let mut prompt_offsets: Vec<(usize, usize, Option<i32>)> = Vec::with_capacity(prompt_rows.len());
+        let mut placement_offsets: Vec<(usize, usize, Placement)> =
+            Vec::with_capacity(placement_rows.len());
         let mut next_prompt = 0usize;
+        let mut next_pl = 0usize;
         let (mut cur_logical, mut cur_offset, mut found) = (0usize, 0usize, false);
         let mut i = 0;
         while i < physical.len() {
@@ -743,6 +759,13 @@ impl Grid {
                     }
                     prompt_offsets.push((li, cells.len(), exit));
                     next_prompt += 1;
+                }
+                while let Some(&(row, pl)) = placement_rows.get(next_pl) {
+                    if row != i {
+                        break;
+                    }
+                    placement_offsets.push((li, cells.len() + pl.col, pl));
+                    next_pl += 1;
                 }
                 if i == cur_abs && !found {
                     cur_logical = li;
@@ -772,7 +795,9 @@ impl Grid {
         let mut np: Vec<Line> = Vec::new();
         let mut new_cur_abs = 0usize;
         let mut new_prompts = Vec::with_capacity(prompt_offsets.len());
+        let mut new_placements: Vec<Placement> = Vec::with_capacity(placement_offsets.len());
         let mut next_prompt = 0usize;
+        let mut next_pl = 0usize;
         for (li, cells) in logical.iter().enumerate() {
             let start = np.len();
             if cells.is_empty() {
@@ -797,6 +822,18 @@ impl Grid {
                     exit,
                 });
                 next_prompt += 1;
+            }
+            while let Some(&(pl_li, offset, pl)) = placement_offsets.get(next_pl) {
+                if pl_li != li {
+                    break;
+                }
+                let segments = np.len() - start;
+                new_placements.push(Placement {
+                    abs_line: (start + (offset / new_cols).min(segments - 1)) as u64,
+                    col: offset % new_cols,
+                    ..pl
+                });
+                next_pl += 1;
             }
             if li == cur_logical {
                 new_cur_abs = start + cur_offset / new_cols;
@@ -834,9 +871,14 @@ impl Grid {
                 self.prompts.push(m);
             }
         }
-        // image placements anchor on absolute line indices too; reset them with
-        // the old physical rows so they don't point at stale lines after the reindex
-        self.placements.clear();
+        // placements were remapped alongside the prompts; drop only the ones
+        // whose lines the eviction above trimmed away
+        self.placements = new_placements
+            .into_iter()
+            .filter_map(|pl| {
+                pl.abs_line.checked_sub(evicted).map(|line| Placement { abs_line: line, ..pl })
+            })
+            .collect();
         self.total_scrolled = self.scrollback.len() as u64;
         self.reflow_gen = self.reflow_gen.wrapping_add(1);
         self.view_offset = 0;
@@ -1841,13 +1883,25 @@ mod tests {
     }
 
     #[test]
-    fn reflow_clears_stale_placements() {
+    fn reflow_keeps_placements_anchored_to_content() {
         let mut g = Grid::new(4, 8);
-        g.put_char('x');
-        g.place_image(1, 0, 0);
+        g.set_scrollback_limit(100);
+        // a marker line, then the image on the line below it
+        for c in "mark".chars() {
+            g.put_char(c);
+        }
+        g.linefeed();
+        g.carriage_return();
+        g.place_image_at(1, 1, 2, 0, 0);
         assert_eq!(g.placements().len(), 1);
-        g.resize(4, 12); // width change reflows -> placement anchors are now stale
-        assert!(g.placements().is_empty());
+        // width change reflows; the placement survives on its content line
+        g.resize(4, 12);
+        let pl = g.placements()[0];
+        assert_eq!(pl.image_id, 1);
+        assert_eq!(pl.col, 2);
+        // "mark" still fits one row at the new width, so the image stays on
+        // the physical line right after it
+        assert_eq!(pl.abs_line, g.abs_base() + 1);
     }
 
     #[test]
