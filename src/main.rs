@@ -1679,6 +1679,9 @@ struct CliArgs {
     /// shell label or custom profile name for the first tab (jump list, scripts)
     shell: Option<String>,
     command: Option<Vec<String>>,
+    /// wt-style layout built from `new-tab` / `split-pane` verbs; non-empty
+    /// makes the launch ephemeral and installs these tabs instead of tab one
+    tabs: Vec<session::TabSnap>,
     /// inject a kitty-graphics gradient into the first pane once it's up:
     /// ConPTY strips APC, so no shell can deliver one — this is the way to
     /// see the decoder + image pipeline work on a live window
@@ -1687,17 +1690,23 @@ struct CliArgs {
 
 impl CliArgs {
     fn is_bare(&self) -> bool {
-        self.cwd.is_none() && self.shell.is_none() && self.command.is_none()
+        self.cwd.is_none() && self.shell.is_none() && self.command.is_none() && self.tabs.is_empty()
     }
 }
 
-/// parse `termie [--cwd DIR | -d DIR | --cwd=DIR] [--shell NAME] [-- COMMAND...]`. lenient and
-/// silent: release is a windowed subsystem with no console to print help to, so
-/// unknown flags are ignored rather than erroring. `--` ends option parsing and
-/// the remainder is a command argv to run instead of the default shell
+/// parse `termie [--cwd DIR | -d DIR | --cwd=DIR] [--shell NAME] [-- COMMAND...]`,
+/// or wt-style layout verbs when the first argument is one:
+/// `termie new-tab [-d DIR] [--shell NAME] ; split-pane [-H|-V] [-d DIR] ...`.
+/// lenient and silent: release is a windowed subsystem with no console to print
+/// help to, so unknown flags are ignored rather than erroring. `--` ends option
+/// parsing and the remainder is a command argv to run instead of the default shell
 fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
     let mut out = CliArgs::default();
-    let mut it = args;
+    let mut it = args.peekable();
+    if matches!(it.peek().map(String::as_str), Some("new-tab" | "nt" | "split-pane" | "sp")) {
+        out.tabs = parse_layout_verbs(&it.collect::<Vec<_>>());
+        return out;
+    }
     while let Some(a) = it.next() {
         if a == "--" {
             let rest: Vec<String> = it.by_ref().collect();
@@ -1722,6 +1731,76 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
         }
     }
     out
+}
+
+/// wt-style layout verbs, segments separated by standalone `;` tokens. each
+/// `split-pane` splits the current tab's newest pane; `-V` (the default) puts
+/// the new pane beside it, `-H` below it. a leading split-pane implies a first
+/// tab, matching wt
+fn parse_layout_verbs(args: &[String]) -> Vec<session::TabSnap> {
+    // the newest leaf is always on the rightmost spine: every split replaces
+    // it with Split { a: old, b: new }, so descending `b` finds it
+    fn split_newest(node: &mut session::NodeSnap, vertical: bool, leaf: session::NodeSnap) {
+        match node {
+            session::NodeSnap::Split { b, .. } => split_newest(b, vertical, leaf),
+            session::NodeSnap::Leaf { .. } => {
+                let old = std::mem::replace(node, session::NodeSnap::Leaf { cwd: None, shell: String::new() });
+                *node = session::NodeSnap::Split { vertical, ratio: 0.5, a: Box::new(old), b: Box::new(leaf) };
+            }
+        }
+    }
+
+    let mut tabs: Vec<session::TabSnap> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let end = args[i..].iter().position(|a| a == ";").map(|p| i + p).unwrap_or(args.len());
+        let seg = &args[i..end];
+        i = end + 1;
+        let Some(verb) = seg.first().map(String::as_str) else {
+            continue;
+        };
+        let (mut cwd, mut shell, mut vertical) = (None, None, true);
+        let mut j = 1;
+        while j < seg.len() {
+            let a = seg[j].as_str();
+            match a {
+                "-H" | "--horizontal" => vertical = false,
+                "-V" | "--vertical" => vertical = true,
+                "-d" | "--cwd" => {
+                    j += 1;
+                    cwd = seg.get(j).cloned();
+                }
+                "--shell" | "-p" | "--profile" => {
+                    j += 1;
+                    shell = seg.get(j).cloned();
+                }
+                _ => {
+                    if let Some(v) = a.strip_prefix("--cwd=").or_else(|| a.strip_prefix("-d=")) {
+                        cwd = Some(v.to_string());
+                    } else if let Some(v) = a.strip_prefix("--shell=").or_else(|| a.strip_prefix("--profile=")) {
+                        shell = Some(v.to_string());
+                    }
+                }
+            }
+            j += 1;
+        }
+        // an empty shell label rebuilds as ShellKind::Auto, the default
+        let leaf = session::NodeSnap::Leaf { cwd, shell: shell.unwrap_or_default() };
+        match verb {
+            "new-tab" | "nt" => {
+                tabs.push(session::TabSnap { focused_leaf: 0, root: leaf, title: None, color: None });
+            }
+            "split-pane" | "sp" => match tabs.last_mut() {
+                Some(tab) => {
+                    split_newest(&mut tab.root, vertical, leaf);
+                    tab.focused_leaf += 1;
+                }
+                None => tabs.push(session::TabSnap { focused_leaf: 0, root: leaf, title: None, color: None }),
+            },
+            _ => {}
+        }
+    }
+    tabs
 }
 
 /// a 96x96 gradient as real kitty-graphics bytes (chunked transmit+display),
@@ -3273,6 +3352,12 @@ impl App {
         let adopted = false;
         if adopted {
             // tab one is the handed-off console session
+        } else if !self.cli.tabs.is_empty() {
+            // wt-style layout verbs: ephemeral like any explicit cli launch, so
+            // the scripted window never overwrites the saved session
+            self.session_ephemeral = true;
+            let tabs = self.cli.tabs.clone();
+            self.restore_session(session::SessionFile { active_tab: 0, tabs, window: None });
         } else if command.is_some() || first_cwd.is_some() || first_shell.is_some() {
             self.session_ephemeral = true;
             let (cols, rows) = self.content_pane_size();
@@ -9215,6 +9300,38 @@ mod tests {
         assert_eq!(font_weight_from_label("1000"), Some(900));
         assert_eq!(font_weight_from_label("55"), Some(100));
         assert_eq!(font_weight_from_label("heavyish"), None);
+    }
+
+    #[test]
+    fn layout_verbs_build_tabs_and_splits() {
+        let args: Vec<String> =
+            ["new-tab", "-d", "C:/a", ";", "split-pane", "-H", "--shell", "cmd", ";", "nt", "--shell=wsl"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let cli = parse_args(args.into_iter());
+        assert!(!cli.is_bare());
+        assert_eq!(cli.tabs.len(), 2);
+        match &cli.tabs[0].root {
+            session::NodeSnap::Split { vertical, a, b, .. } => {
+                assert!(!vertical, "-H stacks the new pane below");
+                assert!(matches!(&**a, session::NodeSnap::Leaf { cwd: Some(c), .. } if c == "C:/a"));
+                assert!(matches!(&**b, session::NodeSnap::Leaf { shell, .. } if shell == "cmd"));
+            }
+            _ => panic!("expected a split"),
+        }
+        // the newest pane keeps focus
+        assert_eq!(cli.tabs[0].focused_leaf, 1);
+        assert!(matches!(&cli.tabs[1].root, session::NodeSnap::Leaf { shell, .. } if shell == "wsl"));
+    }
+
+    #[test]
+    fn layout_verbs_leading_split_implies_a_tab_and_legacy_args_stay_legacy() {
+        let cli = parse_args(["split-pane".to_string()].into_iter());
+        assert_eq!(cli.tabs.len(), 1);
+        let cli = parse_args(["-d".to_string(), "C:/x".to_string()].into_iter());
+        assert!(cli.tabs.is_empty());
+        assert_eq!(cli.cwd.as_deref(), Some("C:/x"));
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub struct WindowBounds {
     pub maximized: bool,
 }
 
+#[derive(Clone)]
 pub struct TabSnap {
     /// in-order index of the focused leaf within this tab's tree, so focus can
     /// be re-keyed after restore renumbers pane ids
@@ -38,6 +39,7 @@ pub struct TabSnap {
     pub color: Option<u8>,
 }
 
+#[derive(Clone)]
 pub enum NodeSnap {
     Leaf {
         cwd: Option<String>,
