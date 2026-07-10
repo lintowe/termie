@@ -15,7 +15,7 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::sync::Arc;
 use std::time::Duration;
 
-use windows::Win32::Foundation::{E_FAIL, HANDLE, S_OK};
+use windows::Win32::Foundation::{CloseHandle, E_FAIL, HANDLE, S_OK};
 use windows::Win32::System::Com::{
     CLSCTX_LOCAL_SERVER, CoInitializeEx, CoInitializeSecurity, CoRegisterClassObject,
     CoRevokeClassObject, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
@@ -129,6 +129,14 @@ impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
         };
         if hidden {
             log::info!("defterm: refusing hidden console session (conhost keeps it)");
+            // the marshaler already duplicated the [in] handles into this
+            // process; a refusal owns closing them or every hidden spawn
+            // leaks four handles here
+            for h in [signal, reference, server, client] {
+                if !h.is_invalid() {
+                    let _ = unsafe { CloseHandle(h) };
+                }
+            }
             (self.deliver)(None);
             return E_FAIL;
         }
