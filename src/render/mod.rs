@@ -621,6 +621,8 @@ pub struct Renderer {
     content_font: Option<&'static str>,
     /// base weight regular content text shapes at (100-900, default 400)
     content_weight: u16,
+    /// minimum WCAG contrast ratio for text (1.0 = off)
+    min_contrast: f32,
     fonts: Vec<&'static str>,
     font_idx: usize,
     /// the gpu backend actually resolved at init (for the settings ABOUT block)
@@ -1308,6 +1310,7 @@ impl Renderer {
             pane_pad_px: 6.0,
             content_font: None,
             content_weight: 400,
+            min_contrast: 1.0,
             backend_label: "wgpu",
             fonts,
             font_idx: 0,
@@ -1758,6 +1761,16 @@ impl Renderer {
 
     pub fn set_bold_as_bright(&mut self, on: bool) {
         self.bold_as_bright = on;
+    }
+
+    /// minimum WCAG contrast ratio text is lifted to against its cell bg;
+    /// 1.0 leaves colors untouched (the default)
+    pub fn set_min_contrast(&mut self, ratio: f32) {
+        self.min_contrast = ratio.clamp(1.0, 21.0);
+    }
+
+    pub fn min_contrast(&self) -> f32 {
+        self.min_contrast
     }
 
     pub fn bold_as_bright(&self) -> bool {
@@ -2700,6 +2713,7 @@ impl Renderer {
         link: Option<(usize, usize, usize)>,
         matches: &[(usize, usize, usize, bool)],
         bold_as_bright: bool,
+        min_contrast: f32,
     ) {
         let sel_col = palette.sel;
         let m = atlas.metrics(FontId::Content);
@@ -2747,6 +2761,10 @@ impl Renderer {
                         (fg.g as u16 * 2 / 3) as u8,
                         (fg.b as u16 * 2 / 3) as u8,
                     );
+                }
+                // accessibility floor last, so it also rescues dimmed text
+                if min_contrast > 1.0 {
+                    fg = crate::color::apply_min_contrast(fg, bg, min_contrast);
                 }
                 // blinking cells hide their glyph + decorations on the off phase
                 let blink_hidden = cell.attrs.blink && !blink_on;
@@ -3183,6 +3201,7 @@ impl Renderer {
         }
         let cursor_style = self.cursor_style;
         let bold_as_bright = self.bold_as_bright;
+        let min_contrast = self.min_contrast;
         {
             let palette = &self.palette;
             let pane_palettes = &self.pane_palettes;
@@ -3231,6 +3250,7 @@ impl Renderer {
                     pv.link,
                     fmatches,
                     bold_as_bright,
+                    min_contrast,
                 );
                 if let Some(pre) = pv.preedit
                     && pv.focused
@@ -5173,7 +5193,7 @@ impl Renderer {
         let run = |atlas: &mut GlyphAtlas, out: &mut Vec<Instance>| {
             out.clear();
             Self::draw_grid(
-                atlas, &palette, out, term, 0.0, 0.0, true, true, true, 2.0, CursorShape::Block, None, None, &[], true,
+                atlas, &palette, out, term, 0.0, 0.0, true, true, true, 2.0, CursorShape::Block, None, None, &[], true, 1.0,
             );
         };
         for _ in 0..(iters / 8).max(1) {
@@ -5249,6 +5269,7 @@ mod tests {
                 None,
                 &[],
                 true,
+                1.0,
             );
             out.len()
         };
@@ -5384,6 +5405,7 @@ mod tests {
                 None,
                 &[],
                 true,
+                1.0,
             );
             out.len()
         };
@@ -5419,6 +5441,7 @@ mod tests {
             None,
             &[],
             true,
+            1.0,
         );
         let tick = out.last().unwrap();
         let bg = palette.bg.to_linear_f32();

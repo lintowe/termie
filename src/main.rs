@@ -2127,6 +2127,9 @@ struct Persisted {
     font: Option<String>,
     /// base weight regular text renders at (`font_weight=`, named or 100-900)
     font_weight: u16,
+    /// minimum WCAG contrast ratio text is lifted to against its cell bg
+    /// (`min_contrast=`, 1-21; 1 = off). wt's minimumContrastRatio
+    min_contrast: f32,
     opacity: i32,
     quake_key: Option<(u32, u32)>,
     /// the quake_key line as written, kept so save_config can re-emit it —
@@ -2186,6 +2189,7 @@ impl Default for Persisted {
             theme_light: color::ThemeId::Paper,
             font: None,
             font_weight: 400,
+            min_contrast: 1.0,
             opacity: 85,
             quake_key: None,
             quake_key_raw: None,
@@ -2683,6 +2687,11 @@ fn parse_persisted(text: &str) -> Persisted {
             "font_weight" => {
                 if let Some(w) = font_weight_from_label(v) {
                     p.font_weight = w;
+                }
+            }
+            "min_contrast" => {
+                if let Ok(x) = v.parse::<f32>() {
+                    p.min_contrast = x.clamp(1.0, 21.0);
                 }
             }
             "quake_key" => {
@@ -3208,6 +3217,7 @@ impl App {
                     r.set_font_by_name(f);
                 }
                 r.set_font_weight(p.font_weight);
+                r.set_min_contrast(p.min_contrast);
                 r.set_content_pt(p.font_size);
             }
         }
@@ -6028,6 +6038,9 @@ impl App {
         let _ = writeln!(s, "font={}", r.font_name());
         if r.font_weight() != 400 {
             let _ = writeln!(s, "font_weight={}", r.font_weight());
+        }
+        if r.min_contrast() > 1.0 {
+            let _ = writeln!(s, "min_contrast={}", r.min_contrast());
         }
         if let Some(q) = &self.persisted.quake_key_raw {
             // an opt-in the panel can't edit; dropping it here silently killed

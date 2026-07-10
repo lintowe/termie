@@ -26,6 +26,58 @@ impl Rgb {
     }
 }
 
+/// WCAG relative luminance of an srgb color, via the renderer's lut
+fn luminance(c: Rgb) -> f32 {
+    let t = srgb_linear_lut();
+    0.2126 * t[c.r as usize] + 0.7152 * t[c.g as usize] + 0.0722 * t[c.b as usize]
+}
+
+/// linear light back to an srgb-encoded channel in [0,1]
+fn lin_to_srgb(l: f32) -> f32 {
+    if l <= 0.0031308 { l * 12.92 } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 }
+}
+
+/// raise fg's contrast against bg to at least `min` (a WCAG ratio, 1..21) by
+/// blending fg toward white or black in linear light; luminance is linear in
+/// the blend factor, so the target ratio is hit exactly and hue washes out
+/// only as far as the ratio demands. text keeps its polarity (light text gets
+/// lighter, dark gets darker) unless that side of bg can't deliver the ratio
+/// and the other side does it better. pairs that already pass come back as-is
+pub fn apply_min_contrast(fg: Rgb, bg: Rgb, min: f32) -> Rgb {
+    let lf = luminance(fg);
+    let lb = luminance(bg);
+    let (hi, lo) = if lf >= lb { (lf, lb) } else { (lb, lf) };
+    if (hi + 0.05) / (lo + 0.05) >= min {
+        return fg;
+    }
+    let ratio_white = 1.05 / (lb + 0.05);
+    let ratio_black = (lb + 0.05) / 0.05;
+    let lighten = if lf >= lb {
+        ratio_white >= min || ratio_white >= ratio_black
+    } else {
+        !(ratio_black >= min || ratio_black >= ratio_white)
+    };
+    let (toward, target) = if lighten {
+        (1.0, (min * (lb + 0.05) - 0.05).min(1.0))
+    } else {
+        (0.0, ((lb + 0.05) / min - 0.05).max(0.0))
+    };
+    let t = if lighten {
+        if lf >= 1.0 { 0.0 } else { (target - lf) / (1.0 - lf) }
+    } else if lf <= 0.0 {
+        0.0
+    } else {
+        (lf - target) / lf
+    };
+    let t = t.clamp(0.0, 1.0);
+    let lut = srgb_linear_lut();
+    let mix = |c: u8| {
+        let lin = lut[c as usize] + (toward - lut[c as usize]) * t;
+        (lin_to_srgb(lin) * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    Rgb::new(mix(fg.r), mix(fg.g), mix(fg.b))
+}
+
 /// srgb -> linear for all 256 channel values, built once on first use
 fn srgb_linear_lut() -> &'static [f32; 256] {
     use std::sync::OnceLock;
@@ -586,6 +638,48 @@ fn fill_ansi(base16: [Rgb; 16]) -> [Rgb; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ratio(a: Rgb, b: Rgb) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn min_contrast_lifts_failing_pairs_to_the_ratio() {
+        // dark gray on black: lifted lighter until the ratio holds
+        let bg = Rgb::new(10, 10, 12);
+        let fg = Rgb::new(60, 60, 60);
+        assert!(ratio(fg, bg) < 3.0);
+        let fixed = apply_min_contrast(fg, bg, 3.0);
+        assert!(ratio(fixed, bg) >= 2.95, "got {}", ratio(fixed, bg));
+        // light gray on white: pushed darker instead
+        let bg = Rgb::new(250, 250, 250);
+        let fg = Rgb::new(220, 220, 225);
+        let fixed = apply_min_contrast(fg, bg, 4.5);
+        assert!(ratio(fixed, bg) >= 4.4, "got {}", ratio(fixed, bg));
+        assert!(luminance(fixed) < luminance(bg));
+    }
+
+    #[test]
+    fn min_contrast_leaves_passing_pairs_untouched() {
+        let bg = Rgb::new(20, 20, 24);
+        let fg = Rgb::new(220, 215, 200);
+        assert_eq!(apply_min_contrast(fg, bg, 4.5), fg);
+    }
+
+    #[test]
+    fn min_contrast_flips_direction_when_polarity_cant_reach() {
+        // white on white: lightening is a dead end, so it goes dark
+        let bg = Rgb::new(255, 255, 255);
+        let fg = Rgb::new(255, 255, 255);
+        let fixed = apply_min_contrast(fg, bg, 3.0);
+        assert!(ratio(fixed, bg) >= 2.95, "got {}", ratio(fixed, bg));
+        // an unreachable ratio on a mid bg lands on the stronger extreme
+        let bg = Rgb::new(128, 128, 128);
+        let fixed = apply_min_contrast(bg, bg, 21.0);
+        assert!(fixed == Rgb::new(0, 0, 0) || fixed == Rgb::new(255, 255, 255));
+    }
 
     #[test]
     fn inverse_default_cell_resolves_to_visible_colors() {
