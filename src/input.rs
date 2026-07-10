@@ -15,6 +15,9 @@ const FLAG_ASSOC_TEXT: u8 = 0b10000;
 pub fn key_to_bytes(
     logical: &Key,
     text: Option<&str>,
+    // the layout key with no modifiers applied (winit key_without_modifiers):
+    // the kitty protocol reports shift+2 as key '2', not the produced '@'
+    base: Option<char>,
     state: ElementState,
     repeat: bool,
     mods: ModifiersState,
@@ -159,23 +162,28 @@ pub fn key_to_bytes(
         }
     }
 
+    // the un-shifted key code the kitty protocol wants: the caller's
+    // no-modifier layout key when it has one, else the lowercased char
+    let key_code = |c: char| {
+        let k = base.unwrap_or(c);
+        k.to_lowercase().next().unwrap_or(k)
+    };
+
     // flag 8: every key reports as an escape code — printables use the
-    // lowercased codepoint (the unshifted key for letters; shifted symbols
-    // keep their produced codepoint since the layout's base key isn't
-    // recoverable here) and never send plain text; flag 16 embeds the text
-    // codepoints on presses so apps can still reconstruct typing. AltGr
-    // chords ride through here too, their translated character as the text
+    // un-shifted key code and never send plain text; flag 16 embeds the
+    // produced text's codepoints on presses so apps can reconstruct typing.
+    // AltGr chords ride through here too (base key + ctrl|alt mods, the
+    // same shape kitty emits on windows), their translated char as the text
     if report_all
         && let Key::Character(s) = logical
         && let Some(c) = s.chars().next()
     {
-        let base = c.to_lowercase().next().unwrap_or(c);
         let txt = if assoc_text && pressed {
             text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control))
         } else {
             None
         };
-        return Some(csi_u_txt(base as u32, mod_code, evt, txt));
+        return Some(csi_u_txt(key_code(c) as u32, mod_code, evt, txt));
     }
 
     // under the protocol a modified printable is reported as CSI u with the
@@ -186,8 +194,7 @@ pub fn key_to_bytes(
         && let Key::Character(s) = logical
         && let Some(c) = s.chars().next()
     {
-        let base = c.to_lowercase().next().unwrap_or(c);
-        return Some(csi_u(base as u32, mod_code, evt));
+        return Some(csi_u(key_code(c) as u32, mod_code, evt));
     }
 
     // legacy control combinations on character keys (protocol off)
@@ -313,13 +320,13 @@ mod tests {
     const LOC: KeyLocation = KeyLocation::Standard;
 
     fn press(logical: Key, mods: M, flags: u8) -> Option<Vec<u8>> {
-        key_to_bytes(&logical, None, ElementState::Pressed, false, mods, LOC, false, flags)
+        key_to_bytes(&logical, None, None, ElementState::Pressed, false, mods, LOC, false, flags)
     }
     fn press_app(logical: Key, mods: M, app: bool, flags: u8) -> Option<Vec<u8>> {
-        key_to_bytes(&logical, None, ElementState::Pressed, false, mods, LOC, app, flags)
+        key_to_bytes(&logical, None, None, ElementState::Pressed, false, mods, LOC, app, flags)
     }
     fn release(logical: Key, mods: M, flags: u8) -> Option<Vec<u8>> {
-        key_to_bytes(&logical, None, ElementState::Released, false, mods, LOC, false, flags)
+        key_to_bytes(&logical, None, None, ElementState::Released, false, mods, LOC, false, flags)
     }
     fn ch(s: &str) -> Key {
         Key::Character(s.into())
@@ -422,12 +429,12 @@ mod tests {
         // and it must arrive as "[" — an ESC prefix would start a CSI sequence
         let altgr = M::CONTROL | M::ALT;
         assert_eq!(
-            key_to_bytes(&ch("["), Some("["), ElementState::Pressed, false, altgr, LOC, false, 0),
+            key_to_bytes(&ch("["), Some("["), None, ElementState::Pressed, false, altgr, LOC, false, 0),
             Some(b"[".to_vec())
         );
         // the same under the kitty protocol: text, not a CSI u report
         assert_eq!(
-            key_to_bytes(&ch("{"), Some("{"), ElementState::Pressed, false, altgr, LOC, false, 1),
+            key_to_bytes(&ch("{"), Some("{"), None, ElementState::Pressed, false, altgr, LOC, false, 1),
             Some(b"{".to_vec())
         );
         // a bare ctrl+alt chord (no layout translation -> no text) keeps its
@@ -443,11 +450,11 @@ mod tests {
         assert_eq!(press(ch("i"), M::CONTROL, 1), Some(b"\x1b[105;5u".to_vec()));
         // plain and shifted printables stay text under disambiguate
         assert_eq!(
-            key_to_bytes(&ch("a"), Some("a"), ElementState::Pressed, false, M::empty(), LOC, false, 1),
+            key_to_bytes(&ch("a"), Some("a"), None, ElementState::Pressed, false, M::empty(), LOC, false, 1),
             Some(b"a".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ch("A"), Some("A"), ElementState::Pressed, false, M::SHIFT, LOC, false, 1),
+            key_to_bytes(&ch("A"), Some("A"), None, ElementState::Pressed, false, M::SHIFT, LOC, false, 1),
             Some(b"A".to_vec())
         );
     }
@@ -456,16 +463,16 @@ mod tests {
     fn flag8_reports_printables_and_c0_as_escape_codes() {
         // plain 'a' stops being text
         assert_eq!(
-            key_to_bytes(&ch("a"), Some("a"), ElementState::Pressed, false, M::empty(), LOC, false, 8),
+            key_to_bytes(&ch("a"), Some("a"), None, ElementState::Pressed, false, M::empty(), LOC, false, 8),
             Some(b"\x1b[97u".to_vec())
         );
         // shift+a reports the lowercased codepoint; flag 16 embeds the produced text
         assert_eq!(
-            key_to_bytes(&ch("A"), Some("A"), ElementState::Pressed, false, M::SHIFT, LOC, false, 8),
+            key_to_bytes(&ch("A"), Some("A"), None, ElementState::Pressed, false, M::SHIFT, LOC, false, 8),
             Some(b"\x1b[97;2u".to_vec())
         );
         assert_eq!(
-            key_to_bytes(&ch("A"), Some("A"), ElementState::Pressed, false, M::SHIFT, LOC, false, 8 | 16),
+            key_to_bytes(&ch("A"), Some("A"), None, ElementState::Pressed, false, M::SHIFT, LOC, false, 8 | 16),
             Some(b"\x1b[97;2;65u".to_vec())
         );
         // enter, tab, backspace, escape and space all escape-code unmodified
@@ -478,12 +485,31 @@ mod tests {
     }
 
     #[test]
+    fn shifted_symbols_report_the_unshifted_key() {
+        // US shift+2 produces '@' but the CSI u code is the base key '2'
+        assert_eq!(
+            key_to_bytes(&ch("@"), Some("@"), Some('2'), ElementState::Pressed, false, M::SHIFT, LOC, false, 8),
+            Some(b"\x1b[50;2u".to_vec())
+        );
+        // flag 16 embeds the produced '@' as the text section
+        assert_eq!(
+            key_to_bytes(&ch("@"), Some("@"), Some('2'), ElementState::Pressed, false, M::SHIFT, LOC, false, 24),
+            Some(b"\x1b[50;2;64u".to_vec())
+        );
+        // the flag-1 ctrl/alt path reports the base key too
+        assert_eq!(
+            key_to_bytes(&ch("@"), None, Some('2'), ElementState::Pressed, false, M::CONTROL | M::SHIFT, LOC, false, 1),
+            Some(b"\x1b[50;6u".to_vec())
+        );
+    }
+
+    #[test]
     fn flag8_printable_releases_need_event_types() {
         assert_eq!(release(ch("a"), M::empty(), 8), None);
         assert_eq!(release(ch("a"), M::empty(), 8 | 2), Some(b"\x1b[97;1:3u".to_vec()));
         // a release never carries associated text
         assert_eq!(
-            key_to_bytes(&ch("a"), Some("a"), ElementState::Released, false, M::empty(), LOC, false, 8 | 16 | 2),
+            key_to_bytes(&ch("a"), Some("a"), None, ElementState::Released, false, M::empty(), LOC, false, 8 | 16 | 2),
             Some(b"\x1b[97;1:3u".to_vec())
         );
     }
@@ -498,6 +524,7 @@ mod tests {
         assert_eq!(
             key_to_bytes(
                 &Key::Named(NamedKey::Shift),
+                None,
                 None,
                 ElementState::Pressed,
                 false,

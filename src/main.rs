@@ -1982,6 +1982,16 @@ fn clamp_window_bounds(
     }
 }
 
+/// the layout key with no modifiers applied, for the kitty protocol's
+/// un-shifted key codes (shift+2 reports as '2', not '@')
+fn unshifted_char(event: &winit::event::KeyEvent) -> Option<char> {
+    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+    match event.key_without_modifiers() {
+        Key::Character(s) => s.chars().next(),
+        _ => None,
+    }
+}
+
 /// feed pty output through the kitty-graphics scanner, then the vte parser. the
 /// scanner pulls kitty APC image sequences out of the stream (vte has no APC
 /// callback) and the remaining bytes flow to the terminal unchanged
@@ -6919,6 +6929,7 @@ impl App {
                     if let Some(bytes) = input::key_to_bytes(
                         &ke.logical_key,
                         ke.text.as_deref(),
+                        unshifted_char(&ke),
                         ke.state,
                         ke.repeat,
                         self.mods,
@@ -8889,6 +8900,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(bytes) = input::key_to_bytes(
                     &event.logical_key,
                     event.text.as_deref(),
+                    unshifted_char(&event),
                     event.state,
                     event.repeat,
                     self.mods,
