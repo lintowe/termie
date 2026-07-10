@@ -1646,9 +1646,14 @@ fn rect_overlap(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> i64 {
     w * h
 }
 
-/// keep a saved window rect on-screen: fit it to the monitor it most overlaps
-/// (or the first monitor when it overlaps none, e.g. its display is gone) so it
-/// never opens larger than or off the edge of a visible monitor
+/// physical px of the window's top strip (the tab/title bar) that must stay on a
+/// monitor for the window to be reachable; below this it counts as off-screen
+const TITLE_STRIP_PX: u32 = 40;
+
+/// keep a saved window rect reachable: cap its size to the monitor it most
+/// overlaps, then keep its saved position when the top strip is still on a
+/// monitor, or center it on that monitor when the rect is off every one (e.g.
+/// the display it was on is gone). rects are (x, y, w, h) in physical pixels
 fn clamp_window_bounds(
     monitors: &[(i32, i32, u32, u32)],
     b: (i32, i32, u32, u32),
@@ -1662,11 +1667,17 @@ fn clamp_window_bounds(
     let Some((mx, my, mw, mh)) = target else {
         return b; // no monitors known: leave the saved rect as-is
     };
+    let (x, y) = (b.0, b.1);
     let w = b.2.min(mw);
     let h = b.3.min(mh);
-    let x = b.0.clamp(mx, mx + mw as i32 - w as i32);
-    let y = b.1.clamp(my, my + mh as i32 - h as i32);
-    (x, y, w, h)
+    // reachable as long as the top strip overlaps some monitor; only recenter
+    // when the whole window would open off-screen (not full containment)
+    let strip = (x, y, w, h.min(TITLE_STRIP_PX));
+    if monitors.iter().any(|&m| rect_overlap(m, strip) > 0) {
+        (x, y, w, h)
+    } else {
+        (mx + (mw as i32 - w as i32) / 2, my + (mh as i32 - h as i32) / 2, w, h)
+    }
 }
 
 /// feed pty output through the kitty-graphics scanner, then the vte parser. the
@@ -2799,6 +2810,13 @@ impl App {
             && first_shell.is_none())
         .then(|| restored.as_ref().and_then(|s| s.window.as_ref()))
         .flatten();
+        // clamp the saved rect to a currently-visible monitor (so a window saved
+        // on a now-disconnected display doesn't open off-screen); the size goes on
+        // the attributes so the renderer builds at the right size, while position
+        // and maximize are applied after creation (winit-on-windows friendly)
+        let placement =
+            restore_bounds.map(|b| clamp_window_bounds(&monitor_rects(event_loop), (b.x, b.y, b.width, b.height)));
+        let restore_max = restore_bounds.is_some_and(|b| b.maximized);
         let attrs = Window::default_attributes()
             .with_title("termie")
             .with_window_icon(icon)
@@ -2808,17 +2826,17 @@ impl App {
             // would overlap (no room for all the chrome); clamp so the window is
             // always usable
             .with_min_inner_size(LogicalSize::new(560.0, 380.0));
-        let attrs = match restore_bounds {
-            Some(b) => {
-                // clamp to a currently-visible monitor so a window saved on a
-                // now-disconnected display doesn't open off-screen
-                let (x, y, w, h) =
-                    clamp_window_bounds(&monitor_rects(event_loop), (b.x, b.y, b.width, b.height));
-                attrs.with_position(PhysicalPosition::new(x, y)).with_inner_size(PhysicalSize::new(w, h))
-            }
+        let attrs = match placement {
+            Some((_, _, w, h)) => attrs.with_inner_size(PhysicalSize::new(w, h)),
             None => attrs.with_inner_size(LogicalSize::new(1000.0, 640.0)),
         };
         let window = Arc::new(event_loop.create_window(attrs)?);
+        if let Some((x, y, _, _)) = placement {
+            window.set_outer_position(PhysicalPosition::new(x, y));
+        }
+        if restore_max {
+            window.set_maximized(true);
+        }
         timing("window created");
 
         if let Ok(handle) = window.window_handle()
@@ -5571,7 +5589,13 @@ impl App {
                 return None;
             }
             let pos = w.outer_position().ok()?;
-            Some(session::WindowBounds { x: pos.x, y: pos.y, width: size.width, height: size.height })
+            Some(session::WindowBounds {
+                x: pos.x,
+                y: pos.y,
+                width: size.width,
+                height: size.height,
+                maximized: w.is_maximized(),
+            })
         });
         session::SessionFile { active_tab: main.active_tab, tabs, window }
     }
@@ -8763,14 +8787,14 @@ mod tests {
         let one = [(0, 0, 1920u32, 1080u32)];
         // fully inside: untouched
         assert_eq!(clamp_window_bounds(&one, (100, 100, 800, 600)), (100, 100, 800, 600));
-        // hanging off the right/bottom edges slides back to fit
-        assert_eq!(clamp_window_bounds(&one, (1600, 900, 800, 600)), (1120, 480, 800, 600));
-        // larger than the monitor is capped to it and pinned to the origin
-        assert_eq!(clamp_window_bounds(&one, (-50, -50, 5000, 5000)), (0, 0, 1920, 1080));
-        // a window whose monitor is gone lands on the first (primary) monitor
+        // partly off the right edge but the top strip is visible: position kept,
+        // not force-contained
+        assert_eq!(clamp_window_bounds(&one, (1600, 100, 800, 600)), (1600, 100, 800, 600));
+        // larger than the monitor is capped to its size
+        assert_eq!(clamp_window_bounds(&one, (0, 0, 5000, 5000)), (0, 0, 1920, 1080));
+        // a window off every monitor (its display is gone) is centered on the primary
         let two = [(0, 0, 1920u32, 1080u32), (1920, 0, 1280, 1024)];
-        let (x, y, ..) = clamp_window_bounds(&two, (-4000, -4000, 1000, 700));
-        assert_eq!((x, y), (0, 0));
+        assert_eq!(clamp_window_bounds(&two, (-4000, -4000, 1000, 700)), (460, 190, 1000, 700));
     }
 
     #[test]

@@ -16,12 +16,14 @@ pub struct SessionFile {
     pub window: Option<WindowBounds>,
 }
 
-/// saved outer position + inner size of the window, in physical pixels
+/// saved outer position + inner size of the window (physical pixels), plus
+/// whether it was maximized
 pub struct WindowBounds {
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    pub maximized: bool,
 }
 
 pub struct TabSnap {
@@ -85,6 +87,7 @@ impl WindowBounds {
             ("y", Json::Num(self.y as f64)),
             ("w", Json::Num(self.width as f64)),
             ("h", Json::Num(self.height as f64)),
+            ("max", Json::Bool(self.maximized)),
         ])
     }
 
@@ -94,6 +97,8 @@ impl WindowBounds {
             y: v.get("y").and_then(Json::as_f64)? as i32,
             width: v.get("w").and_then(Json::as_f64)? as u32,
             height: v.get("h").and_then(Json::as_f64)? as u32,
+            // absent in older files: default to not-maximized
+            maximized: v.get("max").and_then(Json::as_bool).unwrap_or(false),
         })
     }
 }
@@ -184,13 +189,13 @@ mod tests {
                     title: Some("build".into()),
                 },
             ],
-            window: Some(WindowBounds { x: -12, y: 40, width: 1200, height: 800 }),
+            window: Some(WindowBounds { x: -12, y: 40, width: 1200, height: 800, maximized: true }),
         };
         let back = SessionFile::parse(&sf.to_json_string()).expect("parse");
         assert_eq!(back.active_tab, 1);
         assert_eq!(back.tabs.len(), 2);
         let w = back.window.expect("window bounds round-trip");
-        assert_eq!((w.x, w.y, w.width, w.height), (-12, 40, 1200, 800));
+        assert_eq!((w.x, w.y, w.width, w.height, w.maximized), (-12, 40, 1200, 800, true));
         match &back.tabs[0].root {
             NodeSnap::Leaf { cwd, shell } => {
                 assert_eq!(cwd.as_deref(), Some("C:/a"));
@@ -210,6 +215,17 @@ mod tests {
             }
             _ => panic!("expected split"),
         }
+    }
+
+    #[test]
+    fn window_bounds_are_backward_compatible() {
+        // a file with tabs but no window key loads with window None
+        let no_win = r#"{"tabs":[{"root":{"kind":"leaf","shell":"pwsh"}}]}"#;
+        assert!(SessionFile::parse(no_win).expect("parse").window.is_none());
+        // a window without the "max" key defaults to not-maximized
+        let no_max = r#"{"tabs":[{"root":{"kind":"leaf","shell":"pwsh"}}],"window":{"x":10,"y":20,"w":800,"h":600}}"#;
+        let w = SessionFile::parse(no_max).expect("parse").window.expect("window");
+        assert_eq!((w.x, w.y, w.width, w.height, w.maximized), (10, 20, 800, 600, false));
     }
 
     #[test]
