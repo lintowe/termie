@@ -162,6 +162,9 @@ pub struct Grid {
     /// total lines ever pushed into scrollback (monotonic); lets prompt marks
     /// use stable absolute indices that survive eviction
     total_scrolled: u64,
+    /// bumped whenever reflow re-bases the absolute line-id space, so anything
+    /// anchored to it (the app's selection) knows its coordinates went stale
+    pub reflow_gen: u32,
     /// absolute line indices of OSC 133 prompt starts, ascending; pruned as
     /// history is evicted
     prompts: Vec<PromptMark>,
@@ -298,8 +301,40 @@ impl Grid {
             saved_origin: false,
             view_offset: 0,
             total_scrolled: 0,
+            reflow_gen: 0,
             prompts: Vec::new(),
             tab_stops: default_tab_stops(cols),
+        }
+    }
+
+    /// base of the absolute line-id space shared with prompt marks: the id of
+    /// the oldest retained line. ids are stable across scrollback eviction and
+    /// live/scrollback moves; only reflow re-bases them (see reflow_gen)
+    pub fn abs_base(&self) -> u64 {
+        self.total_scrolled - self.scrollback.len() as u64
+    }
+
+    /// absolute line id shown at viewport row `r` (clamped to the last line)
+    pub fn viewport_to_abs(&self, r: usize) -> u64 {
+        let total = self.total_lines();
+        let start = total.saturating_sub(self.rows + self.view_offset);
+        self.abs_base() + ((start + r).min(total.saturating_sub(1))) as u64
+    }
+
+    /// viewport row currently displaying absolute line `abs`, or None when it
+    /// scrolled off-screen or was evicted
+    pub fn abs_to_viewport(&self, abs: u64) -> Option<usize> {
+        let g = abs.checked_sub(self.abs_base())?;
+        self.global_to_viewport(g as usize)
+    }
+
+    /// the retained line with absolute id `abs`, if history still holds it
+    pub fn line_at_abs(&self, abs: u64) -> Option<&Line> {
+        let g = abs.checked_sub(self.abs_base())? as usize;
+        if g < self.scrollback.len() {
+            Some(&self.scrollback[g])
+        } else {
+            self.lines.get(g - self.scrollback.len())
         }
     }
 
@@ -507,10 +542,11 @@ impl Grid {
         self.view_offset = (cur + delta).clamp(0, max as isize) as usize;
     }
 
-    /// linear text within [start, end] (row, col) over the visible viewport,
-    /// trailing blanks trimmed per row. rows are viewport-relative, so this
-    /// reads through line_at to stay correct when scrolled into history
-    pub fn selected_text(&self, start: (usize, usize), end: (usize, usize), block: bool) -> String {
+    /// linear text within [start, end] as (absolute line id, col), trailing
+    /// blanks trimmed per row. absolute anchoring means the result is what the
+    /// user highlighted no matter how the view scrolled since; lines evicted
+    /// between mouse-down and copy are skipped
+    pub fn selected_text(&self, start: (u64, usize), end: (u64, usize), block: bool) -> String {
         let (mut a, mut b) = (start, end);
         if a > b {
             std::mem::swap(&mut a, &mut b);
@@ -518,8 +554,17 @@ impl Grid {
         // a block selection spans the same column range on every row
         let (bc0, bc1) = (a.1.min(b.1), a.1.max(b.1));
         let mut out = String::new();
-        for row in a.0..=b.0.min(self.rows.saturating_sub(1)) {
-            let line = self.line_at(row);
+        let base = self.abs_base();
+        let last = base + self.total_lines().saturating_sub(1) as u64;
+        let lo = a.0.max(base);
+        let hi = b.0.min(last);
+        if lo > hi {
+            return out;
+        }
+        for abs in lo..=hi {
+            let Some(line) = self.line_at_abs(abs) else {
+                continue;
+            };
             // clamp both ends to the line length: a resize can shrink lines
             // between mouse-down and copy, leaving start col past the new width
             let len = line.len();
@@ -527,8 +572,8 @@ impl Grid {
                 (bc0.min(len), (bc1 + 1).min(self.cols).min(len))
             } else {
                 (
-                    (if row == a.0 { a.1 } else { 0 }).min(len),
-                    (if row == b.0 { (b.1 + 1).min(self.cols) } else { self.cols }).min(len),
+                    (if abs == a.0 { a.1 } else { 0 }).min(len),
+                    (if abs == b.0 { (b.1 + 1).min(self.cols) } else { self.cols }).min(len),
                 )
             };
             let mut s = String::new();
@@ -543,14 +588,14 @@ impl Grid {
             // the terminal's, not the text's, so copy it unbroken and keep its
             // exact cells (trimming could eat spaces mid-logical-line). block
             // mode is a column extract — every row stays its own line there
-            let wrapped = !block && line.wrapped && row != b.0;
+            let wrapped = !block && line.wrapped && abs != hi;
             if !wrapped {
                 while s.ends_with(' ') {
                     s.pop();
                 }
             }
             out.push_str(&s);
-            if row != b.0 && !wrapped {
+            if abs != hi && !wrapped {
                 out.push('\n');
             }
         }
@@ -793,6 +838,7 @@ impl Grid {
         // the old physical rows so they don't point at stale lines after the reindex
         self.placements.clear();
         self.total_scrolled = self.scrollback.len() as u64;
+        self.reflow_gen = self.reflow_gen.wrapping_add(1);
         self.view_offset = 0;
     }
 
@@ -813,7 +859,7 @@ impl Grid {
 
     /// absolute index of the oldest retained line (scrollback front)
     fn prompt_base(&self) -> u64 {
-        self.total_scrolled - self.scrollback.len() as u64
+        self.abs_base()
     }
 
     fn prune_prompts(&mut self) {
@@ -1867,6 +1913,71 @@ mod tests {
         assert_eq!(g.selected_text((0, 0), (0, 1), false), "aa");
         assert_eq!(g.selected_text((1, 0), (1, 1), false), "bb");
         assert_eq!(g.selected_text((0, 0), (1, 1), false), "aa\nbb");
+    }
+
+    #[test]
+    fn selection_anchors_to_content_not_the_viewport() {
+        let mut g = Grid::new(2, 4);
+        for line in ["aa", "bb", "cc", "dd"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        // anchor "bb" by absolute id while scrolled to the top
+        g.scroll_view(g.scrollback.len() as isize);
+        let abs = g.viewport_to_abs(1);
+        let sel = ((abs, 0), (abs, 1));
+        assert_eq!(g.selected_text(sel.0, sel.1, false), "bb");
+        // the same anchors keep meaning "bb" wherever the view goes
+        g.scroll_view(-(g.view_offset as isize));
+        assert_eq!(g.selected_text(sel.0, sel.1, false), "bb");
+        // and new output scrolling past doesn't move them either
+        for c in "ee".chars() {
+            g.put_char(c);
+        }
+        g.linefeed();
+        assert_eq!(g.selected_text(sel.0, sel.1, false), "bb");
+    }
+
+    #[test]
+    fn selection_spans_more_than_one_screen() {
+        let mut g = Grid::new(2, 4);
+        g.set_scrollback_limit(100);
+        for line in ["aa", "bb", "cc", "dd", "ee"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        // five content lines on a 2-row screen: an absolute-anchored range
+        // covers all of them at once, which viewport coords never could
+        let base = g.abs_base();
+        assert_eq!(g.selected_text((base, 0), (base + 4, 1), false), "aa\nbb\ncc\ndd\nee");
+    }
+
+    #[test]
+    fn selection_skips_evicted_lines_and_round_trips_the_view() {
+        let mut g = Grid::new(2, 4);
+        g.set_scrollback_limit(2);
+        for line in ["aa", "bb", "cc", "dd", "ee"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        // a selection whose start line has been evicted copies what remains
+        assert_eq!(g.selected_text((0, 0), (g.abs_base() + 1, 1), false), "cc\ndd");
+        // abs <-> viewport round-trip while scrolled into history
+        g.scroll_view(g.scrollback.len() as isize);
+        for r in 0..g.rows {
+            assert_eq!(g.abs_to_viewport(g.viewport_to_abs(r)), Some(r));
+        }
+        // an id below the retained window maps nowhere
+        assert_eq!(g.abs_to_viewport(g.abs_base().wrapping_sub(1)), None);
     }
 
     #[test]

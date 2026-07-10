@@ -148,22 +148,57 @@ struct Tab {
 
 /// a torn-off pane living in its own OS-decorated window. its pty reader still
 /// routes output by pane id, so the UserEvent handlers also search here
-/// an active text selection within one pane's viewport (row, col)
+/// an active text selection in one pane, anchored to (absolute line id, col)
+/// in the grid's prompt-mark space — the highlight and the copied text stay on
+/// the content the user swept even as output scrolls or the view moves
 #[derive(Clone, Copy)]
 struct Sel {
     pane: usize,
-    start: (usize, usize),
-    end: (usize, usize),
+    start: (u64, usize),
+    end: (u64, usize),
     /// alt+drag: rectangular column selection (rows and cols span independently)
     block: bool,
+    /// grid.reflow_gen at anchor time; a rewrap re-bases line ids, so a stale
+    /// generation means the selection no longer points at real content
+    reflow_gen: u32,
 }
 
-/// keyboard mark mode: the selection cursor cell and, once shift-extending,
-/// the anchor it grows from (both viewport-relative, like Sel)
+/// keyboard mark mode: the selection cursor cell (viewport-relative — it moves
+/// with the keys and rides the view at the edges) and, once shift-extending,
+/// the content-anchored point it grows from
 #[derive(Clone, Copy)]
 struct MarkState {
     cur: (usize, usize),
-    anchor: Option<(usize, usize)>,
+    anchor: Option<(u64, usize)>,
+}
+
+/// map an absolute-anchored selection onto the pane's current viewport for
+/// painting: an endpoint scrolled off-screen clamps to the edge, so a
+/// selection taller than the screen highlights the visible slice
+fn sel_view_span(g: &grid::Grid, s: &Sel) -> Option<render::SelSpan> {
+    if s.reflow_gen != g.reflow_gen {
+        return None;
+    }
+    let (mut a, mut b) = (s.start, s.end);
+    if a > b {
+        std::mem::swap(&mut a, &mut b);
+    }
+    let top = g.viewport_to_abs(0);
+    let bot = g.viewport_to_abs(g.rows.saturating_sub(1));
+    if b.0 < top || a.0 > bot {
+        return None;
+    }
+    let start = if a.0 < top {
+        (0, if s.block { a.1 } else { 0 })
+    } else {
+        (g.abs_to_viewport(a.0)?, a.1)
+    };
+    let end = if b.0 > bot {
+        (g.rows.saturating_sub(1), if s.block { b.1 } else { g.cols.saturating_sub(1) })
+    } else {
+        (g.abs_to_viewport(b.0)?, b.1)
+    };
+    Some((start, end, s.block))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2204,6 +2239,10 @@ struct App {
     /// keyboard mark mode state; Some while active (selection mirrors it)
     mark: Option<MarkState>,
     selecting: bool,
+    /// drag-selection autoscroll: signed lines/tick while the pointer is held
+    /// past the pane edge, plus the next tick deadline (about_to_wait drives it)
+    sel_autoscroll: Option<isize>,
+    sel_scroll_at: Option<Instant>,
     /// dragging the scroll thumb: (pane id, pointer-y offset from the thumb top)
     sb_drag: Option<(usize, f32)>,
     last_click: Option<(Instant, f64, f64)>,
@@ -2373,6 +2412,8 @@ impl App {
             selection: None,
             mark: None,
             selecting: false,
+            sel_autoscroll: None,
+            sel_scroll_at: None,
             sb_drag: None,
             last_click: None,
             click_seq: 0,
@@ -3047,6 +3088,22 @@ impl App {
         Some((row, col))
     }
 
+    /// signed autoscroll speed (lines per tick) while a drag-selection holds
+    /// the pointer past the focused pane's top/bottom edge; further = faster,
+    /// positive scrolls into history (pointer above the pane)
+    fn sel_edge_speed(&self, py: f32) -> Option<isize> {
+        let (_, ry, _, rh) = self.focused_pane_rect()?;
+        let over = if py < ry {
+            ry - py
+        } else if py > ry + rh {
+            -(py - (ry + rh))
+        } else {
+            return None;
+        };
+        let mag = 1 + (over.abs() / 24.0) as isize;
+        Some(mag.min(8) * over.signum() as isize)
+    }
+
     /// the web url under a pixel position in the focused pane, as
     /// (viewport row, col_start, col_end, url); only when the point is actually
     /// inside the pane, not clamped to its edge
@@ -3102,6 +3159,7 @@ impl App {
                     .get(self.pw.active_tab)
                     .and_then(|t| t.root.as_ref())
                     .and_then(|r| find_pane(r, s.pane))
+                    .filter(|p| p.term.grid.reflow_gen == s.reflow_gen)
                     .map(|p| p.term.grid.selected_text(s.start, s.end, s.block))
             })
             .filter(|t| !t.is_empty() && !t.contains('\n') && t.chars().count() <= 128)
@@ -3307,6 +3365,9 @@ impl App {
             .get(self.pw.active_tab)
             .and_then(|t| t.root.as_ref())
             .and_then(|r| find_pane(r, sel.pane))
+            // a reflow since mouse-down re-based the line ids; copying through
+            // stale anchors would grab lines the user never highlighted
+            .filter(|p| p.term.grid.reflow_gen == sel.reflow_gen)
             .map(|p| p.term.grid.selected_text(sel.start, sel.end, sel.block))
             .unwrap_or_default();
         if !text.is_empty() {
@@ -3569,7 +3630,7 @@ impl App {
                                     term: &p.term,
                                     rect: *rect,
                                     focused: *id == tab.focused,
-                                    sel: selection.filter(|s| s.pane == *id).map(|s| (s.start, s.end, s.block)),
+                                    sel: selection.filter(|s| s.pane == *id).and_then(|s| sel_view_span(&p.term.grid, &s)),
                                     flash: p
                                         .flash
                                         .map(|t| {
@@ -4972,15 +5033,17 @@ impl App {
             let Some(pane) = self.active_focused_id() else {
                 return;
             };
-            let Some(cur) = self.focused_grid_mut().map(|g| {
+            let Some((cur, cur_abs, reflow_gen)) = self.focused_grid_mut().map(|g| {
                 // start on the live screen, at the shell cursor
                 g.scroll_view(-(g.view_offset as isize));
-                (g.cursor.row.min(g.rows.saturating_sub(1)), g.cursor.col.min(g.cols.saturating_sub(1)))
+                let cur =
+                    (g.cursor.row.min(g.rows.saturating_sub(1)), g.cursor.col.min(g.cols.saturating_sub(1)));
+                (cur, (g.viewport_to_abs(cur.0), cur.1), g.reflow_gen)
             }) else {
                 return;
             };
             self.mark = Some(MarkState { cur, anchor: None });
-            self.selection = Some(Sel { pane, start: cur, end: cur, block: false });
+            self.selection = Some(Sel { pane, start: cur_abs, end: cur_abs, block: false, reflow_gen });
         } else {
             self.mark = None;
             self.selection = None;
@@ -5007,7 +5070,11 @@ impl App {
         let Some(MarkState { mut cur, anchor }) = self.mark else {
             return;
         };
-        let before = cur;
+        // content-anchor the pre-move cell now: the move below may scroll the
+        // view, and a viewport-anchored shift origin would drift with it
+        let before_abs = self
+            .focused_grid()
+            .map(|g| (g.viewport_to_abs(cur.0), cur.1));
         match &event.logical_key {
             Key::Named(N::Escape) => {
                 self.set_mark_mode(false);
@@ -5076,9 +5143,16 @@ impl App {
         }
         // shift starts (or keeps) an anchor at the pre-move cell; a plain move
         // collapses the selection back to just the cursor
-        let anchor = if shift { anchor.or(Some(before)) } else { None };
+        let anchor = if shift { anchor.or(before_abs) } else { None };
+        let Some((cur_abs, reflow_gen)) = self
+            .focused_grid()
+            .map(|g| ((g.viewport_to_abs(cur.0), cur.1), g.reflow_gen))
+        else {
+            return;
+        };
         self.mark = Some(MarkState { cur, anchor });
-        self.selection = Some(Sel { pane, start: anchor.unwrap_or(cur), end: cur, block: false });
+        self.selection =
+            Some(Sel { pane, start: anchor.unwrap_or(cur_abs), end: cur_abs, block: false, reflow_gen });
         self.redraw();
     }
 
@@ -5593,11 +5667,17 @@ impl App {
                 self.redraw();
             }
         } else if self.selecting {
-            if let (Some(mut sel), Some(cell)) =
+            if let (Some(mut sel), Some((row, col))) =
                 (self.selection, self.cell_in_focused(px, py))
+                && let Some((abs, reflow_gen)) =
+                    self.focused_grid().map(|g| (g.viewport_to_abs(row), g.reflow_gen))
+                && sel.reflow_gen == reflow_gen
             {
-                sel.end = cell;
+                sel.end = (abs, col);
                 self.selection = Some(sel);
+                // dragging past the pane's top/bottom edge arms the autoscroll
+                // tick in about_to_wait, which keeps extending while held there
+                self.sel_autoscroll = self.sel_edge_speed(py);
                 self.redraw();
             }
         } else {
@@ -5947,12 +6027,18 @@ impl App {
                             // clicked pane to that cell (the usual anchor-extend)
                             if self.mods.shift_key()
                                 && let Some((row, col)) = self.cell_in_focused(cx, cy)
+                                && let Some((abs, reflow_gen)) =
+                                    self.focused_grid().map(|g| (g.viewport_to_abs(row), g.reflow_gen))
                                 && let Some(sel) = self
                                     .selection
                                     .as_mut()
-                                    .filter(|s| Some(s.pane) == self.pw.tabs.get(self.pw.active_tab).map(|t| t.focused))
+                                    .filter(|s| {
+                                        Some(s.pane)
+                                            == self.pw.tabs.get(self.pw.active_tab).map(|t| t.focused)
+                                            && s.reflow_gen == reflow_gen
+                                    })
                             {
-                                sel.end = (row, col);
+                                sel.end = (abs, col);
                                 self.selecting = true;
                                 self.redraw();
                                 return;
@@ -5971,30 +6057,39 @@ impl App {
                             self.last_click = Some((now, cx as f64, cy as f64));
                             if let (Some(pane), Some((row, col))) =
                                 (self.active_focused_id(), self.cell_in_focused(cx, cy))
-                            {
-                                let grid = self
+                                && let Some(grid) = self
                                     .pw.tabs
                                     .get(self.pw.active_tab)
                                     .and_then(|t| t.root.as_ref())
                                     .and_then(|r| find_pane(r, pane))
-                                    .map(|p| &p.term.grid);
+                                    .map(|p| &p.term.grid)
+                            {
+                                let abs = grid.viewport_to_abs(row);
+                                let reflow_gen = grid.reflow_gen;
                                 match self.click_seq {
                                     2 => {
-                                        let (lo, hi) = grid
-                                            .map(|g| g.word_bounds(row, col))
-                                            .unwrap_or((col, col));
-                                        self.selection =
-                                            Some(Sel { pane, start: (row, lo), end: (row, hi), block: false });
+                                        let (lo, hi) = grid.word_bounds(row, col);
+                                        self.selection = Some(Sel {
+                                            pane,
+                                            start: (abs, lo),
+                                            end: (abs, hi),
+                                            block: false,
+                                            reflow_gen,
+                                        });
                                         self.selecting = false;
                                         if self.config.copy_on_select {
                                             self.copy_selection();
                                         }
                                     }
                                     3 => {
-                                        let hi =
-                                            grid.map(|g| g.line_last_col(row)).unwrap_or(0);
-                                        self.selection =
-                                            Some(Sel { pane, start: (row, 0), end: (row, hi), block: false });
+                                        let hi = grid.line_last_col(row);
+                                        self.selection = Some(Sel {
+                                            pane,
+                                            start: (abs, 0),
+                                            end: (abs, hi),
+                                            block: false,
+                                            reflow_gen,
+                                        });
                                         self.selecting = false;
                                         if self.config.copy_on_select {
                                             self.copy_selection();
@@ -6003,10 +6098,11 @@ impl App {
                                     _ => {
                                         self.selection = Some(Sel {
                                             pane,
-                                            start: (row, col),
-                                            end: (row, col),
+                                            start: (abs, col),
+                                            end: (abs, col),
                                             // alt+drag selects a rectangle
                                             block: self.mods.alt_key(),
+                                            reflow_gen,
                                         });
                                         self.selecting = true;
                                     }
@@ -6044,6 +6140,7 @@ impl App {
                     },
                     ElementState::Released => {
                         self.selecting = false;
+                        self.sel_autoscroll = None;
                         self.tab_drag = None;
                         // a plain click (no drag) clears the selection; a real drag
                         // auto-copies when copy-on-select is enabled
@@ -7182,6 +7279,35 @@ impl ApplicationHandler<UserEvent> for App {
         // are requested here; the deadline is folded in at the idle block below
         // so the soonest of (main, satellite) wins even when the main is idle
         let sat_anim = !self.satellites.is_empty() && self.pump_satellite_redraws();
+        // drag-selection autoscroll: while the pointer is held past the pane
+        // edge, step the view and stretch the selection to the pointer ~33x/s
+        if self.selecting
+            && let Some(speed) = self.sel_autoscroll
+        {
+            if self.sel_scroll_at.map(|t| Instant::now() >= t).unwrap_or(true) {
+                self.sel_scroll_at = Some(Instant::now() + Duration::from_millis(30));
+                if let Some(g) = self.focused_grid_mut() {
+                    g.scroll_view(speed);
+                }
+                let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
+                if let (Some(mut sel), Some((row, col))) =
+                    (self.selection, self.cell_in_focused(cx, cy))
+                    && let Some((abs, reflow_gen)) =
+                        self.focused_grid().map(|g| (g.viewport_to_abs(row), g.reflow_gen))
+                    && sel.reflow_gen == reflow_gen
+                {
+                    sel.end = (abs, col);
+                    self.selection = Some(sel);
+                }
+                self.redraw();
+            }
+            if let Some(t) = self.sel_scroll_at {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(t));
+            }
+            return;
+        } else {
+            self.sel_scroll_at = None;
+        }
         // startup reveal fade: drive it at ~60fps until it settles
         if self.pw.renderer.as_ref().map(|r| r.startup_fading()).unwrap_or(false) {
             self.redraw();
@@ -7404,6 +7530,36 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sel_view_span_clamps_offscreen_endpoints() {
+        let mut g = grid::Grid::new(2, 4);
+        g.set_scrollback_limit(100);
+        for line in ["aa", "bb", "cc", "dd", "ee"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        let base = g.abs_base();
+        let sel =
+            Sel { pane: 0, start: (base, 1), end: (base + 4, 0), block: false, reflow_gen: g.reflow_gen };
+        // at the live bottom only the selection's tail is on screen; the start
+        // clamps to the viewport's top-left
+        let span = sel_view_span(&g, &sel).unwrap();
+        assert_eq!(span.0, (0, 0));
+        assert_eq!(span.1, (0, 0));
+        // scrolled to the top the start shows at its real column and the end
+        // clamps to the bottom-right
+        g.scroll_view(g.scrollback.len() as isize);
+        let span = sel_view_span(&g, &sel).unwrap();
+        assert_eq!(span.0, (0, 1));
+        assert_eq!(span.1, (1, 3));
+        // a stale reflow generation hides the selection instead of lying
+        let stale = Sel { reflow_gen: sel.reflow_gen.wrapping_add(1), ..sel };
+        assert!(sel_view_span(&g, &stale).is_none());
+    }
 
     #[test]
     fn boring_titles_yield_to_the_cwd_label() {
