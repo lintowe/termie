@@ -619,6 +619,8 @@ pub struct Renderer {
     bold_as_bright: bool,
     pane_pad_px: f32,
     content_font: Option<&'static str>,
+    /// base weight regular content text shapes at (100-900, default 400)
+    content_weight: u16,
     fonts: Vec<&'static str>,
     font_idx: usize,
     /// the gpu backend actually resolved at init (for the settings ABOUT block)
@@ -1305,6 +1307,7 @@ impl Renderer {
             bold_as_bright: true,
             pane_pad_px: 6.0,
             content_font: None,
+            content_weight: 400,
             backend_label: "wgpu",
             fonts,
             font_idx: 0,
@@ -1694,7 +1697,7 @@ impl Renderer {
         // at exactly this size. still recompute the grid (cols/rows start at 0)
         if pt != self.content_pt {
             self.content_pt = pt;
-            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height);
+            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height, self.content_weight);
         }
         self.recompute_grid_size();
         (self.cols, self.rows)
@@ -1709,7 +1712,7 @@ impl Renderer {
         }
         self.scale = scale;
         // re-raster glyphs at the new device scale (clears + repacks the atlas)
-        self.atlas.reconfigure(self.content_pt, self.chrome_pt, scale, self.content_font, self.content_line_height);
+        self.atlas.reconfigure(self.content_pt, self.chrome_pt, scale, self.content_font, self.content_line_height, self.content_weight);
         // pad + bar heights are all scale-derived; recompute from the new metrics
         self.pad = (10.0 * scale).round();
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
@@ -1769,12 +1772,28 @@ impl Renderer {
             return;
         }
         self.content_line_height = lh;
-        self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, lh);
+        self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, lh, self.content_weight);
         self.recompute_grid_size();
     }
 
     pub fn line_height(&self) -> f32 {
         self.content_line_height
+    }
+
+    /// set the base font weight regular text shapes at (100-900); re-rasters
+    /// the atlas when it changes. returns new (cols, rows) like set_content_pt
+    pub fn set_font_weight(&mut self, w: u16) -> (usize, usize) {
+        let w = w.clamp(100, 900);
+        if w != self.content_weight {
+            self.content_weight = w;
+            self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height, w);
+        }
+        self.recompute_grid_size();
+        (self.cols, self.rows)
+    }
+
+    pub fn font_weight(&self) -> u16 {
+        self.content_weight
     }
 
     pub fn set_cursor_style(&mut self, s: CursorShape) {
@@ -1855,7 +1874,7 @@ impl Renderer {
             && i != self.font_idx {
                 self.font_idx = i;
                 self.content_font = if i == 0 { None } else { Some(self.fonts[i]) };
-                self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height);
+                self.atlas.reconfigure(self.content_pt, self.chrome_pt, self.scale, self.content_font, self.content_line_height, self.content_weight);
                 self.recompute_grid_size();
             }
         (self.cols, self.rows)

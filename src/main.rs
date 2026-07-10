@@ -2125,6 +2125,8 @@ struct Persisted {
     theme_dark: color::ThemeId,
     theme_light: color::ThemeId,
     font: Option<String>,
+    /// base weight regular text renders at (`font_weight=`, named or 100-900)
+    font_weight: u16,
     opacity: i32,
     quake_key: Option<(u32, u32)>,
     /// the quake_key line as written, kept so save_config can re-emit it —
@@ -2183,6 +2185,7 @@ impl Default for Persisted {
             theme_dark: color::ThemeId::Instrument,
             theme_light: color::ThemeId::Paper,
             font: None,
+            font_weight: 400,
             opacity: 85,
             quake_key: None,
             quake_key_raw: None,
@@ -2249,6 +2252,23 @@ fn percentiles(q: &std::collections::VecDeque<f32>) -> Option<(f32, f32)> {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let pick = |p: f32| v[((v.len() as f32 * p) as usize).min(v.len() - 1)];
     Some((pick(0.50), pick(0.95)))
+}
+
+/// css/opentype weight, named or numeric; None leaves the setting untouched
+fn font_weight_from_label(v: &str) -> Option<u16> {
+    let named = match v.to_ascii_lowercase().as_str() {
+        "thin" => 100,
+        "extralight" => 200,
+        "light" => 300,
+        "normal" | "regular" => 400,
+        "medium" => 500,
+        "semibold" => 600,
+        "bold" => 700,
+        "extrabold" => 800,
+        "black" => 900,
+        _ => return v.parse::<u16>().ok().map(|n| n.clamp(100, 900)),
+    };
+    Some(named)
 }
 
 fn cursor_from_name(s: &str) -> grid::CursorShape {
@@ -2658,6 +2678,11 @@ fn parse_persisted(text: &str) -> Persisted {
             "font" => {
                 if !v.is_empty() {
                     p.font = Some(v.to_string());
+                }
+            }
+            "font_weight" => {
+                if let Some(w) = font_weight_from_label(v) {
+                    p.font_weight = w;
                 }
             }
             "quake_key" => {
@@ -3182,6 +3207,7 @@ impl App {
                 if let Some(f) = p.font.as_deref() {
                     r.set_font_by_name(f);
                 }
+                r.set_font_weight(p.font_weight);
                 r.set_content_pt(p.font_size);
             }
         }
@@ -6000,6 +6026,9 @@ impl App {
             let _ = writeln!(s, "theme_light={}", self.persisted.theme_light.name());
         }
         let _ = writeln!(s, "font={}", r.font_name());
+        if r.font_weight() != 400 {
+            let _ = writeln!(s, "font_weight={}", r.font_weight());
+        }
         if let Some(q) = &self.persisted.quake_key_raw {
             // an opt-in the panel can't edit; dropping it here silently killed
             // the user's drop-down hotkey on every settings change
@@ -9096,6 +9125,17 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_weight_labels_and_numbers_parse() {
+        assert_eq!(font_weight_from_label("semibold"), Some(600));
+        assert_eq!(font_weight_from_label("Regular"), Some(400));
+        assert_eq!(font_weight_from_label("350"), Some(350));
+        // out-of-range numbers clamp, garbage leaves the setting untouched
+        assert_eq!(font_weight_from_label("1000"), Some(900));
+        assert_eq!(font_weight_from_label("55"), Some(100));
+        assert_eq!(font_weight_from_label("heavyish"), None);
+    }
 
     #[test]
     fn sel_view_span_clamps_offscreen_endpoints() {

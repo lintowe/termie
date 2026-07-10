@@ -43,6 +43,8 @@ pub struct FontMetrics {
     pub px: f32,
     line_height: f32,
     family: &'static str,
+    /// base weight regular text shapes at; bold text takes at least 700
+    weight: Weight,
 }
 
 pub struct GlyphAtlas {
@@ -84,6 +86,11 @@ pub struct GlyphAtlas {
 
 const PAD: u32 = 1;
 
+/// bold text shapes at least at 700; a heavier configured base keeps winning
+fn bolded(base: Weight) -> Weight {
+    if base.0 >= Weight::BOLD.0 { base } else { Weight::BOLD }
+}
+
 impl GlyphAtlas {
     pub fn new(content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>, line_height: f32) -> Self {
         // start from an EMPTY db (no system-font scan) so startup is fast; only
@@ -121,6 +128,7 @@ impl GlyphAtlas {
                 px: content_px,
                 line_height: content_lh,
                 family: content_family,
+                weight: Weight::NORMAL,
             },
             chrome: FontMetrics {
                 cell_w: chrome_px * 0.5,
@@ -129,6 +137,7 @@ impl GlyphAtlas {
                 px: chrome_px,
                 line_height: chrome_lh,
                 family: chrome_family,
+                weight: Weight::NORMAL,
             },
             default_family: maple,
             data: vec![0u8; 0],
@@ -228,7 +237,7 @@ impl GlyphAtlas {
 
     /// re-measure for new sizes/family and reset the glyph cache, REUSING the
     /// existing FontSystem (avoids re-scanning all system fonts on every change)
-    pub fn reconfigure(&mut self, content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>, line_height: f32) {
+    pub fn reconfigure(&mut self, content_pt: f32, chrome_pt: f32, scale: f32, content_override: Option<&'static str>, line_height: f32, content_weight: u16) {
         let content_px = (content_pt * scale).round().max(6.0);
         let chrome_px = (chrome_pt * scale).round().max(6.0);
         let content_lh = (content_px * line_height.clamp(0.8, 3.0)).round();
@@ -244,6 +253,7 @@ impl GlyphAtlas {
             px: content_px,
             line_height: content_lh,
             family: content_family,
+            weight: Weight(content_weight.clamp(100, 900)),
         };
         self.chrome = FontMetrics {
             cell_w: chrome_px * 0.5,
@@ -252,6 +262,7 @@ impl GlyphAtlas {
             px: chrome_px,
             line_height: chrome_lh,
             family: self.chrome.family,
+            weight: self.chrome.weight,
         };
         self.content = self.measure(self.content);
         self.chrome = self.measure(self.chrome);
@@ -286,7 +297,7 @@ impl GlyphAtlas {
 
     fn measure(&mut self, mut m: FontMetrics) -> FontMetrics {
         self.buffer.set_metrics(Metrics::new(m.px, m.line_height));
-        let attrs = Attrs::new().family(Family::Name(m.family));
+        let attrs = Attrs::new().family(Family::Name(m.family)).weight(m.weight);
         self.buffer
             .set_text("Mgjpq0", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
@@ -389,7 +400,7 @@ impl GlyphAtlas {
         self.buffer.set_metrics(Metrics::new(m.px, m.line_height));
         let mut s = [0u8; 4];
         let text = key.c.encode_utf8(&mut s);
-        let mut shaped = match self.shape_char_image(text, m.family, key.bold, key.italic) {
+        let mut shaped = match self.shape_char_image(text, m.family, m.weight, key.bold, key.italic) {
             Some(i) => i,
             None => return RasterOutcome::Empty,
         };
@@ -401,7 +412,7 @@ impl GlyphAtlas {
         if key.font == FontId::Content && crate::grid::emoji_vs_base(key.c) {
             if shaped.4
                 && let Some(mono) =
-                    self.shape_char_image(text, "Segoe UI Symbol", key.bold, key.italic)
+                    self.shape_char_image(text, "Segoe UI Symbol", m.weight, key.bold, key.italic)
                 && !mono.4
             {
                 shaped = mono;
@@ -415,7 +426,7 @@ impl GlyphAtlas {
                 let family = if shaped.4 { m.family } else { "Segoe UI Symbol" };
                 let px = m.px * max_w / shaped.0 as f32;
                 self.buffer.set_metrics(Metrics::new(px, m.line_height));
-                if let Some(small) = self.shape_char_image(text, family, key.bold, key.italic) {
+                if let Some(small) = self.shape_char_image(text, family, m.weight, key.bold, key.italic) {
                     shaped = small;
                 }
                 self.buffer.set_metrics(Metrics::new(m.px, m.line_height));
@@ -465,13 +476,13 @@ impl GlyphAtlas {
         &mut self,
         text: &str,
         family: &str,
+        base: Weight,
         bold: bool,
         italic: bool,
     ) -> Option<(u32, u32, i32, i32, bool, Vec<u8>)> {
-        let mut attrs = Attrs::new().family(Family::Name(family));
-        if bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
+        let mut attrs = Attrs::new()
+            .family(Family::Name(family))
+            .weight(if bold { bolded(base) } else { base });
         if italic {
             attrs = attrs.style(Style::Italic);
         }
@@ -561,10 +572,9 @@ impl GlyphAtlas {
             && text.chars().next().is_some_and(|c| c >= '\u{2600}'))
             || text.contains('\u{FE0F}');
         let family = if emoji_seq { "Segoe UI Emoji" } else { m.family };
-        let mut attrs = Attrs::new().family(Family::Name(family));
-        if bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
+        let mut attrs = Attrs::new()
+            .family(Family::Name(family))
+            .weight(if bold { bolded(m.weight) } else { m.weight });
         if italic {
             attrs = attrs.style(Style::Italic);
         }
