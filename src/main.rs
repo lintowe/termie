@@ -405,11 +405,19 @@ struct PaletteState {
     selected: usize,
 }
 
-/// right-click pane context menu state: anchor point + hovered item
+/// right-click context menu state: anchor point, hovered item, and what it acts on
 struct PaneMenu {
     x: f32,
     y: f32,
     hovered: Option<usize>,
+    target: MenuTarget,
+}
+
+/// which surface a context menu acts on: the focused pane, or the tab at this index
+#[derive(Clone, Copy)]
+enum MenuTarget {
+    Pane,
+    Tab(usize),
 }
 
 /// find-in-scrollback overlay state for the focused pane; matches are
@@ -429,6 +437,8 @@ enum ConfirmAction {
     PasteBytes { pane: usize, bytes: Vec<u8> },
     /// close a tab that holds more than one pane
     CloseTab { tab: usize },
+    /// close every tab except `keep` when at least one of them holds >1 pane
+    CloseOthers { keep: usize },
     /// quit the app (main window X / Alt+F4 / the quit action) with live panes
     Quit,
     /// close the current torn-off window and its panes
@@ -3721,6 +3731,7 @@ impl App {
         match action {
             ConfirmAction::PasteBytes { pane, bytes } => self.send_paste_bytes(pane, &bytes),
             ConfirmAction::CloseTab { tab } => self.do_close_tab(tab, event_loop),
+            ConfirmAction::CloseOthers { keep } => self.do_close_others(keep),
             ConfirmAction::Quit => self.quit_app(event_loop),
             ConfirmAction::InstallUpdate => {
                 if let Some(u) = self.update.clone() {
@@ -3847,10 +3858,12 @@ impl App {
         let config = self.config;
         let settings_open = self.pw.settings_open;
         let settings_p = self.settings_p();
-        let pane_menu_view = self.pw.pane_menu.as_ref().map(|m| render::PaneMenuView {
-            x: m.x,
-            y: m.y,
-            hovered: m.hovered,
+        let pane_menu_view = self.pw.pane_menu.as_ref().map(|m| {
+            let items: &'static [&'static str] = match m.target {
+                MenuTarget::Pane => &render::PANE_MENU_ITEMS,
+                MenuTarget::Tab(_) => &render::TAB_MENU_ITEMS,
+            };
+            render::PaneMenuView { x: m.x, y: m.y, hovered: m.hovered, items }
         });
         let hud = if self.persisted.latency_hud { self.lat.hud() } else { None };
         if let Some(r) = self.pw.renderer.as_mut() {
@@ -4864,6 +4877,53 @@ impl App {
         self.after_focus_context_change(before);
     }
 
+    /// close every tab except `keep`, confirming once (like close_tab does per
+    /// tab) when any of the doomed tabs holds more than one pane
+    fn close_others(&mut self, keep: usize) {
+        if self.pw.tabs.len() < 2 || keep >= self.pw.tabs.len() {
+            return;
+        }
+        let multi = self
+            .pw.tabs
+            .iter()
+            .enumerate()
+            .any(|(i, t)| i != keep && t.root.as_ref().map(pane_count).unwrap_or(0) > 1);
+        if multi {
+            let n = self.pw.tabs.len() - 1;
+            let noun = if n == 1 { "tab" } else { "tabs" };
+            self.pw.confirm = Some(ConfirmState {
+                prompt: format!("close {n} other {noun}?"),
+                hint: "enter: close \u{b7} esc: cancel".to_string(),
+                action: ConfirmAction::CloseOthers { keep },
+            });
+            self.redraw();
+        } else {
+            self.do_close_others(keep);
+        }
+    }
+
+    fn do_close_others(&mut self, keep: usize) {
+        if keep >= self.pw.tabs.len() {
+            return;
+        }
+        self.tab_drag = None;
+        let before = self.focus_identity();
+        for (i, tab) in self.pw.tabs.iter_mut().enumerate() {
+            if i != keep
+                && let Some(root) = tab.root.as_mut()
+            {
+                kill_all(root);
+            }
+        }
+        let kept = self.pw.tabs.remove(keep);
+        self.pw.tabs.clear();
+        self.pw.tabs.push(kept);
+        self.pw.active_tab = 0;
+        self.relayout_all();
+        self.sync_tabs();
+        self.after_focus_context_change(before);
+    }
+
     /// move the tab at `from` so it sits at `to` (drag reorder / keyboard nudge);
     /// the active tab stays the same tab through the shuffle
     fn move_tab(&mut self, from: usize, to: usize) {
@@ -5628,21 +5688,47 @@ impl App {
         self.redraw();
     }
 
-    /// run a pane context-menu item (index into render::PANE_MENU_ITEMS:
-    /// 0 copy, 1 split vertical, 2 split horizontal, 3 pop out, 4 close pane,
-    /// 5 paste). copy is a no-op when nothing is selected
-    fn pane_menu_action(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
-        match idx {
-            0 => {
-                self.copy_selection();
-                self.selection = None;
-            }
-            1 => self.split_focused(Dir::Vertical),
-            2 => self.split_focused(Dir::Horizontal),
-            3 => self.pop_out_focused(event_loop),
-            4 => self.close_focused_pane(event_loop),
-            5 => self.paste(),
-            _ => {}
+    /// run a context-menu item. pane items index render::PANE_MENU_ITEMS
+    /// (0 copy, 1 split vertical, 2 split horizontal, 3 pop out, 4 close pane,
+    /// 5 paste; copy no-ops with no selection); tab items index TAB_MENU_ITEMS
+    /// (0 rename, 1 duplicate, 2 move left, 3 move right, 4 close, 5 close others)
+    fn pane_menu_action(&mut self, target: MenuTarget, idx: usize, event_loop: &ActiveEventLoop) {
+        match target {
+            MenuTarget::Pane => match idx {
+                0 => {
+                    self.copy_selection();
+                    self.selection = None;
+                }
+                1 => self.split_focused(Dir::Vertical),
+                2 => self.split_focused(Dir::Horizontal),
+                3 => self.pop_out_focused(event_loop),
+                4 => self.close_focused_pane(event_loop),
+                5 => self.paste(),
+                _ => {}
+            },
+            MenuTarget::Tab(i) => match idx {
+                0 => {
+                    if let Some(tab) = self.pw.tabs.get(i) {
+                        let buf = tab.title.clone().unwrap_or_default();
+                        self.pw.rename = Some(RenameState { tab: i, buf });
+                        self.redraw();
+                    }
+                }
+                1 => {
+                    // duplicate: clone the clicked tab's focused pane cwd + shell
+                    let ctx = self.pw.tabs.get(i).and_then(|t| {
+                        let p = find_pane(t.root.as_ref()?, t.focused)?;
+                        Some((cwd_path(p.term.cwd.as_deref()), p.shell))
+                    });
+                    let (cwd, shell) = ctx.map_or((None, None), |(c, s)| (c, Some(s)));
+                    self.new_tab_cwd(cwd, shell);
+                }
+                2 => self.move_tab(i, i.saturating_sub(1)),
+                3 => self.move_tab(i, i + 1),
+                4 => self.close_tab(i, event_loop),
+                5 => self.close_others(i),
+                _ => {}
+            },
         }
     }
 
@@ -6323,16 +6409,27 @@ impl App {
     fn on_mouse_input(&mut self, state: ElementState, button: MouseButton, event_loop: &ActiveEventLoop) {
         match button {
             MouseButton::Right if state == ElementState::Pressed => {
-                // right-click on a pane opens the pane context menu (split / close
-                // / paste) at the cursor; focus the pane under it first so the
-                // actions target it
+                // right-click opens a context menu at the cursor: over a pane it
+                // targets that pane (focus it first so the actions land there);
+                // over a tab it targets that tab (rename / duplicate / move / close)
                 let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
-                let on_content =
-                    matches!(self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy)), Some(Hit::Content));
-                if on_content {
-                    self.focus_pane_at(cx, cy);
-                    self.pw.pane_menu = Some(PaneMenu { x: cx, y: cy, hovered: None });
-                    self.redraw();
+                match self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy)) {
+                    Some(Hit::Content) => {
+                        self.focus_pane_at(cx, cy);
+                        self.pw.pane_menu =
+                            Some(PaneMenu { x: cx, y: cy, hovered: None, target: MenuTarget::Pane });
+                        self.redraw();
+                    }
+                    Some(Hit::Button(Hot::Tab(i) | Hot::TabClose(i))) => {
+                        self.pw.pane_menu = Some(PaneMenu {
+                            x: cx,
+                            y: cy,
+                            hovered: None,
+                            target: MenuTarget::Tab(i),
+                        });
+                        self.redraw();
+                    }
+                    _ => {}
                 }
             }
             MouseButton::Middle if state == ElementState::Pressed => {
@@ -6445,11 +6542,14 @@ impl App {
                 let hit = self.pw.renderer.as_ref().map(|r| r.hit_test(cx, cy));
                 // a left-press while the pane menu is open runs the clicked item
                 // (or dismisses it when the click lands elsewhere)
-                if self.pw.pane_menu.is_some() && state == ElementState::Pressed {
+                if let Some(menu) = self.pw.pane_menu.as_ref()
+                    && state == ElementState::Pressed
+                {
+                    let target = menu.target;
                     let item = self.pw.renderer.as_ref().and_then(|r| r.pane_menu_item_at(cx, cy));
                     self.pw.pane_menu = None;
                     if let Some(i) = item {
-                        self.pane_menu_action(i, event_loop);
+                        self.pane_menu_action(target, i, event_loop);
                     }
                     self.redraw();
                     return;

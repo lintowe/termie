@@ -53,7 +53,12 @@ pub fn maybe_run() -> bool {
             r.set_hovered(Some(Hot::PaneMode));
         }
         "menu" => {
-            r.set_pane_menu(Some(PaneMenuView { x: 90.0, y: 150.0, hovered: Some(0) }));
+            r.set_pane_menu(Some(PaneMenuView {
+                x: 90.0,
+                y: 150.0,
+                hovered: Some(0),
+                items: &render::PANE_MENU_ITEMS,
+            }));
             r.settle_overlay();
         }
         "reveal" => {

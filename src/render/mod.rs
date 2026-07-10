@@ -149,16 +149,21 @@ pub struct PaletteView {
     pub selected: usize,
 }
 
-/// right-click pane context menu: a small overlay at (x, y). the item index
-/// maps to a fixed action in main.rs's handler (kept in sync with PANE_MENU_ITEMS)
+/// right-click context menu: a small overlay at (x, y) listing `items`. the
+/// clicked item index maps to a fixed action in main.rs's handler, keyed to the
+/// menu's target (pane or tab)
 pub struct PaneMenuView {
     pub x: f32,
     pub y: f32,
     pub hovered: Option<usize>,
+    pub items: &'static [&'static str],
 }
 
 pub const PANE_MENU_ITEMS: [&str; 6] =
     ["copy", "split vertical", "split horizontal", "pop out to window", "close pane", "paste"];
+
+pub const TAB_MENU_ITEMS: [&str; 6] =
+    ["rename", "duplicate", "move left", "move right", "close", "close others"];
 
 /// find-in-scrollback overlay display state. `matches` are on-screen rects
 /// (viewport row, col, len, is_current) for the focused pane
@@ -1912,15 +1917,15 @@ impl Renderer {
         self.pane_menu_view = m;
     }
 
-    /// clamped (x, y, width, row_h, pad) of the pane context menu, shared by the
+    /// clamped (x, y, width, row_h, pad) of the context menu, shared by the
     /// renderer and the hit-test so the two never drift
-    fn pane_menu_geom(&self, mx: f32, my: f32) -> (f32, f32, f32, f32, f32) {
+    fn pane_menu_geom(&self, mx: f32, my: f32, rows: usize) -> (f32, f32, f32, f32, f32) {
         let s = self.scale;
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let row_h = chrome_h + 10.0 * s;
         let pad = 8.0 * s;
         let mw = (172.0 * s).round();
-        let mh = row_h * PANE_MENU_ITEMS.len() as f32 + pad * 2.0;
+        let mh = row_h * rows as f32 + pad * 2.0;
         let w = self.config.width as f32;
         let h = self.config.height as f32;
         let bx = mx.min(w - mw - 4.0 * s).max(0.0).round();
@@ -1931,12 +1936,12 @@ impl Renderer {
     /// the menu item under (px, py), or None if outside the menu's rows
     pub fn pane_menu_item_at(&self, px: f32, py: f32) -> Option<usize> {
         let v = self.pane_menu_view.as_ref()?;
-        let (bx, by, mw, row_h, pad) = self.pane_menu_geom(v.x, v.y);
-        let rows = PANE_MENU_ITEMS.len() as f32;
-        if px < bx || px >= bx + mw || py < by + pad || py >= by + pad + row_h * rows {
+        let rows = v.items.len();
+        let (bx, by, mw, row_h, pad) = self.pane_menu_geom(v.x, v.y, rows);
+        if px < bx || px >= bx + mw || py < by + pad || py >= by + pad + row_h * rows as f32 {
             return None;
         }
-        Some((((py - by - pad) / row_h) as usize).min(PANE_MENU_ITEMS.len() - 1))
+        Some((((py - by - pad) / row_h) as usize).min(rows - 1))
     }
 
     pub fn set_market(&mut self, m: Option<MarketView>) {
@@ -3848,8 +3853,8 @@ impl Renderer {
         let Some(v) = self.pane_menu_view.as_ref() else {
             return;
         };
-        let (mx, my, hovered) = (v.x, v.y, v.hovered);
-        let (bx, by, mw, row_h, pad) = self.pane_menu_geom(mx, my);
+        let (mx, my, hovered, items) = (v.x, v.y, v.hovered, v.items);
+        let (bx, by, mw, row_h, pad) = self.pane_menu_geom(mx, my, items.len());
         let INK_0 = self.palette.ink0;
         let INK_1 = self.palette.ink1;
         let INK_3 = self.palette.ink3;
@@ -3859,11 +3864,11 @@ impl Renderer {
         let s = self.scale;
         let hair = s.max(1.0);
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
-        let mh = row_h * PANE_MENU_ITEMS.len() as f32 + pad * 2.0;
+        let mh = row_h * items.len() as f32 + pad * 2.0;
         Self::push_rect(out, bx - 2.0 * s, by + 4.0 * s, mw + 4.0 * s, mh, INK_0, 0.5);
         Self::push_rect(out, bx, by, mw, mh, INK_1, 1.0);
         Self::stroke_rect(out, (bx, by, mw, mh), hair, RULE_2);
-        for (i, lbl) in PANE_MENU_ITEMS.iter().enumerate() {
+        for (i, lbl) in items.iter().enumerate() {
             let ry = by + pad + row_h * i as f32;
             if hovered == Some(i) {
                 Self::push_rect(out, bx, ry, mw, row_h, INK_3, 1.0);
@@ -5337,6 +5342,24 @@ mod hit_tests {
         assert_eq!(r.find_btn_at(2.0, 2.0), None);
         let _ = std::fs::remove_file(tmp_png("palette"));
         let _ = std::fs::remove_file(tmp_png("find"));
+    }
+
+    #[test]
+    fn context_menu_rows_route_to_their_index() {
+        let Some(mut r) = headless() else {
+            return;
+        };
+        r.set_tabs(vec!["a".into(), "b".into()], 0);
+        // the tab menu carries a different item list than the pane menu; the
+        // shared geometry must resolve each of its rows and reject the outside
+        r.set_pane_menu(Some(PaneMenuView { x: 60.0, y: 60.0, hovered: None, items: &TAB_MENU_ITEMS }));
+        let (bx, by, mw, row_h, pad) = r.pane_menu_geom(60.0, 60.0, TAB_MENU_ITEMS.len());
+        for i in 0..TAB_MENU_ITEMS.len() {
+            let cy = by + pad + row_h * (i as f32 + 0.5);
+            assert_eq!(r.pane_menu_item_at(bx + mw / 2.0, cy), Some(i));
+        }
+        assert_eq!(r.pane_menu_item_at(bx + mw / 2.0, by), None);
+        assert_eq!(r.pane_menu_item_at(2.0, 2.0), None);
     }
 
     #[test]
