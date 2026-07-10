@@ -635,8 +635,8 @@ pub struct Renderer {
     plugins_installed: Vec<(String, bool)>,
     palette_view: Option<PaletteView>,
     /// palette overlay hit geometry, refreshed each build: box, row pitch,
-    /// shown item count (None while the palette is closed)
-    palette_geom: Option<(Rect, f32, usize)>,
+    /// shown item count, window offset (None while the palette is closed)
+    palette_geom: Option<(Rect, f32, usize, usize)>,
     /// find-bar button rects, refreshed each build: (prev, next, close)
     find_btns: Option<(Rect, Rect, Rect, Rect)>,
     pane_menu_view: Option<PaneMenuView>,
@@ -3919,7 +3919,12 @@ impl Renderer {
             return;
         };
         let query = pv.query.clone();
-        let items: Vec<String> = pv.items.iter().take(9).cloned().collect();
+        // window the list around the selection so keyboard nav past the ninth
+        // row scrolls instead of highlighting off-screen (fonts lists easily
+        // exceed nine); clicks map back through `first` to absolute indices
+        let total = pv.items.len();
+        let first = pv.selected.saturating_sub(8).min(total.saturating_sub(9));
+        let items: Vec<String> = pv.items.iter().skip(first).take(9).cloned().collect();
         let selected = pv.selected;
         let INK_0 = self.palette.ink0;
         let INK_1 = self.palette.ink1;
@@ -3941,8 +3946,9 @@ impl Renderer {
         let row_h = chrome_h + 14.0 * s;
         let rows = items.len().max(1) as f32 + 1.0;
         let bh = row_h * rows + 8.0 * s;
-        // remember the box + row pitch so clicks can land on entries
-        self.palette_geom = Some(((bx, by, bw, bh), row_h, items.len()));
+        // remember the box + row pitch + window offset so clicks can land on
+        // entries and resolve to absolute list indices
+        self.palette_geom = Some(((bx, by, bw, bh), row_h, items.len(), first));
         // drop shadow + box + border
         Self::push_rect(out, bx - 2.0 * s, by + 5.0 * s, bw + 4.0 * s, bh, INK_0, 0.5);
         Self::push_rect(out, bx, by, bw, bh, INK_1, 1.0);
@@ -3964,13 +3970,21 @@ impl Renderer {
         }
         for (idx, lbl) in items.iter().enumerate() {
             let ry = by + row_h * (idx as f32 + 1.0);
-            if idx == selected {
+            let is_sel = first + idx == selected;
+            if is_sel {
                 Self::push_rect(out, bx, ry, bw, row_h, INK_3, 1.0);
                 Self::push_rect(out, bx, ry, 2.0 * s, row_h, PAPER, 1.0);
             }
             let ty = (ry + (row_h - chrome_h) / 2.0).round();
-            let col = if idx == selected { PAPER } else { TEXT_2 };
+            let col = if is_sel { PAPER } else { TEXT_2 };
             let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + pad, ty, lbl, col, 1.0, track);
+        }
+        // more rows exist above/below the window: a dim count in the box corner
+        if total > items.len() {
+            let hint = format!("{}/{}", selected + 1, total);
+            let hw = self.text_w(FontId::Chrome, &hint, track);
+            let ty = (by + (row_h - chrome_h) / 2.0).round();
+            let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + bw - pad - hw, ty, &hint, MUTE, 1.0, track);
         }
     }
 
@@ -4071,9 +4085,10 @@ impl Renderer {
         }
     }
 
-    /// palette row index under a point (None outside the item rows)
+    /// absolute item index under a point (None outside the item rows); the
+    /// visible rows are a window into the full list, so the offset is added back
     pub fn palette_row_at(&self, x: f32, y: f32) -> Option<usize> {
-        let ((bx, by, bw, _), row_h, n) = self.palette_geom?;
+        let ((bx, by, bw, _), row_h, n, first) = self.palette_geom?;
         if x < bx || x >= bx + bw {
             return None;
         }
@@ -4082,7 +4097,7 @@ impl Renderer {
             return None;
         }
         let i = (rel / row_h) as usize;
-        (i < n).then_some(i)
+        (i < n).then_some(first + i)
     }
 
     /// whether a point is inside the open palette's box
@@ -5343,8 +5358,8 @@ mod hit_tests {
         }));
         r.settle_overlay();
         let _ = r.render_png(&[], true, false, false, &tmp_png("palette"));
-        let ((bx, by, bw, _), row_h, n) = r.palette_geom.expect("palette geometry recorded");
-        assert_eq!(n, 3);
+        let ((bx, by, bw, _), row_h, n, first) = r.palette_geom.expect("palette geometry recorded");
+        assert_eq!((n, first), (3, 0));
         // the centre of each row resolves to its own index
         for i in 0..n {
             let y = by + row_h * (i as f32 + 1.0) + row_h / 2.0;
@@ -5354,6 +5369,23 @@ mod hit_tests {
         assert_eq!(r.palette_row_at(bx + bw / 2.0, by + row_h / 2.0), None);
         assert!(!r.palette_contains(2.0, 2.0));
         assert!(r.palette_contains(bx + 2.0, by + 2.0));
+
+        // a list longer than nine rows windows around the selection (the font
+        // picker feeds dozens of families); clicks resolve to absolute indices
+        r.set_palette(Some(PaletteView {
+            query: String::new(),
+            items: (0..20).map(|i| format!("font {i}")).collect(),
+            selected: 15,
+        }));
+        r.settle_overlay();
+        let _ = r.render_png(&[], true, false, false, &tmp_png("palette"));
+        let ((bx, by, bw, _), row_h, n, first) = r.palette_geom.expect("windowed geometry");
+        // selected 15 sits on the last visible row: window is [7, 15]
+        assert_eq!((n, first), (9, 7));
+        let last = by + row_h * 9.0 + row_h / 2.0;
+        assert_eq!(r.palette_row_at(bx + bw / 2.0, last), Some(15));
+        let top = by + row_h + row_h / 2.0;
+        assert_eq!(r.palette_row_at(bx + bw / 2.0, top), Some(7));
 
         r.set_palette(None);
         r.set_find(Some(FindView {
