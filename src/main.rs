@@ -2703,6 +2703,10 @@ struct PaneWindow {
     // composition; both are per-window and must not leak through the swap
     focused: bool,
     ime_composing: bool,
+    /// the composition string + winit's caret byte range, drawn inline at the
+    /// focused pane's cursor until the IME commits or cancels
+    ime_preedit: String,
+    ime_preedit_caret: Option<(usize, usize)>,
     // this window's open right-click pane context menu (None = closed)
     pane_menu: Option<PaneMenu>,
     // this window's focused-pane git branch + the cwd it was computed for
@@ -2925,6 +2929,8 @@ impl App {
                 on_top: false,
                 focused: true,
                 ime_composing: false,
+                ime_preedit: String::new(),
+                ime_preedit_caret: None,
                 pane_menu: None,
                 git: None,
                 last_git_cwd: None,
@@ -4329,6 +4335,8 @@ impl App {
             layout_cache,
             maximized,
             focused,
+            ime_preedit,
+            ime_preedit_caret,
             ..
         } = pw;
         if let Some(r) = renderer.as_mut() {
@@ -4362,6 +4370,9 @@ impl App {
                                         .find(|(n, _)| n == p.shell.label())
                                         .map(|&(_, id)| id),
                                     status: p.status.rank(),
+                                    preedit: (*id == tab.focused && !ime_preedit.is_empty()).then_some(
+                                        render::PreeditView { text: ime_preedit, caret: *ime_preedit_caret },
+                                    ),
                                 })
                             })
                             .collect()
@@ -4554,18 +4565,28 @@ impl App {
         }
     }
 
-    /// park the OS IME candidate window at the focused pane's cursor cell
+    /// park the OS IME candidate window at the focused pane's cursor cell,
+    /// advanced to the caret within an in-flight composition so the candidate
+    /// list tracks the character being converted
     fn apply_ime_area(&mut self) {
         let Some(id) = self.active_focused_id() else {
             return;
         };
+        let caret_cells = self
+            .pw
+            .ime_preedit_caret
+            .map(|(s, _)| render::preedit_cell_offset(&self.pw.ime_preedit, s))
+            .unwrap_or(0);
         let rect = self.pw.layout_cache.iter().find(|(pid, _)| *pid == id).map(|(_, r)| *r);
         let cursor = self
             .pw.tabs
             .get(self.pw.active_tab)
             .and_then(|t| t.root.as_ref())
             .and_then(|r| find_pane(r, id))
-            .map(|p| (p.term.grid.cursor.row, p.term.grid.cursor.col));
+            .map(|p| {
+                let g = &p.term.grid;
+                (g.cursor.row, (g.cursor.col + caret_cells).min(g.cols.saturating_sub(1)))
+            });
         let area = match (rect, cursor, self.pw.renderer.as_ref()) {
             (Some(rect), Some((row, col)), Some(r)) => Some(r.cell_screen_rect(rect, row, col)),
             _ => None,
@@ -6350,6 +6371,8 @@ impl App {
             on_top: false,
             focused: true,
             ime_composing: false,
+            ime_preedit: String::new(),
+            ime_preedit_caret: None,
             pane_menu: None,
             git: None,
             last_git_cwd: None,
@@ -6514,6 +6537,8 @@ impl App {
                 self.pw.focused = f;
                 if !f {
                     self.pw.ime_composing = false;
+                    self.pw.ime_preedit.clear();
+                    self.pw.ime_preedit_caret = None;
                     self.release_held_input();
                     // a tab drag can't survive losing focus (the release lands
                     // in another window)
@@ -8354,6 +8379,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // leave every keystroke swallowed with no in-app recovery
                 if !f {
                     self.pw.ime_composing = false;
+                    self.pw.ime_preedit.clear();
+                    self.pw.ime_preedit_caret = None;
                     self.release_held_input();
                     // a tab drag can't survive losing focus (the release lands
                     // in another window)
@@ -8415,18 +8442,24 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => {}
-                Ime::Preedit(text, _cursor) => {
+                Ime::Preedit(text, cursor) => {
                     self.pw.ime_composing = !text.is_empty();
+                    self.pw.ime_preedit = text;
+                    self.pw.ime_preedit_caret = cursor;
                     self.apply_ime_area();
                     self.redraw();
                 }
                 Ime::Commit(text) => {
                     self.pw.ime_composing = false;
+                    self.pw.ime_preedit.clear();
+                    self.pw.ime_preedit_caret = None;
                     self.write_to_focused(text.as_bytes());
                     self.redraw();
                 }
                 Ime::Disabled => {
                     self.pw.ime_composing = false;
+                    self.pw.ime_preedit.clear();
+                    self.pw.ime_preedit_caret = None;
                     self.redraw();
                 }
             },

@@ -184,6 +184,7 @@ pub fn maybe_run() -> bool {
             theme: None,
             // the attention scene also shows a pane's running badge
             status: if scene == "attention" && i == 1 { 1 } else { 0 },
+            preedit: None,
         })
         .collect();
 

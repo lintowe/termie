@@ -142,6 +142,26 @@ pub struct PaneView<'a> {
     /// command badge severity for the pane's corner dot (0 none, 1 running,
     /// 2 done, 4 failed — same scale as the tab strip)
     pub status: u8,
+    /// in-flight IME composition to draw at this pane's cursor (focused pane
+    /// only); the string lives in the compositor until commit, never the grid
+    pub preedit: Option<PreeditView<'a>>,
+}
+
+/// an uncommitted IME composition: the text plus winit's cursor — a byte range
+/// into it marking the active clause (start < end) or the caret (start == end)
+#[derive(Clone, Copy)]
+pub struct PreeditView<'a> {
+    pub text: &'a str,
+    pub caret: Option<(usize, usize)>,
+}
+
+/// terminal cells occupied by `text` up to byte offset `at` (caret math for
+/// both the inline overlay and parking the OS candidate window)
+pub(crate) fn preedit_cell_offset(text: &str, at: usize) -> usize {
+    text.char_indices()
+        .take_while(|&(i, _)| i < at)
+        .map(|(_, c)| crate::grid::char_width(c))
+        .sum()
 }
 
 /// command-palette display state
@@ -2930,6 +2950,97 @@ impl Renderer {
         }
     }
 
+    /// draw an uncommitted IME composition inline at the cursor cell, over the
+    /// grid content (the string reaches the pty only on commit). the run is
+    /// bg-filled and underlined, the active clause gets a double-thick line,
+    /// and a caret bar marks the composition cursor. a run that would overflow
+    /// the right edge slides left; wider than the pane, it keeps its tail —
+    /// that end is where the caret almost always is
+    fn draw_preedit(
+        atlas: &mut GlyphAtlas,
+        palette: &Palette,
+        out: &mut Vec<Instance>,
+        term: &Terminal,
+        ox: f32,
+        oy: f32,
+        pre: PreeditView,
+        beam_w: f32,
+    ) {
+        let grid = &term.grid;
+        // scrolled into history the cursor cell isn't on screen; nothing to anchor to
+        if pre.text.is_empty() || grid.view_offset > 0 || grid.cols == 0 {
+            return;
+        }
+        let m = atlas.metrics(FontId::Content);
+        let (cell_w, cell_h, ascent, em_px) = (m.cell_w, m.cell_h, m.ascent.round(), m.px);
+        let cols = grid.cols;
+        let total = preedit_cell_offset(pre.text, pre.text.len());
+        if total == 0 {
+            return;
+        }
+        let crow = grid.cursor.row.min(grid.rows.saturating_sub(1));
+        let ccol = grid.cursor.col.min(cols.saturating_sub(1));
+        let start_col = ccol.min(cols.saturating_sub(total.min(cols)));
+        // head cells clipped away when the run is wider than the pane
+        let skip = total.saturating_sub(cols);
+        let y = oy + crow as f32 * cell_h;
+        let cell_x = |cells: usize| ox + (start_col + cells - skip) as f32 * cell_w;
+
+        let vis_w = (total - skip) as f32 * cell_w;
+        Self::push_rect(out, cell_x(skip), y, vis_w, cell_h, palette.bg, 1.0);
+
+        let fg_lin = palette.fg.to_linear_f32();
+        let mut off = 0usize;
+        // start cell of the last spacing char: combining marks (w == 0) land there
+        let mut mark_cell = 0usize;
+        for c in pre.text.chars() {
+            let w = crate::grid::char_width(c);
+            if w > 0 {
+                mark_cell = off;
+            }
+            let cell = if w == 0 { mark_cell } else { off };
+            // a wide char straddling the clip boundary skips its glyph; the
+            // bg and underline still cover the sliver
+            if cell >= skip
+                && c != ' '
+                && let Some(g) = atlas.get(GlyphKey { font: FontId::Content, c, bold: false, italic: false })
+            {
+                let gx = cell_x(cell);
+                out.push(Instance {
+                    pos: [gx + g.left, y + ascent - g.top],
+                    size: [g.width, g.height],
+                    uv_min: g.uv_min,
+                    uv_max: g.uv_max,
+                    color: [fg_lin[0], fg_lin[1], fg_lin[2], 1.0],
+                    kind: if g.color { 3 } else { 1 },
+                    _pad: [0; 3],
+                });
+            }
+            off += w;
+        }
+
+        // thin line under the whole run, baseline-anchored like SGR underline
+        let t = (cell_h * 0.06).max(1.0);
+        let yb = y + (ascent + 0.10 * em_px).round().min(cell_h - t).max(0.0);
+        Self::push_rect(out, cell_x(skip), yb, vis_w, t, palette.fg, 0.9);
+
+        match pre.caret {
+            // the IME's converting clause reads as "active": double thickness
+            Some((s, e)) if s < e => {
+                let c0 = preedit_cell_offset(pre.text, s).clamp(skip, total);
+                let c1 = preedit_cell_offset(pre.text, e).clamp(skip, total);
+                if c1 > c0 {
+                    Self::push_rect(out, cell_x(c0), yb, (c1 - c0) as f32 * cell_w, t * 2.0, palette.cursor, 1.0);
+                }
+            }
+            Some((s, _)) => {
+                let cc = preedit_cell_offset(pre.text, s).clamp(skip, total);
+                Self::push_rect(out, cell_x(cc), y, beam_w, cell_h, palette.cursor, 1.0);
+            }
+            None => {}
+        }
+    }
+
     /// lay out a monospace string at a pixel baseline with optional tracking;
     /// returns the pen end-x
     // a low-level text helper called ~50 times; a params struct would add noise
@@ -3092,6 +3203,12 @@ impl Renderer {
                     fmatches,
                     bold_as_bright,
                 );
+                if let Some(pre) = pv.preedit
+                    && pv.focused
+                    && focused
+                {
+                    Self::draw_preedit(atlas, pal, &mut out, pv.term, info.0, info.1, pre, beam_w);
+                }
             }
         }
 
@@ -5099,6 +5216,97 @@ mod tests {
 
         let empty = Terminal::new(2, 4);
         assert_eq!(draw(&term), draw(&empty) + 2);
+    }
+
+    #[test]
+    fn preedit_cell_offsets_span_widths() {
+        use super::preedit_cell_offset;
+        let s = "aあb"; // 1 + 2 + 1 cells
+        assert_eq!(preedit_cell_offset(s, 0), 0);
+        assert_eq!(preedit_cell_offset(s, 1), 1);
+        assert_eq!(preedit_cell_offset(s, 4), 3);
+        assert_eq!(preedit_cell_offset(s, s.len()), 4);
+        // a combining mark occupies no cell of its own
+        assert_eq!(preedit_cell_offset("e\u{301}", 3), 1);
+    }
+
+    fn preedit_rects(term: &Terminal, text: &str, caret: Option<(usize, usize)>) -> Vec<super::Instance> {
+        let mut atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let palette = Palette::from_theme(ThemeId::Instrument);
+        let mut out = Vec::new();
+        Renderer::draw_preedit(
+            &mut atlas,
+            &palette,
+            &mut out,
+            term,
+            0.0,
+            0.0,
+            super::PreeditView { text, caret },
+            2.0,
+        );
+        out
+    }
+
+    #[test]
+    fn preedit_draws_nothing_when_empty_or_scrolled() {
+        let mut term = Terminal::new(2, 10);
+        assert!(preedit_rects(&term, "", Some((0, 0))).is_empty());
+        term.grid.linefeed();
+        term.grid.linefeed();
+        term.grid.view_offset = 1;
+        assert!(preedit_rects(&term, "abc", Some((0, 0))).is_empty());
+    }
+
+    #[test]
+    fn preedit_bg_covers_the_run_at_the_cursor() {
+        let atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let cell_w = atlas.metrics(super::FontId::Content).cell_w;
+        let mut term = Terminal::new(2, 10);
+        term.grid.cursor.col = 2;
+        let out = preedit_rects(&term, "abc", Some((3, 3)));
+        // the bg fill is the first instance: at the cursor cell, 3 cells wide
+        assert_eq!(out[0].pos[0], 2.0 * cell_w);
+        assert_eq!(out[0].size[0], 3.0 * cell_w);
+        // end caret: the bar is the last instance, one run-width right of the start
+        assert_eq!(out.last().unwrap().pos[0], 5.0 * cell_w);
+        assert_eq!(out.last().unwrap().size[0], 2.0);
+    }
+
+    #[test]
+    fn preedit_slides_left_at_the_right_edge() {
+        let atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let cell_w = atlas.metrics(super::FontId::Content).cell_w;
+        let mut term = Terminal::new(2, 10);
+        term.grid.cursor.col = 8;
+        let out = preedit_rects(&term, "abc", Some((0, 0)));
+        assert_eq!(out[0].pos[0], 7.0 * cell_w);
+        assert_eq!(out[0].size[0], 3.0 * cell_w);
+    }
+
+    #[test]
+    fn preedit_wider_than_the_pane_keeps_its_tail() {
+        let atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let cell_w = atlas.metrics(super::FontId::Content).cell_w;
+        let term = Terminal::new(2, 4);
+        // 8 cells into a 4-col pane: the head clips, the tail stays visible
+        let out = preedit_rects(&term, "abcdefgh", None);
+        assert_eq!(out[0].pos[0], 0.0);
+        assert_eq!(out[0].size[0], 4.0 * cell_w);
+    }
+
+    #[test]
+    fn preedit_active_clause_gets_a_thick_line() {
+        let atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let cell_w = atlas.metrics(super::FontId::Content).cell_w;
+        let term = Terminal::new(2, 10);
+        // clause spans bytes 0..3 = cells 0..3
+        let out = preedit_rects(&term, "abc", Some((0, 3)));
+        let clause = out.last().unwrap();
+        assert_eq!(clause.pos[0], 0.0);
+        assert_eq!(clause.size[0], 3.0 * cell_w);
+        // double the single-line thickness marks it as active
+        let single = &out[out.len() - 2];
+        assert_eq!(clause.size[1], single.size[1] * 2.0);
     }
 
     #[test]

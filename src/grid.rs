@@ -221,7 +221,7 @@ pub struct PromptMark {
 
 /// terminal cell width of a char: 0 (combining/zero-width), 1 (normal), or 2
 /// (East-Asian wide / fullwidth / emoji). a compact built-in table (no deps)
-fn char_width(c: char) -> usize {
+pub(crate) fn char_width(c: char) -> usize {
     let cp = c as u32;
     // fast path: printable ASCII is width 1 and dominates shell output — return
     // before the ~38 combining/wide range checks below
