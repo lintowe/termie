@@ -383,9 +383,9 @@ fn all_palette_actions() -> &'static [(&'static str, PaletteAction)] {
     static ALL: std::sync::OnceLock<Vec<(&'static str, PaletteAction)>> = std::sync::OnceLock::new();
     ALL.get_or_init(|| {
         let mut actions = PALETTE_ACTIONS.to_vec();
-        for (name, _) in pty::profiles() {
-            let label: &'static str = Box::leak(format!("new tab: {name}").into_boxed_str());
-            actions.push((label, PaletteAction::NewShell(ShellKind::Custom(name.as_str()))));
+        for prof in pty::profiles() {
+            let label: &'static str = Box::leak(format!("new tab: {}", prof.name).into_boxed_str());
+            actions.push((label, PaletteAction::NewShell(ShellKind::Custom(prof.name.as_str()))));
         }
         actions
     })
@@ -395,17 +395,35 @@ fn all_palette_actions() -> &'static [(&'static str, PaletteAction)] {
 /// "wsl: <name>" entries (wsl.exe -d <name>), one per distro. every distro gets
 /// its named entry (like windows terminal) so it's findable even when it's the
 /// default; a name a user profile already defines is left untouched
-fn with_wsl_profiles(
-    mut profiles: Vec<(String, Vec<String>)>,
-    distros: Vec<String>,
-) -> Vec<(String, Vec<String>)> {
+fn with_wsl_profiles(mut profiles: Vec<pty::Profile>, distros: Vec<String>) -> Vec<pty::Profile> {
     for distro in distros {
         let name = format!("wsl: {distro}");
-        if !profiles.iter().any(|(n, _)| n == &name) {
-            profiles.push((name, vec!["wsl.exe".to_string(), "-d".to_string(), distro]));
+        if !profiles.iter().any(|p| p.name == name) {
+            profiles.push(pty::Profile {
+                name,
+                argv: vec!["wsl.exe".to_string(), "-d".to_string(), distro],
+                cwd: None,
+                env: Vec::new(),
+            });
         }
     }
     profiles
+}
+
+/// the profile named `name` in `profiles`, created empty if new, so config lines
+/// (argv, .cwd, .env.<VAR>) can arrive in any order and accumulate onto it
+fn profile_mut<'a>(profiles: &'a mut Vec<pty::Profile>, name: &str) -> &'a mut pty::Profile {
+    if let Some(i) = profiles.iter().position(|p| p.name == name) {
+        &mut profiles[i]
+    } else {
+        profiles.push(pty::Profile {
+            name: name.to_string(),
+            argv: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+        });
+        profiles.last_mut().unwrap()
+    }
 }
 
 /// the new-tab '+' dropdown rows: the three built-in shells then one per custom
@@ -416,7 +434,7 @@ fn new_tab_menu_entries() -> Vec<(String, ShellKind)> {
         ("cmd".to_string(), ShellKind::Cmd),
         ("wsl".to_string(), ShellKind::Wsl),
     ];
-    rows.extend(pty::profiles().iter().map(|(name, _)| (name.clone(), ShellKind::Custom(name.as_str()))));
+    rows.extend(pty::profiles().iter().map(|p| (p.name.clone(), ShellKind::Custom(p.name.as_str()))));
     rows
 }
 
@@ -1034,9 +1052,9 @@ fn jumplist_entries() -> Vec<(String, String)> {
     for label in ["pwsh", "cmd", "wsl"] {
         v.push((format!("new window: {label}"), format!("--shell {label}")));
     }
-    for (name, _) in pty::profiles() {
-        if !name.contains('"') {
-            v.push((format!("new window: {name}"), format!("--shell \"{name}\"")));
+    for prof in pty::profiles() {
+        if !prof.name.contains('"') {
+            v.push((format!("new window: {}", prof.name), format!("--shell \"{}\"", prof.name)));
         }
     }
     v
@@ -2035,10 +2053,11 @@ struct Persisted {
     /// win11 mica backdrop behind the window (`acrylic=true`, alias `mica`);
     /// off by default, visible only when opacity is below 100
     acrylic: bool,
-    /// custom shell profiles (`profile.<name>=<command line>`), kept both raw
-    /// (so save_config re-emits the user's exact lines) and parsed as argv
+    /// custom shell profiles, kept both raw as (`profile.` sub-key, value) so
+    /// save_config re-emits every line the user wrote, and parsed into Profiles
+    /// (argv plus optional .cwd / .env.<VAR> sub-keys)
     profiles_raw: Vec<(String, String)>,
-    profiles: Vec<(String, Vec<String>)>,
+    profiles: Vec<pty::Profile>,
     /// per-profile themes (`theme.<shell-or-profile>=<theme name>`): panes
     /// spawned as that shell/profile paint with that theme's palette while
     /// the window chrome keeps the global theme
@@ -2581,13 +2600,32 @@ fn parse_persisted(text: &str) -> Persisted {
                     } else {
                         log::warn!("config: per-profile theme line `{other}` needs a name and a theme");
                     }
-                } else if let Some(name) = other.strip_prefix("profile.") {
-                    let argv = split_cmdline(v);
-                    if !name.is_empty() && !argv.is_empty() {
-                        p.profiles_raw.push((name.to_string(), v.to_string()));
-                        p.profiles.push((name.to_string(), argv));
+                } else if let Some(rest) = other.strip_prefix("profile.") {
+                    // profile.<name>=<argv>, profile.<name>.cwd=<dir>,
+                    // profile.<name>.env.<VAR>=<value>; sub-keys attach to the
+                    // profile of that name whatever order the lines appear in
+                    if let Some(name) = rest.strip_suffix(".cwd") {
+                        if !name.is_empty() && !v.is_empty() {
+                            profile_mut(&mut p.profiles, name).cwd = Some(v.to_string());
+                            p.profiles_raw.push((rest.to_string(), v.to_string()));
+                        } else {
+                            log::warn!("config: profile line `{other}` needs a name and a directory");
+                        }
+                    } else if let Some((name, var)) = rest.split_once(".env.") {
+                        if !name.is_empty() && !var.is_empty() {
+                            profile_mut(&mut p.profiles, name).env.push((var.to_string(), v.to_string()));
+                            p.profiles_raw.push((rest.to_string(), v.to_string()));
+                        } else {
+                            log::warn!("config: profile env line `{other}` needs a name and a variable");
+                        }
                     } else {
-                        log::warn!("config: profile line `{other}` needs a name and a command");
+                        let argv = split_cmdline(v);
+                        if !rest.is_empty() && !argv.is_empty() {
+                            profile_mut(&mut p.profiles, rest).argv = argv;
+                            p.profiles_raw.push((rest.to_string(), v.to_string()));
+                        } else {
+                            log::warn!("config: profile line `{other}` needs a name and a command");
+                        }
                     }
                 } else {
                     // a typo used to be discarded with zero feedback
@@ -2596,6 +2634,9 @@ fn parse_persisted(text: &str) -> Persisted {
             }
         }
     }
+    // a .cwd / .env line for a profile with no command line leaves an argv-less
+    // entry — drop it so it never reaches the spawn path
+    p.profiles.retain(|pr| !pr.argv.is_empty());
     p
 }
 
@@ -8976,22 +9017,55 @@ mod tests {
         assert!(split_cmdline("   ").is_empty());
     }
 
+    fn prof(name: &str, argv: &[&str]) -> pty::Profile {
+        pty::Profile {
+            name: name.to_string(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            env: Vec::new(),
+        }
+    }
+
     #[test]
     fn config_parses_custom_profiles() {
         let p = parse_persisted(
             "profile.git-bash=\"C:\\Git\\bin\\bash.exe\" -i -l\nprofile.nu=nu.exe\nprofile.=broken\nprofile.empty=\n",
         );
         assert_eq!(p.profiles.len(), 2);
-        assert_eq!(p.profiles[0].0, "git-bash");
-        assert_eq!(p.profiles[0].1, ["C:\\Git\\bin\\bash.exe", "-i", "-l"]);
-        assert_eq!(p.profiles[1], ("nu".to_string(), vec!["nu.exe".to_string()]));
+        assert_eq!(p.profiles[0].name, "git-bash");
+        assert_eq!(p.profiles[0].argv, ["C:\\Git\\bin\\bash.exe", "-i", "-l"]);
+        assert_eq!(p.profiles[1].name, "nu");
+        assert_eq!(p.profiles[1].argv, ["nu.exe"]);
         // the raw lines round-trip for save_config
         assert_eq!(p.profiles_raw[1], ("nu".to_string(), "nu.exe".to_string()));
     }
 
     #[test]
+    fn config_parses_profile_cwd_and_env() {
+        let p = parse_persisted(
+            "profile.dev=pwsh.exe\nprofile.dev.cwd=C:\\repo\nprofile.dev.env.RUST_LOG=debug\nprofile.dev.env.API=1\n",
+        );
+        assert_eq!(p.profiles.len(), 1);
+        let dev = &p.profiles[0];
+        assert_eq!(dev.argv, ["pwsh.exe"]);
+        assert_eq!(dev.cwd.as_deref(), Some("C:\\repo"));
+        assert_eq!(
+            dev.env,
+            [("RUST_LOG".to_string(), "debug".to_string()), ("API".to_string(), "1".to_string())]
+        );
+        // sub-keys attach in any line order; an orphaned sub-key (no command
+        // line) leaves no profile but the raw line still round-trips
+        let q = parse_persisted("profile.x.cwd=C:\\a\nprofile.x=cmd.exe\nprofile.orphan.env.FOO=bar\n");
+        assert_eq!(q.profiles.len(), 1);
+        assert_eq!(q.profiles[0].name, "x");
+        assert_eq!(q.profiles[0].cwd.as_deref(), Some("C:\\a"));
+        assert!(q.profiles_raw.iter().any(|(k, v)| k == "x.cwd" && v == "C:\\a"));
+        assert!(q.profiles_raw.iter().any(|(k, v)| k == "orphan.env.FOO" && v == "bar"));
+    }
+
+    #[test]
     fn wsl_distros_become_synthetic_profiles() {
-        let base = vec![("nu".to_string(), vec!["nu.exe".to_string()])];
+        let base = vec![prof("nu", &["nu.exe"])];
         let merged = with_wsl_profiles(
             base,
             vec!["Ubuntu".to_string(), "Arch".to_string(), "Ubuntu 22.04 LTS".to_string()],
@@ -8999,24 +9073,22 @@ mod tests {
         // config profiles keep their slot; every distro appends unconditionally
         // as wsl.exe -d <name>, and a name with spaces round-trips as one argv
         assert_eq!(merged.len(), 4);
-        assert_eq!(merged[0].0, "nu");
-        assert_eq!(merged[1].0, "wsl: Ubuntu");
-        assert_eq!(merged[1].1, ["wsl.exe", "-d", "Ubuntu"]);
-        assert_eq!(
-            merged[2],
-            ("wsl: Arch".to_string(), vec!["wsl.exe".to_string(), "-d".to_string(), "Arch".to_string()])
-        );
-        assert_eq!(merged[3].0, "wsl: Ubuntu 22.04 LTS");
-        assert_eq!(merged[3].1, ["wsl.exe", "-d", "Ubuntu 22.04 LTS"]);
+        assert_eq!(merged[0].name, "nu");
+        assert_eq!(merged[1].name, "wsl: Ubuntu");
+        assert_eq!(merged[1].argv, ["wsl.exe", "-d", "Ubuntu"]);
+        assert_eq!(merged[2].name, "wsl: Arch");
+        assert_eq!(merged[2].argv, ["wsl.exe", "-d", "Arch"]);
+        assert_eq!(merged[3].name, "wsl: Ubuntu 22.04 LTS");
+        assert_eq!(merged[3].argv, ["wsl.exe", "-d", "Ubuntu 22.04 LTS"]);
     }
 
     #[test]
     fn wsl_synthetic_profile_yields_to_a_user_profile_of_the_same_name() {
-        let base = vec![("wsl: Ubuntu".to_string(), vec!["custom.exe".to_string()])];
+        let base = vec![prof("wsl: Ubuntu", &["custom.exe"])];
         let merged = with_wsl_profiles(base, vec!["Ubuntu".to_string()]);
         // the user's own definition wins; no duplicate synthetic entry is added
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].1, ["custom.exe"]);
+        assert_eq!(merged[0].argv, ["custom.exe"]);
     }
 
     #[test]

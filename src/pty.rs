@@ -64,24 +64,37 @@ impl ShellKind {
             "wsl" => ShellKind::Wsl,
             // a session snapshot or config may name a custom profile; unknown
             // names (a profile since removed from config) fall back to auto
-            other => match profiles().iter().find(|(name, _)| name == other) {
-                Some((name, _)) => ShellKind::Custom(name.as_str()),
+            other => match profiles().iter().find(|p| p.name == other) {
+                Some(p) => ShellKind::Custom(p.name.as_str()),
                 None => ShellKind::Auto,
             },
         }
     }
 }
 
-/// config-defined custom shell profiles as (name, argv), set once at startup
-static PROFILES: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
+/// a config-defined custom shell profile: `profile.<name>=<argv>`, plus the
+/// optional `profile.<name>.cwd=<dir>` and `profile.<name>.env.<VAR>=<value>`
+/// sub-keys
+#[derive(Clone)]
+pub struct Profile {
+    pub name: String,
+    pub argv: Vec<String>,
+    /// working dir the profile launches in, overriding the caller's cwd
+    pub cwd: Option<String>,
+    /// extra environment variables layered on top of the spawn defaults
+    pub env: Vec<(String, String)>,
+}
+
+/// config-defined custom shell profiles, set once at startup
+static PROFILES: std::sync::OnceLock<Vec<Profile>> = std::sync::OnceLock::new();
 
 /// install the custom profiles parsed from config. only the first call takes
 /// effect — the registry hands out 'static borrows, so it can never mutate
-pub fn set_profiles(profiles: Vec<(String, Vec<String>)>) {
+pub fn set_profiles(profiles: Vec<Profile>) {
     let _ = PROFILES.set(profiles);
 }
 
-pub fn profiles() -> &'static [(String, Vec<String>)] {
+pub fn profiles() -> &'static [Profile] {
     PROFILES.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
@@ -130,14 +143,19 @@ impl Pty {
             pixel_height: pixel_height.saturating_mul(rows),
         })?;
 
-        // a custom profile is its own argv: route it through the explicit-command
-        // path below so user-written arguments never mix with hook injection
+        // a custom profile carries its own argv (routed through the explicit-
+        // command path below so user args never mix with hook injection), plus
+        // an optional working dir and extra env applied further down
+        let profile = match shell {
+            ShellKind::Custom(name) => profiles().iter().find(|p| p.name == name),
+            _ => None,
+        };
         let command = match (shell, command) {
-            (ShellKind::Custom(name), None) => {
-                profiles().iter().find(|(n, _)| n == name).map(|(_, argv)| argv.as_slice())
-            }
+            (ShellKind::Custom(_), None) => profile.map(|p| p.argv.as_slice()),
             _ => command,
         };
+        // a profile's cwd pins its launch dir over whatever the caller passed
+        let cwd = profile.and_then(|p| p.cwd.as_deref()).or(cwd);
         // an explicit command (from the cli or a context-menu verb) runs directly
         // instead of a login shell, so none of the shell banner/prompt-hook
         // injection applies; otherwise launch the configured shell
@@ -215,6 +233,12 @@ impl Pty {
         cmd.env("POWERSHELL_TELEMETRY_OPTOUT", "1");
         cmd.env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
         cmd.env("DOTNET_NOLOGO", "1");
+        // a profile's env vars go on last so it can override any default above
+        if let Some(p) = profile {
+            for (k, val) in &p.env {
+                cmd.env(k, val);
+            }
+        }
 
         let child = pair.slave.spawn_command(cmd)?;
         // close the slave side in the parent so EOF propagates on child exit
@@ -627,8 +651,13 @@ mod tests {
     #[test]
     fn custom_profiles_round_trip_labels() {
         set_profiles(vec![
-            ("git-bash".to_string(), vec!["C:\\Git\\bin\\bash.exe".to_string(), "-i".to_string()]),
-            ("nu".to_string(), vec!["nu.exe".to_string()]),
+            Profile {
+                name: "git-bash".to_string(),
+                argv: vec!["C:\\Git\\bin\\bash.exe".to_string(), "-i".to_string()],
+                cwd: None,
+                env: Vec::new(),
+            },
+            Profile { name: "nu".to_string(), argv: vec!["nu.exe".to_string()], cwd: None, env: Vec::new() },
         ]);
         assert_eq!(profiles().len(), 2);
         let k = ShellKind::from_label("git-bash");
