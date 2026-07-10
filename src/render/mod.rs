@@ -103,6 +103,8 @@ pub enum Hot {
     CursorCycle,
     CursorBlink,
     ThemeSet(ThemeId),
+    /// follow the windows light/dark setting (theme=auto)
+    ThemeAuto,
     ScrollbackDec,
     ScrollbackInc,
     CopyOnSelect,
@@ -256,6 +258,8 @@ pub struct SettingsView {
     pub scrollback: usize,
     pub copy_on_select: bool,
     pub load_profile: bool,
+    /// theme=auto: the trailing chip is lit and the theme follows the OS
+    pub theme_auto: bool,
     pub shell_name: &'static str,
     pub close_action_name: &'static str,
     pub backend_name: &'static str,
@@ -267,6 +271,7 @@ impl Default for SettingsView {
             scrollback: 10_000,
             copy_on_select: false,
             load_profile: false,
+            theme_auto: false,
             shell_name: "auto",
             close_action_name: "quit",
             backend_name: "auto",
@@ -394,7 +399,8 @@ struct SettingsGeom {
     op_inc: Rect,
     cursor_btn: Rect,
     blink_btn: Rect,
-    theme_chips: [Rect; crate::color::ThemeId::ALL.len()],
+    // one extra slot: the trailing chip is the follow-the-OS "auto" toggle
+    theme_chips: [Rect; crate::color::ThemeId::ALL.len() + 1],
     sb_dec: Rect,
     sb_inc: Rect,
     copysel_btn: Rect,
@@ -2136,7 +2142,7 @@ impl Renderer {
 
         let chip_gap = 8.0 * s;
         let chip_w = ((content_w - chip_gap * 3.0) / 4.0).floor();
-        let mut theme_chips = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); ThemeId::ALL.len()];
+        let mut theme_chips = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); ThemeId::ALL.len() + 1];
         for (i, chip) in theme_chips.iter_mut().enumerate() {
             let col = (i % 4) as f32;
             let row_i = (i / 4) as f32;
@@ -2173,6 +2179,7 @@ impl Renderer {
         for (i, id) in ThemeId::ALL.into_iter().enumerate() {
             controls.push((Hot::ThemeSet(id), theme_chips[i]));
         }
+        controls.push((Hot::ThemeAuto, theme_chips[ThemeId::ALL.len()]));
 
         SettingsGeom {
             panel_x,
@@ -3576,8 +3583,9 @@ impl Renderer {
         self.toggle_btn(out, g.blink_btn, blink, Hot::CursorBlink, track);
         let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, cx, lbl(g.theme_label_y), "THEME", MUTE, 1.0, wide);
         for (i, id) in ThemeId::ALL.into_iter().enumerate() {
-            self.theme_chip(out, g.theme_chips[i], id, theme == id, track);
+            self.theme_chip(out, g.theme_chips[i], id, theme == id && !sv.theme_auto, track);
         }
+        self.auto_chip(out, g.theme_chips[ThemeId::ALL.len()], sv.theme_auto, track);
 
         // BEHAVIOR
         self.section_label(out, cx, g.sec_beh_y, cw, "BEHAVIOR", wide, RULE_2, MUTE);
@@ -4248,6 +4256,47 @@ impl Renderer {
 
     /// a theme chip: name on top + a live swatch strip of that theme's palette,
     /// filled when active, outlined otherwise, lit on hover
+    /// the trailing chip in the theme grid: follow the windows light/dark
+    /// setting. same frame as a theme chip, but the swatch strip shows a
+    /// dark half and a light half instead of one palette
+    fn auto_chip(&mut self, out: &mut Vec<Instance>, rect: (f32, f32, f32, f32), active: bool, track: f32) {
+        let s = self.scale;
+        let cw = self.atlas.metrics(FontId::Chrome).cell_w;
+        let (bx, by, bw, bh) = rect;
+        let hov = self.hovered == Some(Hot::ThemeAuto);
+        let he = if hov { self.hover_ease() } else { 0.0 };
+        if active {
+            Self::push_rect(out, bx, by, bw, bh, self.palette.paper, 1.0);
+        } else {
+            Self::stroke_rect(out, (bx, by, bw, bh), 1.0, self.palette.rule2);
+            if he > 0.0 {
+                Self::push_rect(out, bx, by, bw, bh, self.palette.ink4, he);
+            }
+        }
+        let name = "auto";
+        let maxc = (((bw - 8.0 * s) / (cw + track)).floor().max(1.0)) as usize;
+        let t: String = name.chars().take(maxc).collect();
+        let tw = self.text_w(FontId::Chrome, &t, track);
+        let col = if active {
+            self.palette.ink0
+        } else {
+            self.palette.text2.lerp(self.palette.paper, he)
+        };
+        let _ = Self::draw_text(&mut self.atlas, out, FontId::Chrome, bx + (bw - tw) / 2.0, (by + 6.0 * s).round(), &t, col, 1.0, track);
+        // half-and-half swatch: the dark default's bg beside the light one's
+        let dark = Palette::from_theme(ThemeId::Instrument);
+        let light = Palette::from_theme(ThemeId::Paper);
+        let gap = 3.0 * s;
+        let inset = 9.0 * s;
+        let strip_w = (bw - inset * 2.0).max(1.0);
+        let half_w = ((strip_w - gap) / 2.0).max(1.0);
+        let sh = 11.0 * s;
+        let sy = by + bh - sh - 6.0 * s;
+        Self::push_rect(out, bx + inset, sy, half_w, sh, dark.bg, 1.0);
+        Self::push_rect(out, bx + inset + half_w + gap, sy, half_w, sh, light.bg, 1.0);
+        Self::stroke_rect(out, (bx + inset, sy, strip_w, sh), 1.0, self.palette.rule2);
+    }
+
     fn theme_chip(&mut self, out: &mut Vec<Instance>, rect: (f32, f32, f32, f32), id: ThemeId, active: bool, track: f32) {
         let s = self.scale;
         let cw = self.atlas.metrics(FontId::Chrome).cell_w;

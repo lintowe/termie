@@ -1676,6 +1676,11 @@ struct Persisted {
     bold_as_bright: bool,
     line_height: f32,
     theme: color::ThemeId,
+    /// `theme=auto`: follow the windows light/dark setting, resolving to
+    /// theme_dark / theme_light (which only matter while auto is on)
+    theme_auto: bool,
+    theme_dark: color::ThemeId,
+    theme_light: color::ThemeId,
     font: Option<String>,
     opacity: i32,
     quake_key: Option<(u32, u32)>,
@@ -1729,6 +1734,9 @@ impl Default for Persisted {
             bold_as_bright: true,
             line_height: 1.32,
             theme: color::ThemeId::Instrument,
+            theme_auto: false,
+            theme_dark: color::ThemeId::Instrument,
+            theme_light: color::ThemeId::Paper,
             font: None,
             opacity: 85,
             quake_key: None,
@@ -1820,6 +1828,7 @@ fn is_settings_hot(h: Hot) -> bool {
             | Hot::CursorCycle
             | Hot::CursorBlink
             | Hot::ThemeSet(_)
+            | Hot::ThemeAuto
             | Hot::ScrollbackDec
             | Hot::ScrollbackInc
             | Hot::CopyOnSelect
@@ -2181,7 +2190,16 @@ fn parse_persisted(text: &str) -> Persisted {
                     p.line_height = x;
                 }
             }
-            "theme" => p.theme = color::ThemeId::from_name(v),
+            "theme" => {
+                if v.eq_ignore_ascii_case("auto") {
+                    p.theme_auto = true;
+                } else {
+                    p.theme = color::ThemeId::from_name(v);
+                    p.theme_auto = false;
+                }
+            }
+            "theme_dark" => p.theme_dark = color::ThemeId::from_name(v),
+            "theme_light" => p.theme_light = color::ThemeId::from_name(v),
             "font" => {
                 if !v.is_empty() {
                     p.font = Some(v.to_string());
@@ -2580,10 +2598,11 @@ impl App {
         self.pw.renderer = Some(renderer);
 
         // apply persisted renderer-owned settings before sizing the first pane
+        let boot_theme = self.resolved_theme();
         {
             let p = &self.persisted;
             if let Some(r) = self.pw.renderer.as_mut() {
-                r.set_theme(p.theme);
+                r.set_theme(boot_theme);
                 r.set_color_overrides(load_color_overrides());
                 r.set_cursor_style(p.cursor);
                 r.set_cursor_blink(p.cursor_blink);
@@ -3637,6 +3656,7 @@ impl App {
                 scrollback: config.scrollback,
                 copy_on_select: config.copy_on_select,
                 load_profile: config.load_profile,
+                theme_auto: self.persisted.theme_auto,
                 shell_name: config.shell.label(),
                 close_action_name: config.close_action.label(),
                 backend_name: config.backend.label(),
@@ -4251,8 +4271,12 @@ impl App {
             }
             PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {
+                self.persisted.theme_auto = false;
                 if let Some(r) = self.pw.renderer.as_mut() {
                     r.cycle_theme();
+                }
+                if let Some(r) = self.main_pw().renderer.as_ref() {
+                    self.persisted.theme = r.theme();
                 }
                 self.redraw();
                 self.save_config();
@@ -4802,10 +4826,17 @@ impl App {
             Hot::Gear => self.toggle_settings(),
             Hot::PanelClose => self.close_settings(),
             Hot::ThemeSet(id) => {
+                // picking a concrete theme turns follow-the-OS off
+                self.persisted.theme_auto = false;
+                self.persisted.theme = id;
                 if let Some(r) = self.pw.renderer.as_mut() {
                     r.set_theme(id);
                 }
                 self.redraw();
+            }
+            Hot::ThemeAuto => {
+                self.persisted.theme_auto = true;
+                self.apply_os_theme();
             }
             Hot::SplitV => self.split_focused(Dir::Vertical),
             Hot::SplitH => self.split_focused(Dir::Horizontal),
@@ -4912,6 +4943,40 @@ impl App {
     }
 
     /// write every setting (App-owned + renderer-owned) to the config file
+    /// the theme to paint with right now: the configured one, or under
+    /// `theme=auto` whichever of theme_dark/theme_light matches the OS mode
+    fn resolved_theme(&self) -> color::ThemeId {
+        if !self.persisted.theme_auto {
+            return self.persisted.theme;
+        }
+        let dark = self
+            .main_pw()
+            .window
+            .as_ref()
+            .and_then(|w| w.theme())
+            .map(|t| t == winit::window::Theme::Dark)
+            .unwrap_or(true);
+        if dark { self.persisted.theme_dark } else { self.persisted.theme_light }
+    }
+
+    /// re-resolve and apply the auto theme on every window (called on the OS
+    /// light/dark switch and when auto is turned on)
+    fn apply_os_theme(&mut self) {
+        let theme = self.resolved_theme();
+        if let Some(r) = self.pw.renderer.as_mut() {
+            r.set_theme(theme);
+        }
+        for sat in &mut self.satellites {
+            if let Some(r) = sat.renderer.as_mut() {
+                r.set_theme(theme);
+            }
+            if let Some(w) = sat.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+        self.redraw();
+    }
+
     fn save_config(&self) {
         use std::fmt::Write as _;
         // never persist a partial file: renderer-owned keys would be dropped and
@@ -4941,7 +5006,17 @@ impl App {
         let _ = writeln!(s, "cursor_blink={}", r.cursor_blink());
         let _ = writeln!(s, "bold_as_bright={}", r.bold_as_bright());
         let _ = writeln!(s, "line_height={}", r.line_height());
-        let _ = writeln!(s, "theme={}", r.theme().name());
+        if self.persisted.theme_auto {
+            let _ = writeln!(s, "theme=auto");
+        } else {
+            let _ = writeln!(s, "theme={}", r.theme().name());
+        }
+        if self.persisted.theme_dark != color::ThemeId::Instrument {
+            let _ = writeln!(s, "theme_dark={}", self.persisted.theme_dark.name());
+        }
+        if self.persisted.theme_light != color::ThemeId::Paper {
+            let _ = writeln!(s, "theme_light={}", self.persisted.theme_light.name());
+        }
         let _ = writeln!(s, "font={}", r.font_name());
         if let Some(q) = &self.persisted.quake_key_raw {
             // an opt-in the panel can't edit; dropping it here silently killed
@@ -5372,7 +5447,7 @@ impl App {
         };
         let renderer = match render::Renderer::new(window.clone(), CONTENT_PT, CHROME_PT, self.config.backend) {
             Ok(mut r) => {
-                r.set_theme(self.persisted.theme);
+                r.set_theme(self.resolved_theme());
                 r
             }
             Err(_) => {
@@ -5549,6 +5624,13 @@ impl App {
                     }
                 }
                 self.paint();
+            }
+            WindowEvent::ThemeChanged(_) => {
+                // the windows light/dark setting flipped; under theme=auto
+                // every window re-resolves and repaints
+                if self.persisted.theme_auto {
+                    self.apply_os_theme();
+                }
             }
             WindowEvent::Focused(f) => {
                 self.pw.focused = f;
@@ -7183,6 +7265,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match event {
             WindowEvent::CloseRequested => self.request_quit(event_loop),
+            WindowEvent::ThemeChanged(_) => {
+                // the windows light/dark setting flipped; under theme=auto
+                // every window re-resolves and repaints
+                if self.persisted.theme_auto {
+                    self.apply_os_theme();
+                }
+            }
             WindowEvent::Focused(f) => {
                 self.pw.focused = f;
                 // losing focus mid-composition must clear the IME flag, or a
@@ -7921,6 +8010,18 @@ mod tests {
                 ("git-bash".to_string(), color::ThemeId::Gruvbox)
             ]
         );
+    }
+
+    #[test]
+    fn config_parses_theme_auto() {
+        let p = parse_persisted("theme=auto\ntheme_dark=nord\ntheme_light=paper\n");
+        assert!(p.theme_auto);
+        assert_eq!(p.theme_dark, color::ThemeId::Nord);
+        assert_eq!(p.theme_light, color::ThemeId::Paper);
+        // a concrete theme after auto wins and turns auto off (last line rules)
+        let p = parse_persisted("theme=auto\ntheme=koi\n");
+        assert!(!p.theme_auto);
+        assert_eq!(p.theme, color::ThemeId::Koi);
     }
 
     #[test]
