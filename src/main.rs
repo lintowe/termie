@@ -388,6 +388,18 @@ fn all_palette_actions() -> &'static [(&'static str, PaletteAction)] {
     })
 }
 
+/// the new-tab '+' dropdown rows: the three built-in shells then one per custom
+/// profile, as (menu label, shell to spawn). the ordering is the click index
+fn new_tab_menu_entries() -> Vec<(String, ShellKind)> {
+    let mut rows = vec![
+        ("pwsh".to_string(), ShellKind::Pwsh),
+        ("cmd".to_string(), ShellKind::Cmd),
+        ("wsl".to_string(), ShellKind::Wsl),
+    ];
+    rows.extend(pty::profiles().iter().map(|(name, _)| (name.clone(), ShellKind::Custom(name.as_str()))));
+    rows
+}
+
 fn palette_filter(query: &str) -> Vec<(&'static str, PaletteAction)> {
     if query.trim().is_empty() {
         return all_palette_actions().to_vec();
@@ -413,11 +425,13 @@ struct PaneMenu {
     target: MenuTarget,
 }
 
-/// which surface a context menu acts on: the focused pane, or the tab at this index
+/// which surface a context menu acts on: the focused pane, the tab at this
+/// index, or the new-tab '+' (whose items are shell profiles)
 #[derive(Clone, Copy)]
 enum MenuTarget {
     Pane,
     Tab(usize),
+    NewTab,
 }
 
 /// find-in-scrollback overlay state for the focused pane; matches are
@@ -3859,9 +3873,10 @@ impl App {
         let settings_open = self.pw.settings_open;
         let settings_p = self.settings_p();
         let pane_menu_view = self.pw.pane_menu.as_ref().map(|m| {
-            let items: &'static [&'static str] = match m.target {
-                MenuTarget::Pane => &render::PANE_MENU_ITEMS,
-                MenuTarget::Tab(_) => &render::TAB_MENU_ITEMS,
+            let items: Vec<String> = match m.target {
+                MenuTarget::Pane => render::PANE_MENU_ITEMS.iter().map(|s| s.to_string()).collect(),
+                MenuTarget::Tab(_) => render::TAB_MENU_ITEMS.iter().map(|s| s.to_string()).collect(),
+                MenuTarget::NewTab => new_tab_menu_entries().into_iter().map(|(l, _)| l).collect(),
             };
             render::PaneMenuView { x: m.x, y: m.y, hovered: m.hovered, items }
         });
@@ -5133,6 +5148,7 @@ impl App {
             Hot::SplitH => self.split_focused(Dir::Horizontal),
             Hot::PaneMode => self.set_pane_mode(!self.pw.pane_mode),
             Hot::NewTab => self.new_tab(),
+            Hot::NewTabMenu => self.open_newtab_menu(),
             Hot::Tab(i) => self.switch_tab(i),
             Hot::TabClose(i) => self.close_tab(i, event_loop),
             Hot::FontDec | Hot::FontInc => {
@@ -5688,6 +5704,16 @@ impl App {
         self.redraw();
     }
 
+    /// open the new-tab profile menu as a dropdown anchored under the '+' button
+    fn open_newtab_menu(&mut self) {
+        let Some((nx, ny, _nw, nh)) = self.pw.renderer.as_ref().map(|r| r.newtab_rect()) else {
+            return;
+        };
+        self.pw.pane_menu =
+            Some(PaneMenu { x: nx, y: ny + nh, hovered: None, target: MenuTarget::NewTab });
+        self.redraw();
+    }
+
     /// run a context-menu item. pane items index render::PANE_MENU_ITEMS
     /// (0 copy, 1 split vertical, 2 split horizontal, 3 pop out, 4 close pane,
     /// 5 paste; copy no-ops with no selection); tab items index TAB_MENU_ITEMS
@@ -5729,6 +5755,12 @@ impl App {
                 5 => self.close_others(i),
                 _ => {}
             },
+            MenuTarget::NewTab => {
+                if let Some((_, shell)) = new_tab_menu_entries().into_iter().nth(idx) {
+                    let cwd = self.focused_cwd();
+                    self.new_tab_cwd(cwd, Some(shell));
+                }
+            }
         }
     }
 
@@ -6429,6 +6461,9 @@ impl App {
                         });
                         self.redraw();
                     }
+                    // right-clicking the '+' (or its chevron) opens the same
+                    // profile dropdown the chevron does
+                    Some(Hit::Button(Hot::NewTab | Hot::NewTabMenu)) => self.open_newtab_menu(),
                     _ => {}
                 }
             }

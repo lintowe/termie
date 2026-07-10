@@ -89,6 +89,8 @@ pub enum Hot {
     SplitH,
     PaneMode,
     NewTab,
+    /// the chevron next to '+' that opens the new-tab profile menu
+    NewTabMenu,
     Tab(usize),
     TabClose(usize),
     PanelClose,
@@ -150,13 +152,14 @@ pub struct PaletteView {
 }
 
 /// right-click context menu: a small overlay at (x, y) listing `items`. the
-/// clicked item index maps to a fixed action in main.rs's handler, keyed to the
-/// menu's target (pane or tab)
+/// clicked item index maps to an action in main.rs's handler, keyed to the
+/// menu's target (pane, tab, or new-tab profiles). items are owned because the
+/// new-tab menu's profile labels are built at runtime
 pub struct PaneMenuView {
     pub x: f32,
     pub y: f32,
     pub hovered: Option<usize>,
-    pub items: &'static [&'static str],
+    pub items: Vec<String>,
 }
 
 pub const PANE_MENU_ITEMS: [&str; 6] =
@@ -440,6 +443,8 @@ struct TabLayout {
     /// (session index, tab rect, close-icon rect)
     tabs: Vec<TabEntry>,
     newtab: (f32, f32, f32, f32),
+    /// the profile-menu chevron, flush against the right edge of `newtab`
+    newtab_menu: (f32, f32, f32, f32),
 }
 
 fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
@@ -2007,11 +2012,13 @@ impl Renderer {
         let h = self.title_bar_h;
         let cw = (46.0 * s).round();
         let newtab_w = (40.0 * s).round();
+        let chev_w = (16.0 * s).round();
         let start = self.tabs_start_x();
         // reserve all 7 title-bar control buttons (control_rects starts at w-7cw,
-        // the SplitV slot) so the new-tab '+' never overruns the split icon
+        // the SplitV slot) so the new-tab '+' and its chevron never overrun the
+        // split icon
         let controls_start = self.config.width as f32 - cw * 7.0;
-        let avail = (controls_start - start - newtab_w - 4.0 * s).max(0.0);
+        let avail = (controls_start - start - newtab_w - chev_w - 4.0 * s).max(0.0);
         let n = self.tabs.len();
 
         let mut tabs = Vec::new();
@@ -2036,7 +2043,13 @@ impl Renderer {
         TabLayout {
             tabs,
             newtab: (newtab_x, 0.0, newtab_w, h),
+            newtab_menu: (newtab_x + newtab_w, 0.0, chev_w, h),
         }
+    }
+
+    /// the new-tab '+' button rect, so the profile menu can anchor under it
+    pub fn newtab_rect(&self) -> (f32, f32, f32, f32) {
+        self.tab_layout().newtab
     }
 
     /// single-column geometry for the slide-in settings panel. body baselines
@@ -2315,6 +2328,9 @@ impl Renderer {
             let tl = self.tab_layout();
             if in_rect(x, y, tl.newtab) {
                 return Hit::Button(Hot::NewTab);
+            }
+            if in_rect(x, y, tl.newtab_menu) {
+                return Hit::Button(Hot::NewTabMenu);
             }
             for (i, rect, close) in &tl.tabs {
                 if in_rect(x, y, *close) {
@@ -3174,6 +3190,8 @@ impl Renderer {
                 .collect();
         let newtab_rect = tl.newtab;
         let newtab_hover = self.hovered == Some(Hot::NewTab);
+        let newtab_menu_rect = tl.newtab_menu;
+        let newtab_menu_hover = self.hovered == Some(Hot::NewTabMenu);
         let he = self.hover_ease();
 
         for (_, rect, close, label, active, hov, close_hov, attn) in &tab_items {
@@ -3250,7 +3268,9 @@ impl Renderer {
             Self::push_rect(&mut out, ux, self.title_bar_h - hair * 2.0, uw, hair * 2.0, PAPER, 1.0);
         }
 
-        // new-tab button (nerd-font plus)
+        // new-tab button (nerd-font plus) and its profile-menu chevron; the two
+        // hover apart so the '+' keeps opening a default tab while the chevron
+        // drops the shell list
         {
             let (nx, _ny, nw, _nh) = newtab_rect;
             if newtab_hover {
@@ -3260,6 +3280,15 @@ impl Renderer {
             let ncol = if newtab_hover { TEXT_2 } else { MUTE };
             let _ = Self::draw_text(
                 &mut self.atlas, &mut out, FontId::Chrome, ngx, text_top, "\u{f067}", ncol, 1.0, track,
+            );
+            let (mx, _my, mw, _mh) = newtab_menu_rect;
+            if newtab_menu_hover {
+                Self::push_rect(&mut out, mx, hair, mw, self.title_bar_h - hair * 2.0, INK_3, he);
+            }
+            let mgx = (mx + (mw - cw_c) / 2.0).round();
+            let mcol = if newtab_menu_hover { TEXT_2 } else { MUTE };
+            let _ = Self::draw_text(
+                &mut self.atlas, &mut out, FontId::Chrome, mgx, text_top, "\u{f107}", mcol, 1.0, track,
             );
         }
 
@@ -3853,7 +3882,9 @@ impl Renderer {
         let Some(v) = self.pane_menu_view.as_ref() else {
             return;
         };
-        let (mx, my, hovered, items) = (v.x, v.y, v.hovered, v.items);
+        let (mx, my, hovered) = (v.x, v.y, v.hovered);
+        // owned so the pane_menu_view borrow ends before the atlas is drawn into
+        let items = v.items.clone();
         let (bx, by, mw, row_h, pad) = self.pane_menu_geom(mx, my, items.len());
         let INK_0 = self.palette.ink0;
         let INK_1 = self.palette.ink1;
@@ -5352,7 +5383,8 @@ mod hit_tests {
         r.set_tabs(vec!["a".into(), "b".into()], 0);
         // the tab menu carries a different item list than the pane menu; the
         // shared geometry must resolve each of its rows and reject the outside
-        r.set_pane_menu(Some(PaneMenuView { x: 60.0, y: 60.0, hovered: None, items: &TAB_MENU_ITEMS }));
+        let items: Vec<String> = TAB_MENU_ITEMS.iter().map(|s| s.to_string()).collect();
+        r.set_pane_menu(Some(PaneMenuView { x: 60.0, y: 60.0, hovered: None, items }));
         let (bx, by, mw, row_h, pad) = r.pane_menu_geom(60.0, 60.0, TAB_MENU_ITEMS.len());
         for i in 0..TAB_MENU_ITEMS.len() {
             let cy = by + pad + row_h * (i as f32 + 0.5);
@@ -5360,6 +5392,20 @@ mod hit_tests {
         }
         assert_eq!(r.pane_menu_item_at(bx + mw / 2.0, by), None);
         assert_eq!(r.pane_menu_item_at(2.0, 2.0), None);
+    }
+
+    #[test]
+    fn newtab_chevron_is_a_distinct_hit_zone() {
+        let Some(mut r) = headless() else {
+            return;
+        };
+        r.set_tabs(vec!["a".into()], 0);
+        let (nx, ny, nw, nh) = r.newtab_rect();
+        let my = ny + nh / 2.0;
+        // the '+' opens a default tab; the chevron flush against its right edge
+        // opens the profile menu, so the two must resolve to different hits
+        assert!(matches!(r.hit_test(nx + nw / 2.0, my), Hit::Button(Hot::NewTab)));
+        assert!(matches!(r.hit_test(nx + nw + 2.0, my), Hit::Button(Hot::NewTabMenu)));
     }
 
     #[test]

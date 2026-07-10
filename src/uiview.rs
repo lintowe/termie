@@ -57,7 +57,7 @@ pub fn maybe_run() -> bool {
                 x: 90.0,
                 y: 150.0,
                 hovered: Some(0),
-                items: &render::PANE_MENU_ITEMS,
+                items: render::PANE_MENU_ITEMS.iter().map(|s| s.to_string()).collect(),
             }));
             r.settle_overlay();
         }
