@@ -1877,7 +1877,9 @@ fn kitty_demo_bytes() -> Vec<u8> {
         }
     }
     let b64 = base64_encode(&px);
-    let mut out = Vec::new();
+    // caption first: the placement lands below it whatever ConPTY repaints do,
+    // so the words stay true on screen
+    let mut out = Vec::from(&b"kitty demo: the gradient below went through the real APC path\r\n"[..]);
     let mut pos = 0;
     while pos < b64.len() {
         let end = (pos + 4096).min(b64.len());
@@ -1891,9 +1893,7 @@ fn kitty_demo_bytes() -> Vec<u8> {
         out.extend_from_slice(b"\x1b\\");
         pos = end;
     }
-    out.extend_from_slice(
-        b"\r\nkitty demo: gradient above went through the real APC path\r\n",
-    );
+    out.extend_from_slice(b"\r\n");
     out
 }
 
@@ -9675,10 +9675,12 @@ mod tests {
             let dec = term::base64_decode(&enc).expect("valid base64");
             assert_eq!(dec, data);
         }
-        // the demo stream is well-formed: starts with the APC intro and every
-        // chunk terminates with ST
+        // the demo stream is well-formed: caption, then the APC intro, and
+        // every chunk terminates with ST
         let demo = kitty_demo_bytes();
-        assert!(demo.starts_with(b"\x1b_Ga=T,f=24,s=96,v=96,m=1;"));
+        assert!(demo.starts_with(b"kitty demo:"));
+        let intro = b"\x1b_Ga=T,f=24,s=96,v=96,m=1;";
+        assert!(demo.windows(intro.len()).any(|w| w == intro));
         assert!(demo.windows(2).filter(|w| w == b"\x1b\\").count() >= 2);
     }
 
