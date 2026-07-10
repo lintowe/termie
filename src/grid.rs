@@ -433,7 +433,10 @@ impl Grid {
     /// soft-wrapped runs are joined (same as copy), so a long URL that wrapped
     /// still matches; wide-glyph continuation cells (`\0`) are skipped
     pub fn search(&self, needle: &str) -> Vec<(usize, usize)> {
-        let needle: Vec<char> = needle.chars().map(|c| c.to_ascii_lowercase()).collect();
+        // simple one-to-one folding (first char of to_lowercase) so É matches é
+        // and Cyrillic/Greek fold too, while text[i] keeps mapping to one cell
+        let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
+        let needle: Vec<char> = needle.chars().map(fold).collect();
         let mut out = Vec::new();
         if needle.is_empty() {
             return out;
@@ -459,7 +462,7 @@ impl Grid {
                     if cell.c == '\0' {
                         continue;
                     }
-                    text.push(cell.c.to_ascii_lowercase());
+                    text.push(fold(cell.c));
                     map.push((gi, col));
                 }
                 if !line.wrapped || gi + 1 >= total {
@@ -2176,6 +2179,17 @@ mod tests {
         assert_eq!(g.search("WORLD"), vec![(0, 6)]);
         assert_eq!(g.search("lo wo"), vec![(0, 3)]);
         assert!(g.search("xyz").is_empty());
+    }
+
+    #[test]
+    fn search_folds_case_beyond_ascii() {
+        let mut g = Grid::new(3, 20);
+        for c in "CAFÉ Straße ЛОГ".chars() {
+            g.put_char(c);
+        }
+        assert_eq!(g.search("café"), vec![(0, 0)]);
+        assert_eq!(g.search("straße"), vec![(0, 5)]);
+        assert_eq!(g.search("лог"), vec![(0, 12)]);
     }
 
     #[test]
