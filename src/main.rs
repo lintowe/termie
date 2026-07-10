@@ -12,6 +12,7 @@ mod grid;
 mod input;
 mod plugin;
 mod pty;
+mod regex;
 mod render;
 mod session;
 mod sixel;
@@ -412,8 +413,11 @@ struct PaneMenu {
 /// (global_line_index, col) into that pane's grid
 struct FindState {
     query: String,
-    matches: Vec<(usize, usize)>,
+    /// (global line, col, match char length) — regex matches vary in length
+    matches: Vec<(usize, usize, usize)>,
     current: usize,
+    /// the query failed to compile as a regex (regex mode only)
+    bad: bool,
 }
 
 /// a pending modal confirmation: the action runs on enter, esc cancels
@@ -776,7 +780,7 @@ fn find_must_follow_focus(
 
 /// after a focus context change, replace the match list and snap the cursor to
 /// the first hit in the new grid (or stay at 0 when empty)
-fn find_after_grid_change(matches: Vec<(usize, usize)>) -> (Vec<(usize, usize)>, usize) {
+fn find_after_grid_change<T>(matches: Vec<T>) -> (Vec<T>, usize) {
     (matches, 0)
 }
 
@@ -2394,6 +2398,9 @@ struct App {
     taskbar_sent: (u8, u8),
     palette: Option<PaletteState>,
     find: Option<FindState>,
+    /// regex mode for the find bar; remembered across open/close (toggled by
+    /// the .* button or Alt+R while find is open)
+    find_regex: bool,
     /// accesskit adapter for the main window (screen-reader tree); None until boot
     a11y: Option<accesskit_winit::Adapter>,
     /// the plugins marketplace overlay, when open
@@ -2564,6 +2571,7 @@ impl App {
             taskbar_sent: (0, 0),
             palette: None,
             find: None,
+            find_regex: false,
             a11y: None,
             market: None,
             pressed: None,
@@ -3325,6 +3333,7 @@ impl App {
             query: seed,
             matches: Vec::new(),
             current: 0,
+            bad: false,
         });
         if seeded {
             self.find_recompute();
@@ -3333,20 +3342,33 @@ impl App {
     }
 
     /// re-run the search for the current query against the focused pane and jump
-    /// to the first match
+    /// to the first match. in regex mode a pattern that fails to compile shows
+    /// as "bad pattern" instead of silently matching nothing
     fn find_recompute(&mut self) {
         let query = match &self.find {
             Some(f) => f.query.clone(),
             None => return,
         };
-        let matches = self
-            .focused_grid()
-            .map(|g| g.search(&query))
-            .unwrap_or_default();
+        let mut bad = false;
+        let matches = if self.find_regex && !query.is_empty() {
+            match regex::Regex::compile(&query) {
+                Some(re) => self
+                    .focused_grid()
+                    .map(|g| g.search_regex(&re))
+                    .unwrap_or_default(),
+                None => {
+                    bad = true;
+                    Vec::new()
+                }
+            }
+        } else {
+            self.focused_grid().map(|g| g.search(&query)).unwrap_or_default()
+        };
         if let Some(f) = self.find.as_mut() {
             let (m, cur) = find_after_grid_change(matches);
             f.matches = m;
             f.current = cur;
+            f.bad = bad;
         }
         self.find_scroll_to_current();
         self.redraw();
@@ -3410,7 +3432,7 @@ impl App {
             .find
             .as_ref()
             .and_then(|f| f.matches.get(f.current).copied());
-        if let Some((g, _)) = target
+        if let Some((g, _, _)) = target
             && let Some(grid) = self.focused_grid_mut() {
                 grid.scroll_to_global(g);
             }
@@ -3437,13 +3459,12 @@ impl App {
     /// pane
     fn build_find_view(&self) -> Option<render::FindView> {
         let f = self.find.as_ref()?;
-        let qlen = f.query.chars().count();
         let mut vps = Vec::new();
-        if qlen > 0
+        if !f.query.is_empty()
             && let Some(g) = self.focused_grid() {
-                for (i, &(gl, col)) in f.matches.iter().enumerate() {
+                for (i, &(gl, col, len)) in f.matches.iter().enumerate() {
                     if let Some(vr) = g.global_to_viewport(gl) {
-                        vps.push((vr, col, qlen, i == f.current));
+                        vps.push((vr, col, len, i == f.current));
                     }
                 }
             }
@@ -3452,6 +3473,8 @@ impl App {
             count: f.matches.len(),
             current: f.current,
             matches: vps,
+            regex_on: self.find_regex,
+            bad: f.bad,
         })
     }
 
@@ -6221,15 +6244,19 @@ impl App {
                     }
                     return;
                 }
-                // find-bar buttons: prev / next / close (misses fall through
-                // so text can still be selected while find is open)
+                // find-bar buttons: regex toggle / prev / next / close (misses
+                // fall through so text can still be selected while find is open)
                 if self.find.is_some()
                     && state == ElementState::Pressed
                     && let Some(btn) = self.pw.renderer.as_ref().and_then(|r| r.find_btn_at(cx, cy))
                 {
                     match btn {
-                        0 => self.find_step(false),
-                        1 => self.find_step(true),
+                        0 => {
+                            self.find_regex = !self.find_regex;
+                            self.find_recompute();
+                        }
+                        1 => self.find_step(false),
+                        2 => self.find_step(true),
                         _ => {
                             self.find = None;
                             self.redraw();
@@ -6770,8 +6797,14 @@ impl App {
                     }
                     self.find_recompute();
                 }
+                // Alt+R mirrors the .* button (alt keeps plain 'r' typeable)
+                Key::Character(c) if self.mods.alt_key() && c.eq_ignore_ascii_case("r") => {
+                    self.find_regex = !self.find_regex;
+                    self.find_recompute();
+                }
                 _ => {
                     if !self.mods.control_key()
+                        && !self.mods.alt_key()
                         && let Some(t) = event.text.as_ref()
                             && !t.is_empty() && !t.chars().any(|c| c.is_control()) {
                                 let t = t.to_string();
@@ -8492,7 +8525,7 @@ mod tests {
         assert_eq!(m, hits);
         assert_eq!(cur, 0);
         // empty result still resets the cursor so next/prev do not wrap a stale index
-        let (m2, cur2) = find_after_grid_change(Vec::new());
+        let (m2, cur2) = find_after_grid_change(Vec::<(usize, usize)>::new());
         assert!(m2.is_empty());
         assert_eq!(cur2, 0);
     }

@@ -84,7 +84,14 @@ pub fn maybe_run() -> bool {
             r.settle_overlay();
         }
         "find" => {
-            r.set_find(Some(FindView { query: "parser".into(), count: 3, current: 1, matches: vec![] }));
+            r.set_find(Some(FindView {
+                query: "parser".into(),
+                count: 3,
+                current: 1,
+                matches: vec![],
+                regex_on: false,
+                bad: false,
+            }));
             r.settle_overlay();
         }
         "confirm" => {

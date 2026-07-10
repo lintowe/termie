@@ -463,19 +463,50 @@ impl Grid {
     }
 
     /// case-insensitive substring search across scrollback and the live screen;
-    /// returns (global_line_index, col) for each match start, in top-to-bottom
+    /// returns (global_line_index, col, char_len) per match, in top-to-bottom
     /// order. global indices span scrollback (0..len) then live lines.
     /// soft-wrapped runs are joined (same as copy), so a long URL that wrapped
     /// still matches; wide-glyph continuation cells (`\0`) are skipped
-    pub fn search(&self, needle: &str) -> Vec<(usize, usize)> {
-        // simple one-to-one folding (first char of to_lowercase) so É matches é
-        // and Cyrillic/Greek fold too, while text[i] keeps mapping to one cell
+    pub fn search(&self, needle: &str) -> Vec<(usize, usize, usize)> {
         let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
         let needle: Vec<char> = needle.chars().map(fold).collect();
         let mut out = Vec::new();
         if needle.is_empty() {
             return out;
         }
+        self.each_logical_run(|text, map| {
+            if text.len() >= needle.len() {
+                for start in 0..=(text.len() - needle.len()) {
+                    if text[start..start + needle.len()] == needle[..] {
+                        let (line, col) = map[start];
+                        out.push((line, col, needle.len()));
+                    }
+                }
+            }
+        });
+        out
+    }
+
+    /// regex search over the same corpus as `search`, same result shape; the
+    /// shared budget keeps a pathological pattern from freezing the UI
+    pub fn search_regex(&self, re: &crate::regex::Regex) -> Vec<(usize, usize, usize)> {
+        let mut out = Vec::new();
+        let mut budget = 4_000_000usize;
+        self.each_logical_run(|text, map| {
+            for (s, e) in re.find_all(text, &mut budget) {
+                let (line, col) = map[s];
+                out.push((line, col, e - s));
+            }
+        });
+        out
+    }
+
+    /// walk every logical run (a row plus its soft-wrapped continuations) as
+    /// case-folded chars, with text[i] mapping back to (global_line, col).
+    /// one-to-one folding (first char of to_lowercase) so É matches é and
+    /// Cyrillic/Greek fold too, while every char keeps mapping to one cell
+    fn each_logical_run(&self, mut f: impl FnMut(&[char], &[(usize, usize)])) {
+        let fold = |c: char| c.to_lowercase().next().unwrap_or(c);
         let total = self.total_lines();
         let line_at_global = |gi: usize| -> &Line {
             if gi < self.scrollback.len() {
@@ -484,12 +515,12 @@ impl Grid {
                 &self.lines[gi - self.scrollback.len()]
             }
         };
+        let mut text: Vec<char> = Vec::new();
+        let mut map: Vec<(usize, usize)> = Vec::new();
         let mut gi = 0;
         while gi < total {
-            // one logical run: this row plus any soft-wrapped continuations
-            let mut text: Vec<char> = Vec::new();
-            // text[i] came from physical (global_line, col)
-            let mut map: Vec<(usize, usize)> = Vec::new();
+            text.clear();
+            map.clear();
             loop {
                 let line = line_at_global(gi);
                 for (col, cell) in line.iter().enumerate() {
@@ -505,16 +536,9 @@ impl Grid {
                 }
                 gi += 1;
             }
-            if text.len() >= needle.len() {
-                for start in 0..=(text.len() - needle.len()) {
-                    if text[start..start + needle.len()] == needle[..] {
-                        out.push(map[start]);
-                    }
-                }
-            }
+            f(&text, &map);
             gi += 1;
         }
-        out
     }
 
     /// viewport row currently displaying global line `g`, or None if off-screen
@@ -2340,9 +2364,9 @@ mod tests {
             g.put_char(c);
         }
         assert!(g.search("").is_empty());
-        assert_eq!(g.search("hello"), vec![(0, 0)]);
-        assert_eq!(g.search("WORLD"), vec![(0, 6)]);
-        assert_eq!(g.search("lo wo"), vec![(0, 3)]);
+        assert_eq!(g.search("hello"), vec![(0, 0, 5)]);
+        assert_eq!(g.search("WORLD"), vec![(0, 6, 5)]);
+        assert_eq!(g.search("lo wo"), vec![(0, 3, 5)]);
         assert!(g.search("xyz").is_empty());
     }
 
@@ -2352,9 +2376,9 @@ mod tests {
         for c in "CAFÉ Straße ЛОГ".chars() {
             g.put_char(c);
         }
-        assert_eq!(g.search("café"), vec![(0, 0)]);
-        assert_eq!(g.search("straße"), vec![(0, 5)]);
-        assert_eq!(g.search("лог"), vec![(0, 12)]);
+        assert_eq!(g.search("café"), vec![(0, 0, 4)]);
+        assert_eq!(g.search("straße"), vec![(0, 5, 6)]);
+        assert_eq!(g.search("лог"), vec![(0, 12, 3)]);
     }
 
     #[test]
@@ -2375,15 +2399,15 @@ mod tests {
         }
         // scrollback[0]=alpha, live[0]=beta, live[1]=gamma
         assert_eq!(g.scrollback.len(), 1);
-        assert_eq!(g.search("alpha"), vec![(0, 0)]);
-        assert_eq!(g.search("beta"), vec![(1, 0)]);
-        assert_eq!(g.search("gamma"), vec![(2, 0)]);
+        assert_eq!(g.search("alpha"), vec![(0, 0, 5)]);
+        assert_eq!(g.search("beta"), vec![(1, 0, 4)]);
+        assert_eq!(g.search("gamma"), vec![(2, 0, 5)]);
         // every named hit is present; full "a" scan covers both letters of alpha
         let a_hits = g.search("a");
-        assert!(a_hits.contains(&(0, 0)));
-        assert!(a_hits.contains(&(0, 4)));
-        assert!(a_hits.contains(&(1, 3)));
-        assert!(a_hits.contains(&(2, 1)));
+        assert!(a_hits.contains(&(0, 0, 1)));
+        assert!(a_hits.contains(&(0, 4, 1)));
+        assert!(a_hits.contains(&(1, 3, 1)));
+        assert!(a_hits.contains(&(2, 1, 1)));
     }
 
     #[test]
@@ -2395,7 +2419,7 @@ mod tests {
         }
         // "xxFINDME" on row 0 (wrapped), "!!yy" on row 1 — needle crosses the join
         assert!(g.lines[0].wrapped);
-        assert_eq!(g.search("FINDME!!"), vec![(0, 2)]);
+        assert_eq!(g.search("FINDME!!"), vec![(0, 2, 8)]);
         // a hard newline must still break the run
         g.carriage_return();
         g.linefeed();
@@ -2404,7 +2428,7 @@ mod tests {
         }
         // the soft-wrap match on the first logical line, plus the hard-line one
         let hits = g.search("FINDME!!");
-        assert!(hits.contains(&(0, 2)));
+        assert!(hits.contains(&(0, 2, 8)));
         assert!(hits.len() >= 2);
     }
 }
