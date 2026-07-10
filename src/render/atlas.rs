@@ -381,13 +381,28 @@ impl GlyphAtlas {
         // fallback resolved to a color emoji glyph re-routes through the
         // monochrome symbol font, so ❤ draws as a one-cell text glyph rather
         // than a color heart overflowing its cell
-        if shaped.4
-            && key.font == FontId::Content
-            && crate::grid::emoji_vs_base(key.c)
-            && let Some(mono) = self.shape_char_image(text, "Segoe UI Symbol", key.bold, key.italic)
-            && !mono.4
-        {
-            shaped = mono;
+        if key.font == FontId::Content && crate::grid::emoji_vs_base(key.c) {
+            if shaped.4
+                && let Some(mono) =
+                    self.shape_char_image(text, "Segoe UI Symbol", key.bold, key.italic)
+                && !mono.4
+            {
+                shaped = mono;
+            }
+            // these bases are one cell wide in the grid, but symbol fonts ink
+            // them past cell_w and the overflow paints into the next cell (a
+            // following '|' vanished under the heart). re-shape at a reduced
+            // size so the ink genuinely fits — cleaner than resampling pixels
+            let max_w = m.cell_w.floor().max(1.0);
+            if shaped.0 as f32 > max_w {
+                let family = if shaped.4 { m.family } else { "Segoe UI Symbol" };
+                let px = m.px * max_w / shaped.0 as f32;
+                self.buffer.set_metrics(Metrics::new(px, m.line_height));
+                if let Some(small) = self.shape_char_image(text, family, key.bold, key.italic) {
+                    shaped = small;
+                }
+                self.buffer.set_metrics(Metrics::new(m.px, m.line_height));
+            }
         }
         let (w, h, left, top, is_color, pixels) = shaped;
 
