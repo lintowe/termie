@@ -6069,6 +6069,24 @@ impl App {
                 self.set_mark_mode(false);
                 return;
             }
+            Key::Named(N::ArrowLeft | N::ArrowRight) if ctrl => {
+                let Some(start) = before_abs else {
+                    return;
+                };
+                if let Some(g) = self.focused_grid_mut() {
+                    let target = g.word_boundary(start, event.logical_key == Key::Named(N::ArrowRight));
+                    let top = g.viewport_to_abs(0);
+                    let bottom = g.viewport_to_abs(rows.saturating_sub(1));
+                    if target.0 < top {
+                        g.scroll_view(top.saturating_sub(target.0).min(isize::MAX as u64) as isize);
+                    } else if target.0 > bottom {
+                        g.scroll_view(-(target.0.saturating_sub(bottom).min(isize::MAX as u64) as isize));
+                    }
+                    if let Some(row) = g.abs_to_viewport(target.0) {
+                        cur = (row, target.1);
+                    }
+                }
+            }
             Key::Named(N::ArrowLeft) => cur.1 = cur.1.saturating_sub(1),
             Key::Named(N::ArrowRight) => cur.1 = (cur.1 + 1).min(cols.saturating_sub(1)),
             Key::Named(N::ArrowUp) => {

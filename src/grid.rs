@@ -137,6 +137,18 @@ impl std::ops::DerefMut for Line {
     }
 }
 
+fn word_class_at(line: &Line, col: usize) -> u8 {
+    let c = line.get(col).map_or(' ', |cell| cell.c);
+    let c = if c == '\0' && col > 0 { line[col - 1].c } else { c };
+    if c == ' ' || c == '\0' {
+        0
+    } else if c.is_alphanumeric() || "_./-:~@+".contains(c) {
+        1
+    } else {
+        2
+    }
+}
+
 pub struct Grid {
     pub rows: usize,
     pub cols: usize,
@@ -418,27 +430,85 @@ impl Grid {
             return (0, 0);
         }
         let col = col.min(n - 1);
-        // word-class: alnum plus the punctuation that usually reads as part of a
-        // path, url, flag, or identifier in terminal output
-        let class = |c: char| -> u8 {
-            if c == ' ' || c == '\0' {
-                0
-            } else if c.is_alphanumeric() || "_./-:~@+".contains(c) {
-                1
-            } else {
-                2
-            }
-        };
-        let here = class(line[col].c);
+        // word-class includes punctuation that usually reads as part of a path,
+        // url, flag, or identifier in terminal output
+        let here = word_class_at(line, col);
         let mut lo = col;
-        while lo > 0 && class(line[lo - 1].c) == here {
+        while lo > 0 && word_class_at(line, lo - 1) == here {
             lo -= 1;
         }
         let mut hi = col;
-        while hi + 1 < n && class(line[hi + 1].c) == here {
+        while hi + 1 < n && word_class_at(line, hi + 1) == here {
             hi += 1;
         }
         (lo, hi)
+    }
+
+    /// ctrl+arrow target for keyboard selection, anchored to retained content
+    pub fn word_boundary(&self, pos: (u64, usize), forward: bool) -> (u64, usize) {
+        let base = self.abs_base();
+        let cells = self.total_lines().saturating_mul(self.cols);
+        let last = cells.saturating_sub(1);
+        let row = pos.0.saturating_sub(base).min(self.total_lines().saturating_sub(1) as u64);
+        let mut at = (row as usize)
+            .saturating_mul(self.cols)
+            .saturating_add(pos.1.min(self.cols.saturating_sub(1)))
+            .min(last);
+        let start = at;
+        let class = |i: usize| {
+            self.line_at_abs(base + (i / self.cols) as u64)
+                .map_or(0, |line| word_class_at(line, i % self.cols))
+        };
+        let joined = |a: usize, b: usize| {
+            a / self.cols == b / self.cols
+                || self
+                    .line_at_abs(base + (a.min(b) / self.cols) as u64)
+                    .is_some_and(|line| line.wrapped)
+        };
+        let step = |i: usize| {
+            if forward && i < last {
+                Some(i + 1)
+            } else if !forward && i > 0 {
+                Some(i - 1)
+            } else {
+                None
+            }
+        };
+        let finish = |i: usize| {
+            (base + (i / self.cols) as u64, i % self.cols)
+        };
+        let here = class(at);
+        if here != 0 {
+            while let Some(next) = step(at) {
+                if class(next) != here || !joined(at, next) {
+                    break;
+                }
+                at = next;
+            }
+            if at != start {
+                return finish(at);
+            }
+        }
+        let mut found = if here == 0 { Some(at) } else { step(at) };
+        while let Some(next) = found {
+            if class(next) != 0 {
+                at = next;
+                break;
+            }
+            at = next;
+            found = step(at);
+        }
+        let target_class = class(at);
+        if target_class == 0 {
+            return finish(at);
+        }
+        while let Some(next) = step(at) {
+            if class(next) != target_class || !joined(at, next) {
+                break;
+            }
+            at = next;
+        }
+        finish(at)
     }
 
     /// inclusive last column of content on viewport `row` (trailing blanks
@@ -1956,6 +2026,60 @@ mod tests {
         assert_eq!(e, 4 + "http://a.com/x".len());
         // cursor over the leading "see" is not a link
         assert!(g.url_at(0, 1).is_none());
+    }
+
+    #[test]
+    fn word_boundary_moves_within_and_between_runs() {
+        let mut g = Grid::new(2, 32);
+        for c in "one  two/three !! four".chars() {
+            g.put_char(c);
+        }
+        let row = g.abs_base();
+        assert_eq!(g.word_boundary((row, 1), false), (row, 0));
+        assert_eq!(g.word_boundary((row, 1), true), (row, 2));
+        assert_eq!(g.word_boundary((row, 2), true), (row, 13));
+        assert_eq!(g.word_boundary((row, 5), false), (row, 0));
+        assert_eq!(g.word_boundary((row, 13), true), (row, 16));
+        assert_eq!(g.word_boundary((row, 16), true), (row, 21));
+    }
+
+    #[test]
+    fn word_boundary_crosses_wraps_but_respects_hard_lines() {
+        let mut wrapped = Grid::new(3, 6);
+        for c in "alpha beta".chars() {
+            wrapped.put_char(c);
+        }
+        let row = wrapped.abs_base();
+        assert_eq!(wrapped.word_boundary((row, 0), true), (row, 4));
+        assert_eq!(wrapped.word_boundary((row, 4), true), (row + 1, 3));
+        assert_eq!(wrapped.word_boundary((row + 1, 3), false), (row + 1, 0));
+        assert_eq!(wrapped.word_boundary((row + 1, 0), false), (row, 0));
+
+        let mut hard = Grid::new(3, 5);
+        for c in "abcde".chars() {
+            hard.put_char(c);
+        }
+        hard.linefeed();
+        hard.carriage_return();
+        for c in "fgh".chars() {
+            hard.put_char(c);
+        }
+        let row = hard.abs_base();
+        assert_eq!(hard.word_boundary((row, 0), true), (row, 4));
+        assert_eq!(hard.word_boundary((row, 4), true), (row + 1, 2));
+        assert_eq!(hard.word_boundary((row + 1, 2), false), (row + 1, 0));
+        assert_eq!(hard.word_boundary((row + 1, 0), false), (row, 0));
+    }
+
+    #[test]
+    fn word_class_keeps_a_wide_cell_with_its_run() {
+        let mut g = Grid::new(2, 8);
+        for c in "世a".chars() {
+            g.put_char(c);
+        }
+        let row = g.abs_base();
+        assert_eq!(g.word_bounds(0, 1), (0, 2));
+        assert_eq!(g.word_boundary((row, 0), true), (row, 2));
     }
 
     #[test]

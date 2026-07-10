@@ -43,7 +43,7 @@ termie checks for a newer release once a day and shows a small `UPDATE` chip on 
 | `Ctrl+Shift+E` / `Ctrl+Shift+O` | split vertical / horizontal |
 | `Ctrl+P` | command palette |
 | `Ctrl+Shift+P` | pane mode (move / resize / zoom / close) |
-| `Ctrl+Shift+M` | mark mode (keyboard selection: arrows move, shift extends, enter copies) |
+| `Ctrl+Shift+M` | mark mode (arrows move, Ctrl+arrows jump words, Shift extends, Enter copies) |
 | `Ctrl+Shift+A` | select all text in the focused pane |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | copy / paste (also `Ctrl+Insert` / `Shift+Insert`) |
 | `Ctrl+Shift+F` | find in scrollback |
