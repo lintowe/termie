@@ -307,6 +307,9 @@ enum PaletteAction {
     InstallUpdate,
     /// 0-based tab index (Ctrl+1..9)
     SelectTab(usize),
+    /// recolor the active tab from the keyboard — the same swatch list the tab
+    /// menu offers, indexed into TAB_COLOR_ITEMS (0 clears)
+    SetTabColor(usize),
 }
 
 const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
@@ -337,6 +340,14 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("zoom pane", PaletteAction::ToggleZoom),
     ("toggle fullscreen", PaletteAction::ToggleFullscreen),
     ("rename tab", PaletteAction::RenameTab),
+    // one entry per TAB_COLOR_ITEMS row (a test keeps them in lockstep)
+    ("tab color: none", PaletteAction::SetTabColor(0)),
+    ("tab color: red", PaletteAction::SetTabColor(1)),
+    ("tab color: green", PaletteAction::SetTabColor(2)),
+    ("tab color: yellow", PaletteAction::SetTabColor(3)),
+    ("tab color: blue", PaletteAction::SetTabColor(4)),
+    ("tab color: magenta", PaletteAction::SetTabColor(5)),
+    ("tab color: cyan", PaletteAction::SetTabColor(6)),
     ("quake drop-down", PaletteAction::Quake),
     ("cycle theme", PaletteAction::Theme),
     ("plugins", PaletteAction::Plugins),
@@ -5434,6 +5445,13 @@ impl App {
                 }
             }
             PaletteAction::SelectTab(n) => self.switch_tab(n),
+            PaletteAction::SetTabColor(i) => {
+                if let Some(tab) = self.pw.tabs.get_mut(self.pw.active_tab) {
+                    tab.color = (i > 0).then_some(i as u8);
+                    self.sync_tabs();
+                }
+                self.redraw();
+            }
         }
         true
     }
@@ -10093,6 +10111,21 @@ mod tests {
         assert_eq!(action_from_label("copy"), Some(PaletteAction::Copy));
         assert_eq!(action_from_label("select tab 3"), Some(PaletteAction::SelectTab(2)));
         assert_eq!(action_from_label("bogus action"), None);
+    }
+
+    #[test]
+    fn tab_color_palette_labels_track_the_menu_swatches() {
+        // the palette rows and the tab menu's swatch list must name the same
+        // colors in the same order, or the two paths drift apart
+        for (i, name) in render::TAB_COLOR_ITEMS.iter().enumerate() {
+            let label = format!("tab color: {name}");
+            assert_eq!(action_from_label(&label), Some(PaletteAction::SetTabColor(i)), "{label}");
+        }
+        let n = PALETTE_ACTIONS
+            .iter()
+            .filter(|(_, a)| matches!(a, PaletteAction::SetTabColor(_)))
+            .count();
+        assert_eq!(n, render::TAB_COLOR_ITEMS.len());
     }
 
     #[test]
