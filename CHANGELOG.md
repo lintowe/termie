@@ -33,6 +33,8 @@
 - **Prompt marks now show on the scrollbar.** The prompts Termie tracks through shell integration also appear as small pips on the rail, making the next command easier to spot before you jump to it.
 
 ### Terminal fidelity
+- **Kitty unicode placeholders.** A virtual placement (`U=1`) plus cells of `U+10EEEE` with row/column diacritics now renders the image through the text layer itself — the mechanism image tools reach for when the bytes pass through something that rewrites the screen, because the cells scroll, copy, and reflow like any other text. The image id rides the cell's foreground color, omitted diacritics inherit from the cell to the left per the spec, and the picture aspect-fits its declared cell box. `kitten icat --unicode-placeholder` and tmux-aware image tools land on this path.
+- **Huge images render instead of vanishing.** A kitty image wider or taller than the GPU atlas (2046 px) used to pack nowhere and silently never draw. It now box-filters down to fit while keeping its intended on-screen size, so a full-resolution photo piped through `icat` shows up like everywhere else.
 - **Kitty graphics placements move the cursor.** Displaying an image now steps the cursor right by the placement's columns and down onto its last row, wrapping at the right edge and scrolling at the bottom exactly like printed text, with the protocol's `C=1` key opting out. Text after an image used to print straight through it; `icat`-style tools now lay out the way they do in kitty itself. The shipped ConPTY host passes the kitty escape codes through, so this works from a plain shell pipeline, not just termie-aware programs.
 - **Kitty z-index.** The `z=` placement key stacks images: negative values draw beneath the pane's text (a watermark behind your output), zero and up draw above it, ordered by value within each side.
 - **Scoped kitty deletes.** `a=d` now honors the `d=` target key: by image id, by z layer, or whatever placement covers the cursor cell, with the uppercase forms also freeing the stored pixels. A bare delete still clears every placement, and a hard reset (`RIS`) now drops the decoded images along with the screen instead of pinning them until the pane closes.
@@ -56,6 +58,9 @@
 - **Leaving the alt screen (and DECSTR) resets more interaction state.** Focus reporting and synchronized-output frames join mouse, app-cursor, and kitty keyboard on the cleanup list, so a crashed or poorly-exiting full-screen app can't leave CSI `I`/`O` or a stuck DEC 2026 frame bleeding into the next prompt.
 - **Honest `$TERM_PROGRAM`.** Children now see `TERM_PROGRAM=termie` and `TERM_PROGRAM_VERSION=<version>` instead of a spoofed host name. Capability is still negotiated the proper way (kitty keyboard CSI, XTVERSION, DA, XTGETTCAP). Apps that only enable features for a hard-coded allowlist can set `term_program=ghostty` (or another name) in `%APPDATA%\termie\config`.
 - **ConPTY gets real pixel geometry** on open and resize when the renderer knows the cell size, so tools that ask the console for a window size in pixels stop seeing 0×0.
+
+### Rendering
+- **A grid cell is 24 bytes, down from 32.** The SGR attribute booleans and underline style pack into one 16-bit field, so every line of scrollback costs a quarter less: a 10,000-line history at 200 columns drops from 61 MB to 46 MB of cell storage.
 
 ## 0.3.2 — 2026-07-09
 
