@@ -3066,7 +3066,21 @@ impl Renderer {
                                     .filter(|q| p.row.is_none() || p.row == Some(q.row))
                                     .map(|q| q.col + 1)
                             });
-                            let msb = p.msb.or(inherit.map(|q| q.msb)).unwrap_or(0);
+                            // msb only inherits along a contiguous run: same
+                            // row and the very next column (spec rule 3) —
+                            // adjacency alone would smear it across explicit
+                            // row/col jumps
+                            let msb = p
+                                .msb
+                                .or_else(|| {
+                                    inherit
+                                        .filter(|q| {
+                                            (p.row.is_none() || p.row == Some(q.row))
+                                                && (p.col.is_none() || p.col == Some(q.col + 1))
+                                        })
+                                        .map(|q| q.msb)
+                                })
+                                .unwrap_or(0);
                             if let (Some(prow), Some(pcol)) = (row, col) {
                                 let id = (msb as u32) << 24 | p.id_low;
                                 Self::push_placeholder_tile(

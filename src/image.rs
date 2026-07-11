@@ -150,7 +150,14 @@ pub fn decode_placeholder(fg: crate::color::Color, cluster: &str) -> Option<Plac
         _ => return None,
     };
     let mut marks = cluster.chars().skip(1).filter_map(rowcol_index);
-    Some(PlaceholderCell { id_low, row: marks.next(), col: marks.next(), msb: marks.next() })
+    // the third mark names the id's most significant BYTE; table indices past
+    // 255 exist for row/column use only and would shift into a bogus id
+    Some(PlaceholderCell {
+        id_low,
+        row: marks.next(),
+        col: marks.next(),
+        msb: marks.next().filter(|&m| m <= 255),
+    })
 }
 
 struct Pending {
@@ -558,6 +565,10 @@ mod tests {
         assert_eq!((p.id_low, p.row, p.col, p.msb), (7, None, None, None));
         // a default-colored placeholder names no image
         assert!(decode_placeholder(Color::Default, "").is_none());
+        // a third mark past index 255 is row/column vocabulary, not an msb byte
+        let s = format!("{PLACEHOLDER}\u{30D}\u{30E}\u{1D244}");
+        let p = decode_placeholder(Color::Indexed(7), &s).expect("decodes");
+        assert_eq!(p.msb, None);
     }
 
     // opening reassembly buffers beyond the cap is refused; finishing or
