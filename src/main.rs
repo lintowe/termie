@@ -2169,39 +2169,65 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
                     term.grid.remove_virtual_placements_in(lo, hi);
                     term.images.ids_in(lo, hi)
                 }
-                // at the cursor cell: a placement is hit when its cell box
-                // (or its pixel size over the cell metrics) covers the cursor
-                b'c' => {
-                    let (r, c) = (term.grid.cursor.row, term.grid.cursor.col);
+                // position-scoped targets: a placement is hit when its cell
+                // box (or its pixel size over the cell metrics) covers the
+                // named cell, column, or row. c uses the cursor; p/q/x/y use
+                // the 1-based x=/y= keys (0 = the key was absent → no match)
+                s @ (b'c' | b'p' | b'q' | b'x' | b'y') => {
                     let (cw, ch) = term.cell_px();
                     let cw = if cw > 0 { cw as usize } else { 10 };
                     let ch = if ch > 0 { ch as usize } else { 20 };
-                    let cursor_abs =
-                        term.grid.abs_base() + term.grid.scrollback.len() as u64 + r as u64;
-                    let boxes: std::collections::HashMap<u32, (usize, usize)> = term
-                        .grid
-                        .placements()
-                        .iter()
-                        .map(|p| p.image_id)
-                        .filter_map(|id| {
-                            term.images.get(id).map(|i| {
-                                (id, ((i.width as usize).div_ceil(cw), (i.height as usize).div_ceil(ch)))
+                    let abs_of = |row: u64| {
+                        term.grid.abs_base() + term.grid.scrollback.len() as u64 + row
+                    };
+                    // the cell each target names; None = that axis unconstrained
+                    let (col, abs) = match s {
+                        b'c' => (
+                            Some(term.grid.cursor.col),
+                            Some(abs_of(term.grid.cursor.row as u64)),
+                        ),
+                        b'x' => (cmd.x.checked_sub(1).map(|v| v as usize), None),
+                        b'y' => (None, cmd.y.checked_sub(1).map(|v| abs_of(v as u64))),
+                        _ => (
+                            cmd.x.checked_sub(1).map(|v| v as usize),
+                            cmd.y.checked_sub(1).map(|v| abs_of(v as u64)),
+                        ),
+                    };
+                    // p and q need their cell fully named; x and y one axis
+                    let valid = match s {
+                        b'x' => col.is_some(),
+                        b'y' => abs.is_some(),
+                        _ => col.is_some() && abs.is_some(),
+                    };
+                    if !valid {
+                        Vec::new()
+                    } else {
+                        let boxes: std::collections::HashMap<u32, (usize, usize)> = term
+                            .grid
+                            .placements()
+                            .iter()
+                            .map(|p| p.image_id)
+                            .filter_map(|id| {
+                                term.images.get(id).map(|i| {
+                                    (id, ((i.width as usize).div_ceil(cw), (i.height as usize).div_ceil(ch)))
+                                })
                             })
+                            .collect();
+                        term.grid.remove_placements_where(|p| {
+                            let (nat_c, nat_r) = boxes.get(&p.image_id).copied().unwrap_or((1, 1));
+                            let cols = if p.cols > 0 { p.cols as usize } else { nat_c };
+                            let rows = if p.rows > 0 { p.rows as usize } else { nat_r };
+                            col.map(|c| p.col <= c && c < p.col + cols.max(1)).unwrap_or(true)
+                                && abs
+                                    .map(|a| p.abs_line <= a && a < p.abs_line + rows.max(1) as u64)
+                                    .unwrap_or(true)
+                                && (s != b'q' || p.z == cmd.z)
                         })
-                        .collect();
-                    term.grid.remove_placements_where(|p| {
-                        let (nat_c, nat_r) = boxes.get(&p.image_id).copied().unwrap_or((1, 1));
-                        let cols = if p.cols > 0 { p.cols as usize } else { nat_c };
-                        let rows = if p.rows > 0 { p.rows as usize } else { nat_r };
-                        p.col <= c
-                            && c < p.col + cols.max(1)
-                            && p.abs_line <= cursor_abs
-                            && cursor_abs < p.abs_line + rows.max(1) as u64
-                    })
+                    }
                 }
-                // targets this v1 doesn't implement (p/x/y/n/f/q, or i
-                // without an id): a scoped delete must never escalate to a
-                // wipe, so they drop nothing
+                // targets this v1 doesn't implement (n/f, or i without an
+                // id): a scoped delete must never escalate to a wipe, so
+                // they drop nothing
                 _ => Vec::new(),
             };
             if free {
@@ -10743,6 +10769,49 @@ mod tests {
         handle_kitty(&mut term, &done);
         assert_eq!(term.grid.placements().len(), 1);
         assert_eq!((term.grid.cursor.row, term.grid.cursor.col), (1, 4));
+    }
+
+    // position-scoped deletes hit by 1-based cell coordinates: p by cell,
+    // q additionally by z, x by column, y by row; an absent coordinate (0)
+    // matches nothing instead of everything
+    #[test]
+    fn kitty_position_deletes_hit_by_cell_column_row_and_z() {
+        let mut term = term::Terminal::new(6, 20);
+        // a 2x2-cell box at the origin (id 1) and one at column 5 (id 2)
+        handle_kitty(&mut term, &kitty_display(1, 2, 2, true));
+        term.grid.cursor.col = 5;
+        handle_kitty(&mut term, &kitty_display(2, 2, 2, true));
+        // d=p at 1-based cell (6, 1) = column 5, row 0: id 2 only
+        let mut del = kitty_del(b'p', 0, 0);
+        (del.x, del.y) = (6, 1);
+        handle_kitty(&mut term, &del);
+        assert_eq!(term.grid.placements().len(), 1);
+        assert_eq!(term.grid.placements()[0].image_id, 1);
+        // d=p with an absent y key must not wipe anything
+        let mut del = kitty_del(b'p', 0, 0);
+        del.x = 1;
+        handle_kitty(&mut term, &del);
+        assert_eq!(term.grid.placements().len(), 1);
+        // d=x at 1-based column 2 crosses id 1's box (columns 0..2)
+        let mut del = kitty_del(b'x', 0, 0);
+        del.x = 2;
+        handle_kitty(&mut term, &del);
+        assert!(term.grid.placements().is_empty());
+        // two boxes on one cell, different z: d=q takes only the named layer,
+        // then d=y clears the row
+        let mut low = kitty_display(3, 1, 1, true);
+        low.z = -4;
+        handle_kitty(&mut term, &low);
+        handle_kitty(&mut term, &kitty_display(4, 1, 1, true));
+        let mut del = kitty_del(b'q', 0, -4);
+        (del.x, del.y) = (6, 1);
+        handle_kitty(&mut term, &del);
+        assert_eq!(term.grid.placements().len(), 1);
+        assert_eq!(term.grid.placements()[0].image_id, 4);
+        let mut del = kitty_del(b'y', 0, 0);
+        del.y = 1;
+        handle_kitty(&mut term, &del);
+        assert!(term.grid.placements().is_empty());
     }
 
     // d=r wipes the id range [x, y] — placements and virtual boxes both —
