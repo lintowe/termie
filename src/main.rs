@@ -283,6 +283,9 @@ enum PaletteAction {
     Copy,
     Paste,
     CloseFocusedPane,
+    /// type a configured string into the focused pane (keybindings.conf
+    /// `send <text>`); the index points into App::send_inputs
+    SendInput(usize),
     ToggleZoom,
     ToggleFullscreen,
     RenameTab,
@@ -1184,10 +1187,41 @@ fn action_label(action: PaletteAction) -> Option<String> {
         .map(|(l, _)| l.to_string())
 }
 
+/// unescape a keybindings `send` payload: \r and \n both type enter (typed
+/// input is CR), \t tab, \e escape, \\ a literal backslash; any other pair
+/// stays as written
+fn unescape_send_input(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('r') | Some('n') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('e') => out.push('\x1b'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// apply a keybindings.conf body onto `out`, returning how many lines were
 /// ignored — no '=', an unparseable combo, or an unknown action; each also warns.
-/// `combo=none` (or `unbind`) frees a chord and doesn't count as ignored
-fn apply_keybindings_conf(text: &str, out: &mut Vec<(ModifiersState, Key, PaletteAction)>) -> usize {
+/// `combo=none` (or `unbind`) frees a chord and doesn't count as ignored.
+/// `combo=send <text>` interns its payload in `sends`
+fn apply_keybindings_conf(
+    text: &str,
+    out: &mut Vec<(ModifiersState, Key, PaletteAction)>,
+    sends: &mut Vec<String>,
+) -> usize {
     let mut ignored = 0;
     for line in text.lines() {
         let line = line.trim();
@@ -1210,6 +1244,18 @@ fn apply_keybindings_conf(text: &str, out: &mut Vec<(ModifiersState, Key, Palett
         if action.eq_ignore_ascii_case("none") || action.eq_ignore_ascii_case("unbind") {
             continue;
         }
+        // `send <text>` types the text into the focused pane (WT's sendInput)
+        if action.len() > 5 && action[..5].eq_ignore_ascii_case("send ") {
+            let payload = unescape_send_input(action[5..].trim_start());
+            if payload.is_empty() {
+                log::warn!("keybindings.conf: empty send payload (combo {})", combo.trim());
+                ignored += 1;
+                continue;
+            }
+            out.push((mods, key, PaletteAction::SendInput(sends.len())));
+            sends.push(payload);
+            continue;
+        }
         match action_from_label(action) {
             Some(a) => out.push((mods, key, a)),
             None => {
@@ -1222,18 +1268,20 @@ fn apply_keybindings_conf(text: &str, out: &mut Vec<(ModifiersState, Key, Palett
 }
 
 /// load keybindings (built-in defaults + user overrides from
-/// %APPDATA%\termie\keybindings.conf) with the count of ignored config lines
-fn load_keybindings() -> (Vec<(ModifiersState, Key, PaletteAction)>, usize) {
+/// %APPDATA%\termie\keybindings.conf) with the interned `send` payloads and
+/// the count of ignored config lines
+fn load_keybindings() -> (Vec<(ModifiersState, Key, PaletteAction)>, Vec<String>, usize) {
     let mut out = default_keybindings();
+    let mut sends = Vec::new();
     let Some(dir) = std::env::var_os("APPDATA") else {
-        return (out, 0);
+        return (out, sends, 0);
     };
     let path = std::path::Path::new(&dir).join("termie").join("keybindings.conf");
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (out, 0);
+        return (out, sends, 0);
     };
-    let ignored = apply_keybindings_conf(&text, &mut out);
-    (out, ignored)
+    let ignored = apply_keybindings_conf(&text, &mut out, &mut sends);
+    (out, sends, ignored)
 }
 
 /// a fully commented keybindings.conf listing every action with its default
@@ -1248,6 +1296,10 @@ fn keybindings_template() -> String {
          # super) and a key with + — a letter/digit, or a name like enter tab esc up\n\
          # down left right home end pageup pagedown insert delete f1..f12, e.g.\n\
          # ctrl+shift+t. set the action to `none` (or `unbind`) to free a chord.\n\
+         #\n\
+         # `send <text>` types text into the focused pane, like typing it:\n\
+         #   ctrl+alt+g = send git status\\r\n\
+         # escapes: \\r or \\n = enter, \\t = tab, \\e = escape, \\\\ = backslash.\n\
          #\n\
          # every line below is commented out and shows the built-in default;\n\
          # uncomment and edit to change it.\n\n",
@@ -3180,6 +3232,8 @@ struct App {
     /// user keybindings (combo -> palette action) loaded from disk; checked
     /// before the built-in shortcuts, empty when there is no config file
     keybindings: Vec<(ModifiersState, Key, PaletteAction)>,
+    /// payloads of `send <text>` bindings; SendInput actions index here
+    send_inputs: Vec<String>,
     /// keybindings.conf lines ignored at load; surfaced once as a status notice
     /// after the first frame (the renderer doesn't exist yet at load time)
     kb_ignored: usize,
@@ -3298,7 +3352,7 @@ impl App {
         // the default distro for the plain wsl shell
         pty::set_profiles(with_wsl_profiles(p.profiles.clone(), win::wsl_distros()));
         let cli = parse_args(std::env::args().skip(1));
-        let (keybindings, kb_ignored) = load_keybindings();
+        let (keybindings, send_inputs, kb_ignored) = load_keybindings();
         App {
             proxy,
             kitty_demo_pending: cli.kitty_demo,
@@ -3334,6 +3388,7 @@ impl App {
             next_id: 0,
             mods: ModifiersState::empty(),
             keybindings,
+            send_inputs,
             kb_ignored,
             last_window_bounds: None,
             shown: false,
@@ -5476,6 +5531,14 @@ impl App {
             PaletteAction::Settings => self.open_settings(),
             PaletteAction::Plugins => self.open_market(),
             PaletteAction::PaneMode => self.set_pane_mode(true),
+            PaletteAction::SendInput(ix) => {
+                if let (Some(id), Some(text)) =
+                    (self.active_focused_id(), self.send_inputs.get(ix))
+                {
+                    let bytes = text.clone().into_bytes();
+                    self.send_paste_bytes(id, &bytes);
+                }
+            }
             PaletteAction::MarkMode => self.set_mark_mode(true),
             PaletteAction::SelectAll => self.select_all(),
             PaletteAction::JumpAttention => self.jump_attention(),
@@ -9069,8 +9132,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::ToggleQuake => self.toggle_quake(),
             UserEvent::UserConfChanged => {
-                let (kb, ignored) = load_keybindings();
+                let (kb, sends, ignored) = load_keybindings();
                 self.keybindings = kb;
+                self.send_inputs = sends;
                 // a live edit that introduces an error gets the same notice as boot
                 if ignored > 0 {
                     let noun = if ignored == 1 { "line" } else { "lines" };
@@ -10301,6 +10365,7 @@ mod tests {
     #[test]
     fn keybindings_conf_counts_ignored_lines() {
         let mut out = default_keybindings();
+        let mut sends = Vec::new();
         let ignored = apply_keybindings_conf(
             "# a comment, not counted\n\
              ctrl+shift+q = copy\n\
@@ -10309,10 +10374,34 @@ mod tests {
              ctrl+j = not a real action\n\
              ctrl+k = none\n",
             &mut out,
+            &mut sends,
         );
         // missing '=', unparseable combo, and unknown action each count once; the
         // comment, the valid override, and the `none` unbind do not
         assert_eq!(ignored, 3);
+        assert!(sends.is_empty());
+    }
+
+    // `send <text>` binds a typed payload: escapes unescape, \n normalizes to
+    // the enter byte, and an empty payload is refused rather than bound
+    #[test]
+    fn keybindings_conf_send_action_interns_payloads() {
+        let mut out = Vec::new();
+        let mut sends = Vec::new();
+        let ignored = apply_keybindings_conf(
+            "ctrl+alt+g = send git status\\r\n\
+             ctrl+alt+l = SEND ls\\n\n\
+             ctrl+alt+e = send \n",
+            &mut out,
+            &mut sends,
+        );
+        assert_eq!(ignored, 1, "the empty payload is refused");
+        assert_eq!(sends, vec!["git status\r".to_string(), "ls\r".to_string()]);
+        let actions: Vec<PaletteAction> = out.iter().map(|(_, _, a)| *a).collect();
+        assert_eq!(
+            actions,
+            vec![PaletteAction::SendInput(0), PaletteAction::SendInput(1)]
+        );
     }
 
     #[test]
