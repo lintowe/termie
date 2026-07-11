@@ -172,9 +172,10 @@ pub struct ImageStore {
     /// in-progress chunked (m=1) transmissions keyed by image id
     pending: HashMap<u32, Pending>,
     next_auto: u32,
-    /// the auto-id of an in-flight anonymous (i=0) chunked transfer, so its
-    /// later chunks continue the same image instead of minting a fresh id each
-    anon: Option<u32>,
+    /// the id of the in-flight chunked transfer, explicit or auto: kitty
+    /// clients name the id only in the first chunk, so an id-less (i=0)
+    /// continuation attaches here instead of minting a fresh image
+    current: Option<u32>,
 }
 
 impl ImageStore {
@@ -197,7 +198,7 @@ impl ImageStore {
     ) -> Option<(u32, Option<DisplayReq>)> {
         let anonymous = id == 0;
         let id = if anonymous {
-            match self.anon {
+            match self.current {
                 Some(a) => a,
                 None => {
                     self.next_auto = self.next_auto.wrapping_add(1).max(1);
@@ -211,7 +212,7 @@ impl ImageStore {
         // existing transfer is always allowed
         if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING {
             if anonymous {
-                self.anon = None;
+                self.current = None;
             }
             return None;
         }
@@ -237,18 +238,16 @@ impl ImageStore {
         p.data.extend_from_slice(chunk);
         if p.data.len() > MAX_IMAGE_BYTES {
             self.pending.remove(&id);
-            self.anon = None;
+            self.current = None;
             return None;
         }
         if more {
-            // remember an anonymous transfer so its next chunk continues it
-            if anonymous {
-                self.anon = Some(id);
-            }
+            // remember the transfer so its id-less next chunk continues it
+            self.current = Some(id);
             return None;
         }
-        if anonymous {
-            self.anon = None;
+        if self.current == Some(id) {
+            self.current = None;
         }
         let p = self.pending.remove(&id)?;
         let img = decode(p.format, p.width, p.height, &p.data)?;
@@ -305,7 +304,7 @@ impl ImageStore {
         self.images.clear();
         self.order.clear();
         self.pending.clear();
-        self.anon = None;
+        self.current = None;
     }
 }
 
@@ -483,6 +482,18 @@ mod tests {
         let wide = vec![9u8; 8 * 2 * 4];
         let (_, w, h) = downscale_rgba(&wide, 8, 2, 4);
         assert_eq!((w, h), (4, 1));
+    }
+
+    // continuation chunks carry no i= key (kitty clients name the id only in
+    // the first chunk); they must continue an explicit-id transfer, not mint
+    // a fresh anonymous image that leaves the named one pending forever
+    #[test]
+    fn explicit_id_chunks_continue_without_repeating_the_id() {
+        let mut s = ImageStore::default();
+        assert!(s.transmit(42, 32, 1, 2, true, None, &[1, 2, 3, 4]).is_none());
+        let (id, _) = s.transmit(0, 0, 0, 0, false, None, &[5, 6, 7, 8]).expect("completes");
+        assert_eq!(id, 42);
+        assert_eq!(s.get(42).unwrap().rgba, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     // an anonymous (i=0) chunked transfer continues into ONE image, not a fresh
