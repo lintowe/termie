@@ -335,20 +335,20 @@ impl Terminal {
         let a = &cur.attrs;
         let mut s = String::from("0");
         for (on, code) in [
-            (a.bold, 1),
-            (a.dim, 2),
-            (a.italic, 3),
-            (a.blink, 5),
-            (a.inverse, 7),
-            (a.hidden, 8),
-            (a.strike, 9),
-            (a.overline, 53),
+            (a.bold(), 1),
+            (a.dim(), 2),
+            (a.italic(), 3),
+            (a.blink(), 5),
+            (a.inverse(), 7),
+            (a.hidden(), 8),
+            (a.strike(), 9),
+            (a.overline(), 53),
         ] {
             if on {
                 let _ = write!(s, ";{code}");
             }
         }
-        match a.underline {
+        match a.underline() {
             UnderlineStyle::None => {}
             UnderlineStyle::Single => s.push_str(";4"),
             UnderlineStyle::Double => s.push_str(";4:2"),
@@ -571,14 +571,14 @@ impl Terminal {
             }
             // colon-encoded underline style, e.g. 4:3 (curly)
             if g.len() > 1 && code == 4 {
-                cur.attrs.underline = match g.get(1).copied().unwrap_or(1) {
+                cur.attrs.set_underline(match g.get(1).copied().unwrap_or(1) {
                     0 => UnderlineStyle::None,
                     2 => UnderlineStyle::Double,
                     3 => UnderlineStyle::Curly,
                     4 => UnderlineStyle::Dotted,
                     5 => UnderlineStyle::Dashed,
                     _ => UnderlineStyle::Single,
-                };
+                });
                 i += 1;
                 continue;
             }
@@ -588,31 +588,31 @@ impl Terminal {
                     cur.bg = Color::DefaultBg;
                     cur.attrs = Default::default();
                 }
-                1 => cur.attrs.bold = true,
-                2 => cur.attrs.dim = true,
-                3 => cur.attrs.italic = true,
-                4 => cur.attrs.underline = UnderlineStyle::Single,
-                5 | 6 => cur.attrs.blink = true,
-                7 => cur.attrs.inverse = true,
-                8 => cur.attrs.hidden = true,
-                9 => cur.attrs.strike = true,
+                1 => cur.attrs.set_bold(true),
+                2 => cur.attrs.set_dim(true),
+                3 => cur.attrs.set_italic(true),
+                4 => cur.attrs.set_underline(UnderlineStyle::Single),
+                5 | 6 => cur.attrs.set_blink(true),
+                7 => cur.attrs.set_inverse(true),
+                8 => cur.attrs.set_hidden(true),
+                9 => cur.attrs.set_strike(true),
                 22 => {
-                    cur.attrs.bold = false;
-                    cur.attrs.dim = false;
+                    cur.attrs.set_bold(false);
+                    cur.attrs.set_dim(false);
                 }
-                23 => cur.attrs.italic = false,
-                21 => cur.attrs.underline = UnderlineStyle::Double,
-                24 => cur.attrs.underline = UnderlineStyle::None,
-                25 => cur.attrs.blink = false,
-                27 => cur.attrs.inverse = false,
-                28 => cur.attrs.hidden = false,
-                29 => cur.attrs.strike = false,
+                23 => cur.attrs.set_italic(false),
+                21 => cur.attrs.set_underline(UnderlineStyle::Double),
+                24 => cur.attrs.set_underline(UnderlineStyle::None),
+                25 => cur.attrs.set_blink(false),
+                27 => cur.attrs.set_inverse(false),
+                28 => cur.attrs.set_hidden(false),
+                29 => cur.attrs.set_strike(false),
                 30..=37 => cur.fg = Color::Indexed((code - 30) as u8),
                 39 => cur.fg = Color::Default,
                 40..=47 => cur.bg = Color::Indexed((code - 40) as u8),
                 49 => cur.bg = Color::DefaultBg,
-                53 => cur.attrs.overline = true,
-                55 => cur.attrs.overline = false,
+                53 => cur.attrs.set_overline(true),
+                55 => cur.attrs.set_overline(false),
                 59 => cur.attrs.ul = Color::Default,
                 90..=97 => cur.fg = Color::Indexed((code - 90 + 8) as u8),
                 100..=107 => cur.bg = Color::Indexed((code - 100 + 8) as u8),
@@ -1566,7 +1566,7 @@ mod tests {
         assert!(!t.grid.origin_mode);
         assert!(!t.bracketed_paste);
         assert_eq!(t.grid.cursor.fg, Color::Default); // SGR pen reset
-        assert!(!t.grid.cursor.attrs.bold);
+        assert!(!t.grid.cursor.attrs.bold());
     }
 
     #[test]
@@ -1652,12 +1652,12 @@ mod tests {
         assert_eq!(t.grid.lines[0][2].attrs.ul, Color::Default);
         // overline set/clear
         feed(&mut t, b"\x1b[53mo\x1b[55mp");
-        assert!(t.grid.lines[0][3].attrs.overline);
-        assert!(!t.grid.lines[0][4].attrs.overline);
+        assert!(t.grid.lines[0][3].attrs.overline());
+        assert!(!t.grid.lines[0][4].attrs.overline());
         // SGR 0 clears both
         feed(&mut t, b"\x1b[53;58;5;1m\x1b[0mq");
         let a = t.grid.lines[0][5].attrs;
-        assert!(!a.overline);
+        assert!(!a.overline());
         assert_eq!(a.ul, Color::Default);
     }
 
@@ -1684,11 +1684,11 @@ mod tests {
         // land as SGR 4 (underline) + SGR 2 (dim)
         feed(&mut t, b"\x1b[>4;2mx");
         assert_eq!(t.grid.lines[0][0].c, 'x');
-        assert_eq!(t.grid.lines[0][0].attrs.underline, UnderlineStyle::None);
-        assert!(!t.grid.lines[0][0].attrs.dim);
+        assert_eq!(t.grid.lines[0][0].attrs.underline(), UnderlineStyle::None);
+        assert!(!t.grid.lines[0][0].attrs.dim());
         // plain SGR still applies
         feed(&mut t, b"\x1b[4my");
-        assert_ne!(t.grid.lines[0][1].attrs.underline, UnderlineStyle::None);
+        assert_ne!(t.grid.lines[0][1].attrs.underline(), UnderlineStyle::None);
     }
 
     #[test]
@@ -1855,19 +1855,19 @@ mod tests {
     fn sgr_underline_styles_and_blink() {
         let mut t = Terminal::new(2, 10);
         feed(&mut t, b"\x1b[4mA");
-        assert_eq!(t.grid.lines[0][0].attrs.underline, UnderlineStyle::Single);
+        assert_eq!(t.grid.lines[0][0].attrs.underline(), UnderlineStyle::Single);
         feed(&mut t, b"\x1b[4:3mB");
-        assert_eq!(t.grid.lines[0][1].attrs.underline, UnderlineStyle::Curly);
+        assert_eq!(t.grid.lines[0][1].attrs.underline(), UnderlineStyle::Curly);
         feed(&mut t, b"\x1b[4:5mC");
-        assert_eq!(t.grid.lines[0][2].attrs.underline, UnderlineStyle::Dashed);
+        assert_eq!(t.grid.lines[0][2].attrs.underline(), UnderlineStyle::Dashed);
         feed(&mut t, b"\x1b[21mD");
-        assert_eq!(t.grid.lines[0][3].attrs.underline, UnderlineStyle::Double);
+        assert_eq!(t.grid.lines[0][3].attrs.underline(), UnderlineStyle::Double);
         feed(&mut t, b"\x1b[24mE");
-        assert_eq!(t.grid.lines[0][4].attrs.underline, UnderlineStyle::None);
+        assert_eq!(t.grid.lines[0][4].attrs.underline(), UnderlineStyle::None);
         feed(&mut t, b"\x1b[5mF");
-        assert!(t.grid.lines[0][5].attrs.blink);
+        assert!(t.grid.lines[0][5].attrs.blink());
         feed(&mut t, b"\x1b[25mG");
-        assert!(!t.grid.lines[0][6].attrs.blink);
+        assert!(!t.grid.lines[0][6].attrs.blink());
     }
 
     #[test]

@@ -2863,17 +2863,17 @@ impl Renderer {
             let mut liga_strip: Option<Instance> = None;
             for c in 0..grid.cols {
                 let cell = line.get(c).copied().unwrap_or_default();
-                if cell.attrs.hidden {
+                if cell.attrs.hidden() {
                     continue;
                 }
                 let (mut fg_c, mut bg_c) = (cell.fg, cell.bg);
-                if cell.attrs.inverse {
+                if cell.attrs.inverse() {
                     std::mem::swap(&mut fg_c, &mut bg_c);
                 }
-                let fg_c = Palette::bold_bright(fg_c, cell.attrs.bold, bold_as_bright);
+                let fg_c = Palette::bold_bright(fg_c, cell.attrs.bold(), bold_as_bright);
                 let mut fg = palette.resolve_fg(fg_c);
                 let bg = palette.resolve_bg(bg_c);
-                if cell.attrs.dim {
+                if cell.attrs.dim() {
                     // 2/3 in sRGB ≈ 0.42 linear — reads as dim but stays
                     // legible; a straight half was ~0.2 linear, near-invisible
                     fg = Rgb::new(
@@ -2887,7 +2887,7 @@ impl Renderer {
                     fg = crate::color::apply_min_contrast(fg, bg, min_contrast);
                 }
                 // blinking cells hide their glyph + decorations on the off phase
-                let blink_hidden = cell.attrs.blink && !blink_on;
+                let blink_hidden = cell.attrs.blink() && !blink_on;
 
                 let x = ox + c as f32 * cell_w;
                 let y = oy + r as f32 * cell_h;
@@ -2995,12 +2995,12 @@ impl Renderer {
                                     || !liga_char(nc.c)
                                     || nc.fg != cell.fg
                                     || nc.bg != cell.bg
-                                    || nc.attrs.bold != cell.attrs.bold
-                                    || nc.attrs.italic != cell.attrs.italic
-                                    || nc.attrs.dim != cell.attrs.dim
-                                    || nc.attrs.inverse != cell.attrs.inverse
-                                    || nc.attrs.hidden
-                                    || nc.attrs.blink != cell.attrs.blink
+                                    || nc.attrs.bold() != cell.attrs.bold()
+                                    || nc.attrs.italic() != cell.attrs.italic()
+                                    || nc.attrs.dim() != cell.attrs.dim()
+                                    || nc.attrs.inverse() != cell.attrs.inverse()
+                                    || nc.attrs.hidden()
+                                    || nc.attrs.blink() != cell.attrs.blink()
                                 {
                                     break;
                                 }
@@ -3011,7 +3011,7 @@ impl Renderer {
                         if run_len >= 2 {
                             run_buf.clear();
                             run_buf.extend(line[c..c + run_len].iter().map(|n| n.c));
-                            if let Some(g) = atlas.get_run(&run_buf, cell.attrs.bold, cell.attrs.italic) {
+                            if let Some(g) = atlas.get_run(&run_buf, cell.attrs.bold(), cell.attrs.italic()) {
                                 let lin = fg.to_linear_f32();
                                 liga_strip = Some(Instance {
                                     pos: [x + g.left, y + ascent - g.top],
@@ -3030,8 +3030,8 @@ impl Renderer {
                             let gk = GlyphKey {
                                 font: FontId::Content,
                                 c: cell.c,
-                                bold: cell.attrs.bold,
-                                italic: cell.attrs.italic,
+                                bold: cell.attrs.bold(),
+                                italic: cell.attrs.italic(),
                             };
                             // a cell carrying combining marks or an emoji ZWJ
                             // sequence composites/ligates its whole grapheme
@@ -3040,8 +3040,8 @@ impl Renderer {
                             let glyph = if cell.cluster != 0 {
                                 let cg = atlas.get_cluster(
                                     grid.cluster_str(cell.cluster),
-                                    cell.attrs.bold,
-                                    cell.attrs.italic,
+                                    cell.attrs.bold(),
+                                    cell.attrs.italic(),
                                 );
                                 if cg.is_some() { cg } else { atlas.get(gk) }
                             } else {
@@ -3072,15 +3072,15 @@ impl Renderer {
                     } else {
                         palette.resolve_fg(cell.attrs.ul)
                     };
-                    underline_rects(cell.attrs.underline, cell_w, cell_h, ascent, em_px, t, |rx, ry, rw, rh| {
+                    underline_rects(cell.attrs.underline(), cell_w, cell_h, ascent, em_px, t, |rx, ry, rw, rh| {
                         Self::push_rect(out, x + rx, y + ry, rw, rh, deco, 1.0);
                     });
-                    if cell.attrs.strike {
+                    if cell.attrs.strike() {
                         // through the middle of the x-height, not the cell box
                         let sy = (ascent - em_px * 0.26).round().max(0.0);
                         Self::push_rect(out, x, y + sy, cell_w, t, deco, 1.0);
                     }
-                    if cell.attrs.overline {
+                    if cell.attrs.overline() {
                         let oy_l = (ascent - em_px * 0.88).round().max(0.0);
                         Self::push_rect(out, x, y + oy_l, cell_w, t, deco, 1.0);
                     }

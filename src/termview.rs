@@ -301,16 +301,16 @@ fn col(c: Color) -> String {
 
 fn attrs(a: Attrs) -> String {
     let mut s = String::new();
-    if a.bold {
+    if a.bold() {
         s.push('b');
     }
-    if a.dim {
+    if a.dim() {
         s.push('d');
     }
-    if a.italic {
+    if a.italic() {
         s.push('i');
     }
-    match a.underline {
+    match a.underline() {
         UnderlineStyle::None => {}
         UnderlineStyle::Single => s.push('u'),
         UnderlineStyle::Double => s.push('2'),
@@ -318,16 +318,16 @@ fn attrs(a: Attrs) -> String {
         UnderlineStyle::Dotted => s.push('.'),
         UnderlineStyle::Dashed => s.push('='),
     }
-    if a.inverse {
+    if a.inverse() {
         s.push('v');
     }
-    if a.strike {
+    if a.strike() {
         s.push('s');
     }
-    if a.hidden {
+    if a.hidden() {
         s.push('h');
     }
-    if a.blink {
+    if a.blink() {
         s.push('*');
     }
     if s.is_empty() {

@@ -16,18 +16,57 @@ pub enum UnderlineStyle {
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct Attrs {
-    pub bold: bool,
-    pub dim: bool,
-    pub italic: bool,
-    pub underline: UnderlineStyle,
-    pub inverse: bool,
-    pub strike: bool,
-    pub hidden: bool,
-    pub blink: bool,
-    /// SGR 53 overline
-    pub overline: bool,
+    /// bits 0-7 the sgr booleans, bits 8-10 the UnderlineStyle; packed so a
+    /// Cell stays 24 bytes — grids hold millions of these
+    flags: u16,
     /// SGR 58/59 underline color; Default = draw decorations in the cell's fg
     pub ul: crate::color::Color,
+}
+
+macro_rules! attr_flag {
+    ($get:ident, $set:ident, $bit:expr) => {
+        pub fn $get(self) -> bool {
+            self.flags & (1 << $bit) != 0
+        }
+        pub fn $set(&mut self, on: bool) {
+            if on {
+                self.flags |= 1 << $bit;
+            } else {
+                self.flags &= !(1 << $bit);
+            }
+        }
+    };
+}
+
+impl Attrs {
+    attr_flag!(bold, set_bold, 0);
+    attr_flag!(dim, set_dim, 1);
+    attr_flag!(italic, set_italic, 2);
+    attr_flag!(inverse, set_inverse, 3);
+    attr_flag!(strike, set_strike, 4);
+    attr_flag!(hidden, set_hidden, 5);
+    attr_flag!(blink, set_blink, 6);
+    // overline is SGR 53
+    attr_flag!(overline, set_overline, 7);
+
+    const UNDERLINE_SHIFT: u16 = 8;
+    const UNDERLINE_MASK: u16 = 0b111 << Self::UNDERLINE_SHIFT;
+
+    pub fn underline(self) -> UnderlineStyle {
+        match (self.flags & Self::UNDERLINE_MASK) >> Self::UNDERLINE_SHIFT {
+            0 => UnderlineStyle::None,
+            1 => UnderlineStyle::Single,
+            2 => UnderlineStyle::Double,
+            3 => UnderlineStyle::Curly,
+            4 => UnderlineStyle::Dotted,
+            _ => UnderlineStyle::Dashed,
+        }
+    }
+
+    pub fn set_underline(&mut self, style: UnderlineStyle) {
+        self.flags =
+            (self.flags & !Self::UNDERLINE_MASK) | ((style as u16) << Self::UNDERLINE_SHIFT);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -42,6 +81,9 @@ pub struct Cell {
     /// 0 = the cell is just its base char `c`
     pub cluster: u32,
 }
+
+// the packing above exists for this; grids hold rows x cols x scrollback of these
+const _: () = assert!(std::mem::size_of::<Cell>() == 24);
 
 impl Default for Cell {
     fn default() -> Self {

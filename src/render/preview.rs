@@ -42,16 +42,16 @@ pub fn render_png(
     for r in 0..g.rows {
         for c in 0..g.cols {
             let cell = g.lines[r][c];
-            if cell.attrs.hidden {
+            if cell.attrs.hidden() {
                 continue;
             }
             let (mut fg_c, mut bg_c) = (cell.fg, cell.bg);
-            if cell.attrs.inverse {
+            if cell.attrs.inverse() {
                 std::mem::swap(&mut fg_c, &mut bg_c);
             }
             let mut fg = pal.resolve_fg(fg_c);
             let cbg = pal.resolve_bg(bg_c);
-            if cell.attrs.dim {
+            if cell.attrs.dim() {
                 // keep in step with the renderer's 2/3 srgb dim
                 fg = Rgb::new(
                     (fg.r as u16 * 2 / 3) as u8,
@@ -68,7 +68,7 @@ pub fn render_png(
 
             // blinking cells render only their background on the off phase; the
             // preview is a single still frame, so model the off phase
-            if cell.attrs.blink {
+            if cell.attrs.blink() {
                 continue;
             }
 
@@ -77,8 +77,8 @@ pub fn render_png(
                 && let Some(gl) = atlas.get(GlyphKey {
                     font: FontId::Content,
                     c: cell.c,
-                    bold: cell.attrs.bold,
-                    italic: cell.attrs.italic,
+                    bold: cell.attrs.bold(),
+                    italic: cell.attrs.italic(),
                 })
             {
                 let dim = atlas.dim as usize;
@@ -128,7 +128,7 @@ pub fn render_png(
                 lin3(pal.resolve_fg(cell.attrs.ul))
             };
             super::underline_rects(
-                cell.attrs.underline,
+                cell.attrs.underline(),
                 cw as f32,
                 chh as f32,
                 ascent.round(),
@@ -146,11 +146,11 @@ pub fn render_png(
                     );
                 },
             );
-            if cell.attrs.strike {
+            if cell.attrs.strike() {
                 let sy = (ascent.round() - m.px * 0.26).round().max(0.0) as usize;
                 fill(&mut fb, (iw, ih), x0, y0 + sy, cw, t, deco);
             }
-            if cell.attrs.overline {
+            if cell.attrs.overline() {
                 let oy = (ascent.round() - m.px * 0.88).round().max(0.0) as usize;
                 fill(&mut fb, (iw, ih), x0, y0 + oy, cw, t, deco);
             }
