@@ -82,6 +82,9 @@ pub struct GlyphAtlas {
     cluster_key: String,
     /// kitty images packed into the color atlas, keyed by global image key
     image_cache: FxHashMap<u64, Option<AtlasGlyph>>,
+    /// an image miss already forced a repack this frame; further image misses
+    /// wait for the next frame instead of ping-ponging full repacks per cell
+    image_repacked_this_frame: bool,
 }
 
 const PAD: u32 = 1;
@@ -155,6 +158,7 @@ impl GlyphAtlas {
             cluster_cache: FxHashMap::default(),
             cluster_key: String::new(),
             image_cache: FxHashMap::default(),
+            image_repacked_this_frame: false,
         };
         atlas.data = vec![0u8; (atlas.dim * atlas.dim) as usize];
         atlas.color_data = vec![0u8; (atlas.dim * atlas.dim * 4) as usize];
@@ -162,6 +166,12 @@ impl GlyphAtlas {
         atlas.content = atlas.measure(atlas.content);
         atlas.chrome = atlas.measure(atlas.chrome);
         atlas
+    }
+
+    /// reset the per-frame image-repack budget; the renderer calls this once
+    /// at the top of every frame build
+    pub fn begin_frame(&mut self) {
+        self.image_repacked_this_frame = false;
     }
 
     pub fn metrics(&self, font: FontId) -> FontMetrics {
@@ -877,6 +887,16 @@ impl GlyphAtlas {
             // image between 1024 and 2048 px used to hit this every frame
             // forever, silently never rendering while re-packing each paint
             ImagePack::NoSpace => {
+                // at most one image-driven repack per frame: placeholder
+                // tiling calls this per CELL, so two images that can't share
+                // the atlas would otherwise ping-pong a full repack (buffer
+                // memset + glyph wipe + total re-upload) thousands of times a
+                // frame. the loser stays invisible this frame — the miss is
+                // NOT cached — and gets its repack on the next one
+                if self.image_repacked_this_frame {
+                    return None;
+                }
+                self.image_repacked_this_frame = true;
                 const MAX_DIM: u32 = 2048;
                 self.repack_at(MAX_DIM);
                 match self.pack_image(rgba, w, h) {
@@ -1122,6 +1142,18 @@ mod tests {
         let g = atlas.get_image(7, &rgba, w, h);
         assert!(g.is_some(), "the atlas must grow to fit a 1024..2048 image");
         assert_eq!(atlas.dim, 2048);
+        // two images that can't share the atlas must not ping-pong repacks
+        // within one frame: the second miss defers to the next frame
+        let mut a2 = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
+        let side = 1800u32;
+        let big2 = vec![10u8; (side * side * 4) as usize];
+        a2.begin_frame();
+        assert!(a2.get_image(21, &big2, side, side).is_some(), "first packs via grow");
+        assert!(a2.get_image(22, &big2, side, side).is_none(), "second defers, no thrash");
+        assert!(a2.get_image(21, &big2, side, side).is_some(), "the packed one still serves");
+        a2.begin_frame();
+        assert!(a2.get_image(22, &big2, side, side).is_some(), "next frame it gets its turn");
+
         // an image over the 2048 ceiling packs downscaled but draws at its
         // original size (it used to silently never render)
         let (bw, bh) = (3000u32, 50u32);

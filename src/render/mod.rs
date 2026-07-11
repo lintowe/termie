@@ -3388,6 +3388,7 @@ impl Renderer {
 
     #[allow(non_snake_case)]
     fn build(&mut self, panes: &[PaneView], focused: bool, maximized: bool, focus_ease: f32, bare: bool) -> Vec<Instance> {
+        self.atlas.begin_frame();
         // chrome colors come from the active theme's palette
         let INK_0 = self.palette.ink0;
         let INK_3 = self.palette.ink3;
