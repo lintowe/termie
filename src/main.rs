@@ -2121,10 +2121,10 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
         }
         b'd' => {
             // d= names the delete target; an UPPERCASE letter also frees the
-            // stored image data, lowercase drops placements only (the store's
-            // count/byte caps bound whatever lingers). absent d= defaults to
-            // 'a' per the spec, except the legacy i=-only form which keeps
-            // its old free-the-image behavior
+            // stored image data, but only once no surviving placement still
+            // references the image (kitty: "provided that the image is not
+            // referenced elsewhere"). absent d= defaults to 'a' per the spec,
+            // except the legacy i=-only form which keeps freeing like before
             let sel = match (cmd.delete, cmd.id) {
                 (0, 0) => b'a',
                 (0, _) => b'I',
@@ -2132,6 +2132,12 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
             };
             let free = sel.is_ascii_uppercase();
             let dropped = match sel.to_ascii_lowercase() {
+                b'a' => {
+                    let all: Vec<u32> =
+                        term.grid.placements().iter().map(|p| p.image_id).collect();
+                    term.grid.clear_placements();
+                    all
+                }
                 b'i' if cmd.id != 0 => {
                     term.grid.remove_placements(cmd.id);
                     vec![cmd.id]
@@ -2167,16 +2173,19 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
                             && cursor_abs < p.abs_line + rows.max(1) as u64
                     })
                 }
-                _ => {
-                    // 'a' and any target this v1 doesn't know: all placements
-                    let all: Vec<u32> = term.grid.placements().iter().map(|p| p.image_id).collect();
-                    term.grid.clear_placements();
-                    all
-                }
+                // targets this v1 doesn't implement (p/x/y/r/n/f/q, or i
+                // without an id): a scoped delete must never escalate to a
+                // wipe, so they drop nothing
+                _ => Vec::new(),
             };
             if free {
                 for id in dropped {
-                    term.images.delete(id);
+                    // another placement of this image may have survived the
+                    // scoped delete; the pixels stay until the last reference
+                    // is gone
+                    if !term.grid.placements().iter().any(|p| p.image_id == id) {
+                        term.images.delete(id);
+                    }
                 }
             }
         }
@@ -10740,6 +10749,27 @@ mod tests {
         handle_kitty(&mut term, &kitty_del(0, 4, 0));
         assert!(term.grid.placements().is_empty());
         assert!(term.images.get(4).is_none());
+
+        // an unimplemented target (d=p) must not escalate to a wipe
+        handle_kitty(&mut term, &kitty_display(5, 1, 1, false));
+        handle_kitty(&mut term, &kitty_del(b'p', 0, 0));
+        assert_eq!(term.grid.placements().len(), 1, "scoped delete never wipes");
+
+        // an uppercase scoped delete keeps pixels a surviving placement of
+        // the same image still needs
+        let mut second = kitty_display(5, 1, 1, false);
+        second.action = b'p';
+        second.z = -2;
+        second.payload = vec![];
+        handle_kitty(&mut term, &second);
+        assert_eq!(term.grid.placements().len(), 2, "image 5 placed twice");
+        handle_kitty(&mut term, &kitty_del(b'Z', 0, -2));
+        assert_eq!(term.grid.placements().len(), 1);
+        assert!(term.images.get(5).is_some(), "the z=0 placement still references it");
+        // once the last placement goes, the uppercase free proceeds
+        handle_kitty(&mut term, &kitty_del(b'Z', 0, 0));
+        assert!(term.grid.placements().is_empty());
+        assert!(term.images.get(5).is_none());
     }
 
     #[test]
