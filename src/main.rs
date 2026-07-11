@@ -2091,16 +2091,23 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
                 rows: cmd.rows.min(500) as u16,
                 step: !cmd.no_cursor_move,
                 z: cmd.z,
+                virt: cmd.unicode_placeholder,
             });
             if let Some((id, disp)) = term
                 .images
                 .transmit(cmd.id, cmd.format, cmd.width, cmd.height, cmd.more, display, &cmd.payload)
             {
                 if let Some(d) = disp {
-                    term.grid.place_image(id, d.cols, d.rows, d.z);
-                    let dims = term.images.get(id).map(|i| (i.width, i.height));
-                    if d.step && let Some((w, h)) = dims {
-                        term.advance_cursor_past_image(w, h, d.cols, d.rows);
+                    if d.virt {
+                        // a virtual placement is only a prototype for unicode
+                        // placeholder cells: nothing paints, the cursor holds
+                        term.grid.set_virtual_placement(id, d.cols, d.rows);
+                    } else {
+                        term.grid.place_image(id, d.cols, d.rows, d.z);
+                        let dims = term.images.get(id).map(|i| (i.width, i.height));
+                        if d.step && let Some((w, h)) = dims {
+                            term.advance_cursor_past_image(w, h, d.cols, d.rows);
+                        }
                     }
                 }
                 // ack with the resolved id (an i=0 transmit gets an auto id)
@@ -2113,9 +2120,13 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
             let dims = term.images.get(cmd.id).map(|i| (i.width, i.height));
             if let Some((w, h)) = dims {
                 let (c, r) = (cmd.cols.min(500) as u16, cmd.rows.min(500) as u16);
-                term.grid.place_image(cmd.id, c, r, cmd.z);
-                if !cmd.no_cursor_move {
-                    term.advance_cursor_past_image(w, h, c, r);
+                if cmd.unicode_placeholder {
+                    term.grid.set_virtual_placement(cmd.id, c, r);
+                } else {
+                    term.grid.place_image(cmd.id, c, r, cmd.z);
+                    if !cmd.no_cursor_move {
+                        term.advance_cursor_past_image(w, h, c, r);
+                    }
                 }
                 if cmd.quiet == 0 {
                     kitty_ok(term, cmd.id);
@@ -2143,6 +2154,9 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
                 }
                 b'i' if cmd.id != 0 => {
                     term.grid.remove_placements(cmd.id);
+                    // i/I are the only delete targets that reach virtual (U=1)
+                    // placements — the position-scoped ones never touch them
+                    term.grid.remove_virtual_placement(cmd.id);
                     vec![cmd.id]
                 }
                 b'z' => term.grid.remove_placements_where(|p| p.z == cmd.z),
@@ -2185,8 +2199,11 @@ fn handle_kitty(term: &mut Terminal, cmd: &apc::KittyCmd) {
                 for id in dropped {
                     // another placement of this image may have survived the
                     // scoped delete; the pixels stay until the last reference
-                    // is gone
-                    if !term.grid.placements().iter().any(|p| p.image_id == id) {
+                    // is gone (a virtual placement counts — placeholder cells
+                    // still tile it)
+                    if !term.grid.placements().iter().any(|p| p.image_id == id)
+                        && term.grid.virtual_placement(id).is_none()
+                    {
                         term.images.delete(id);
                     }
                 }
@@ -10604,6 +10621,7 @@ mod tests {
             delete: 0,
             more: false,
             no_cursor_move: false,
+            unicode_placeholder: false,
             quiet: 0,
             payload: vec![1, 2, 3, 4],
         };
@@ -10626,6 +10644,7 @@ mod tests {
             delete: 0,
             more: false,
             no_cursor_move: false,
+            unicode_placeholder: false,
             quiet: 0,
             payload: vec![],
         };
@@ -10646,6 +10665,7 @@ mod tests {
             delete: 0,
             more: false,
             no_cursor_move: no_move,
+            unicode_placeholder: false,
             quiet: 2,
             payload: vec![1, 2, 3, 4],
         }
@@ -10699,12 +10719,48 @@ mod tests {
             delete: 0,
             more: false,
             no_cursor_move: false,
+            unicode_placeholder: false,
             quiet: 2,
             payload: vec![3, 4],
         };
         handle_kitty(&mut term, &done);
         assert_eq!(term.grid.placements().len(), 1);
         assert_eq!((term.grid.cursor.row, term.grid.cursor.col), (1, 4));
+    }
+
+    // a U=1 placement is a prototype for placeholder cells: it paints nothing,
+    // holds the cursor, survives delete-all, and pins the image's pixels
+    #[test]
+    fn kitty_virtual_placement_lifecycle() {
+        let mut term = term::Terminal::new(4, 8);
+        let mut virt = kitty_display(4, 3, 2, false);
+        virt.unicode_placeholder = true;
+        handle_kitty(&mut term, &virt);
+        assert!(term.grid.placements().is_empty(), "nothing paints");
+        assert_eq!((term.grid.cursor.row, term.grid.cursor.col), (0, 0), "cursor holds");
+        assert_eq!(term.grid.virtual_placement(4), Some((3, 2)));
+
+        // a regular placement of the same image, then delete-all: the regular
+        // placement dies, the virtual one survives and keeps the pixels alive
+        handle_kitty(&mut term, &kitty_display(4, 1, 1, false));
+        handle_kitty(&mut term, &kitty_del(b'A', 0, 0));
+        assert!(term.grid.placements().is_empty());
+        assert_eq!(term.grid.virtual_placement(4), Some((3, 2)), "A never reaches U=1");
+        assert!(term.images.get(4).is_some(), "the virtual reference pins the pixels");
+
+        // a=p,U=1 re-boxes the stored image without painting
+        let mut put = kitty_display(4, 5, 6, true);
+        put.action = b'p';
+        put.payload = vec![];
+        put.unicode_placeholder = true;
+        handle_kitty(&mut term, &put);
+        assert_eq!(term.grid.virtual_placement(4), Some((5, 6)));
+        assert!(term.grid.placements().is_empty());
+
+        // d=I reaches virtual placements and frees the now-unreferenced pixels
+        handle_kitty(&mut term, &kitty_del(b'I', 4, 0));
+        assert_eq!(term.grid.virtual_placement(4), None);
+        assert!(term.images.get(4).is_none());
     }
 
     fn kitty_del(delete: u8, id: u32, z: i32) -> apc::KittyCmd {
@@ -10720,6 +10776,7 @@ mod tests {
             delete,
             more: false,
             no_cursor_move: false,
+            unicode_placeholder: false,
             quiet: 2,
             payload: vec![],
         }

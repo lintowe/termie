@@ -69,13 +69,88 @@ pub struct Image {
 
 /// a display request from an a=T chunk: the c=/r= cell box, whether the
 /// cursor steps past the placement (the kitty C= movement policy), and the
-/// z= stacking order
+/// z= stacking order. `virt` marks a U=1 virtual placement: nothing paints
+/// and the cursor holds; placeholder cells reference the box later
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DisplayReq {
     pub cols: u16,
     pub rows: u16,
     pub step: bool,
     pub z: i32,
+    pub virt: bool,
+}
+
+/// kitty unicode-placeholder base char: a cell of U+10EEEE plus row/column
+/// diacritics shows one tile of an image's virtual (U=1) placement
+pub const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// kitty's rowcolumn-diacritics.txt: the combining mark at index i encodes
+/// row or column number i in a placeholder cell. ascending, for binary search
+#[rustfmt::skip]
+const ROWCOL_DIACRITICS: [u32; 297] = [
+    0x305, 0x30D, 0x30E, 0x310, 0x312, 0x33D, 0x33E, 0x33F, 0x346, 0x34A,
+    0x34B, 0x34C, 0x350, 0x351, 0x352, 0x357, 0x35B, 0x363, 0x364, 0x365,
+    0x366, 0x367, 0x368, 0x369, 0x36A, 0x36B, 0x36C, 0x36D, 0x36E, 0x36F,
+    0x483, 0x484, 0x485, 0x486, 0x487, 0x592, 0x593, 0x594, 0x595, 0x597,
+    0x598, 0x599, 0x59C, 0x59D, 0x59E, 0x59F, 0x5A0, 0x5A1, 0x5A8, 0x5A9,
+    0x5AB, 0x5AC, 0x5AF, 0x5C4, 0x610, 0x611, 0x612, 0x613, 0x614, 0x615,
+    0x616, 0x617, 0x657, 0x658, 0x659, 0x65A, 0x65B, 0x65D, 0x65E, 0x6D6,
+    0x6D7, 0x6D8, 0x6D9, 0x6DA, 0x6DB, 0x6DC, 0x6DF, 0x6E0, 0x6E1, 0x6E2,
+    0x6E4, 0x6E7, 0x6E8, 0x6EB, 0x6EC, 0x730, 0x732, 0x733, 0x735, 0x736,
+    0x73A, 0x73D, 0x73F, 0x740, 0x741, 0x743, 0x745, 0x747, 0x749, 0x74A,
+    0x7EB, 0x7EC, 0x7ED, 0x7EE, 0x7EF, 0x7F0, 0x7F1, 0x7F3, 0x816, 0x817,
+    0x818, 0x819, 0x81B, 0x81C, 0x81D, 0x81E, 0x81F, 0x820, 0x821, 0x822,
+    0x823, 0x825, 0x826, 0x827, 0x829, 0x82A, 0x82B, 0x82C, 0x82D, 0x951,
+    0x953, 0x954, 0xF82, 0xF83, 0xF86, 0xF87, 0x135D, 0x135E, 0x135F, 0x17DD,
+    0x193A, 0x1A17, 0x1A75, 0x1A76, 0x1A77, 0x1A78, 0x1A79, 0x1A7A, 0x1A7B, 0x1A7C,
+    0x1B6B, 0x1B6D, 0x1B6E, 0x1B6F, 0x1B70, 0x1B71, 0x1B72, 0x1B73, 0x1CD0, 0x1CD1,
+    0x1CD2, 0x1CDA, 0x1CDB, 0x1CE0, 0x1DC0, 0x1DC1, 0x1DC3, 0x1DC4, 0x1DC5, 0x1DC6,
+    0x1DC7, 0x1DC8, 0x1DC9, 0x1DCB, 0x1DCC, 0x1DD1, 0x1DD2, 0x1DD3, 0x1DD4, 0x1DD5,
+    0x1DD6, 0x1DD7, 0x1DD8, 0x1DD9, 0x1DDA, 0x1DDB, 0x1DDC, 0x1DDD, 0x1DDE, 0x1DDF,
+    0x1DE0, 0x1DE1, 0x1DE2, 0x1DE3, 0x1DE4, 0x1DE5, 0x1DE6, 0x1DFE, 0x20D0, 0x20D1,
+    0x20D4, 0x20D5, 0x20D6, 0x20D7, 0x20DB, 0x20DC, 0x20E1, 0x20E7, 0x20E9, 0x20F0,
+    0x2CEF, 0x2CF0, 0x2CF1, 0x2DE0, 0x2DE1, 0x2DE2, 0x2DE3, 0x2DE4, 0x2DE5, 0x2DE6,
+    0x2DE7, 0x2DE8, 0x2DE9, 0x2DEA, 0x2DEB, 0x2DEC, 0x2DED, 0x2DEE, 0x2DEF, 0x2DF0,
+    0x2DF1, 0x2DF2, 0x2DF3, 0x2DF4, 0x2DF5, 0x2DF6, 0x2DF7, 0x2DF8, 0x2DF9, 0x2DFA,
+    0x2DFB, 0x2DFC, 0x2DFD, 0x2DFE, 0x2DFF, 0xA66F, 0xA67C, 0xA67D, 0xA6F0, 0xA6F1,
+    0xA8E0, 0xA8E1, 0xA8E2, 0xA8E3, 0xA8E4, 0xA8E5, 0xA8E6, 0xA8E7, 0xA8E8, 0xA8E9,
+    0xA8EA, 0xA8EB, 0xA8EC, 0xA8ED, 0xA8EE, 0xA8EF, 0xA8F0, 0xA8F1, 0xAAB0, 0xAAB2,
+    0xAAB3, 0xAAB7, 0xAAB8, 0xAABE, 0xAABF, 0xAAC1, 0xFE20, 0xFE21, 0xFE22, 0xFE23,
+    0xFE24, 0xFE25, 0xFE26, 0x10A0F, 0x10A38, 0x1D185, 0x1D186, 0x1D187, 0x1D188, 0x1D189,
+    0x1D1AA, 0x1D1AB, 0x1D1AC, 0x1D1AD, 0x1D242, 0x1D243, 0x1D244,
+];
+
+/// the row/column number a placeholder diacritic encodes; None for any other char
+pub fn rowcol_index(c: char) -> Option<u16> {
+    let cp = c as u32;
+    if !(0x305..=0x1D244).contains(&cp) {
+        return None;
+    }
+    ROWCOL_DIACRITICS.binary_search(&cp).ok().map(|i| i as u16)
+}
+
+/// what one placeholder cell says about itself: the image id's low bits from
+/// the foreground color, and row / column / id-most-significant-byte from the
+/// cell's combining diacritics (each may be omitted and inherited from the
+/// cell to the left, per the protocol)
+pub struct PlaceholderCell {
+    pub id_low: u32,
+    pub row: Option<u16>,
+    pub col: Option<u16>,
+    pub msb: Option<u16>,
+}
+
+/// decode a placeholder cell from its foreground color and grapheme cluster
+/// (empty when the cell carries no diacritics). a default-colored cell names
+/// no image and decodes to None
+pub fn decode_placeholder(fg: crate::color::Color, cluster: &str) -> Option<PlaceholderCell> {
+    let id_low = match fg {
+        crate::color::Color::Indexed(n) => n as u32,
+        crate::color::Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
+        _ => return None,
+    };
+    let mut marks = cluster.chars().skip(1).filter_map(rowcol_index);
+    Some(PlaceholderCell { id_low, row: marks.next(), col: marks.next(), msb: marks.next() })
 }
 
 struct Pending {
@@ -447,6 +522,31 @@ mod tests {
         assert!(s.get(1).is_none(), "oldest evicted to stay inside the byte budget");
         assert!(s.get(5).is_some());
         assert!(s.total_bytes() <= MAX_TOTAL_BYTES);
+    }
+
+    // the rowcolumn table maps kitty placeholder diacritics to their index
+    #[test]
+    fn rowcol_diacritics_decode_to_indices() {
+        assert_eq!(rowcol_index('\u{305}'), Some(0));
+        assert_eq!(rowcol_index('\u{30D}'), Some(1));
+        assert_eq!(rowcol_index('\u{30E}'), Some(2));
+        assert_eq!(rowcol_index('\u{1D244}'), Some(296));
+        assert_eq!(rowcol_index('a'), None);
+        assert_eq!(rowcol_index('\u{306}'), None); // combining, but not in the table
+    }
+
+    #[test]
+    fn placeholder_cell_decodes_colors_and_marks() {
+        use crate::color::Color;
+        // rgb fg carries a 24-bit id; marks give row 1, col 2, id msb 3
+        let s = format!("{PLACEHOLDER}\u{30D}\u{30E}\u{310}");
+        let p = decode_placeholder(Color::Rgb(0, 0, 42), &s).expect("decodes");
+        assert_eq!((p.id_low, p.row, p.col, p.msb), (42, Some(1), Some(2), Some(3)));
+        // indexed fg is an 8-bit id; a bare cell leaves everything to inherit
+        let p = decode_placeholder(Color::Indexed(7), "").expect("decodes");
+        assert_eq!((p.id_low, p.row, p.col, p.msb), (7, None, None, None));
+        // a default-colored placeholder names no image
+        assert!(decode_placeholder(Color::Default, "").is_none());
     }
 
     // opening reassembly buffers beyond the cap is refused; finishing or

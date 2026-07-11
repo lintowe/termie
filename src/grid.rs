@@ -241,6 +241,9 @@ pub struct Grid {
     cluster_scratch: String,
     /// kitty graphics placements anchored to absolute lines (scroll with text)
     placements: Vec<Placement>,
+    /// kitty virtual (U=1) placements: image id → the cell box unicode
+    /// placeholder cells tile into. position-less, so reflow leaves them alone
+    virtual_placements: crate::fxhash::FxHashMap<u32, (u16, u16)>,
 }
 
 fn blank_line(cols: usize) -> Line {
@@ -347,6 +350,7 @@ impl Grid {
             cluster_index: FxHashMap::default(),
             cluster_scratch: String::new(),
             placements: Vec::new(),
+            virtual_placements: FxHashMap::default(),
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             region_top: 0,
@@ -1138,6 +1142,18 @@ impl Grid {
             self.append_combining(c);
             return;
         }
+        // kitty row/column diacritics always ride their placeholder cell — the
+        // rowcolumn table spans scripts the compact zero-width table doesn't fold
+        if crate::image::rowcol_index(c).is_some()
+            && self
+                .prev_glyph_cell()
+                .and_then(|(r, pc)| self.lines.get(r).and_then(|l| l.get(pc)))
+                .map(|cell| cell.c == crate::image::PLACEHOLDER)
+                .unwrap_or(false)
+        {
+            self.append_combining(c);
+            return;
+        }
         // a glyph right after a ZWJ continues the previous cell's emoji
         // sequence (family / profession clusters) instead of opening a new cell
         if self.join_zwj_sequence(c) {
@@ -1727,6 +1743,26 @@ impl Grid {
         self.prune_prompts();
     }
 
+    /// record a kitty virtual (U=1) placement: the cell box placeholder cells
+    /// of this image tile into. capped so a hostile stream can't grow the map
+    pub fn set_virtual_placement(&mut self, image_id: u32, cols: u16, rows: u16) {
+        if self.virtual_placements.len() >= 512 && !self.virtual_placements.contains_key(&image_id)
+        {
+            return;
+        }
+        self.virtual_placements.insert(image_id, (cols, rows));
+    }
+
+    pub fn virtual_placement(&self, image_id: u32) -> Option<(u16, u16)> {
+        self.virtual_placements.get(&image_id).copied()
+    }
+
+    /// forget an image's virtual placement (kitty d=i/I — the only delete
+    /// targets that touch virtual placements, which have no screen position)
+    pub fn remove_virtual_placement(&mut self, image_id: u32) {
+        self.virtual_placements.remove(&image_id);
+    }
+
     /// drop only the placements of a given image (kitty a=d for one image id)
     pub fn remove_placements(&mut self, image_id: u32) {
         self.placements.retain(|p| p.image_id != image_id);
@@ -1801,6 +1837,40 @@ mod tests {
         g.put_char('x');
         g.erase_in_display(2);
         assert_eq!(g.lines[0][0].c, ' ');
+    }
+
+    // kitty placeholder diacritics outside the compact zero-width table still
+    // combine onto a placeholder cell — and only there
+    #[test]
+    fn placeholder_diacritics_fold_onto_placeholder_cells() {
+        let ph = crate::image::PLACEHOLDER;
+        let mut g = Grid::new(2, 4);
+        g.put_char(ph);
+        g.put_char('\u{5C4}'); // rowcolumn index 53; width 1 by the general table
+        assert_eq!(g.cursor.col, 1, "the mark rides the cell");
+        assert_eq!(g.cluster_str(g.lines[0][0].cluster), format!("{ph}\u{5C4}"));
+        // after a normal glyph the same char writes its own cell
+        let mut g = Grid::new(2, 4);
+        g.put_char('a');
+        g.put_char('\u{5C4}');
+        assert_eq!(g.cursor.col, 2, "no placeholder, no fold");
+        assert_eq!(g.lines[0][1].c, '\u{5C4}');
+    }
+
+    // virtual (U=1) placements cap so a hostile stream can't grow the map,
+    // but updating a stored box always works
+    #[test]
+    fn virtual_placements_store_update_and_cap() {
+        let mut g = Grid::new(2, 4);
+        for id in 0..600u32 {
+            g.set_virtual_placement(id, 2, 2);
+        }
+        assert_eq!(g.virtual_placement(0), Some((2, 2)));
+        assert_eq!(g.virtual_placement(599), None, "past the cap: refused");
+        g.set_virtual_placement(0, 7, 9);
+        assert_eq!(g.virtual_placement(0), Some((7, 9)), "updates pass the cap");
+        g.remove_virtual_placement(0);
+        assert_eq!(g.virtual_placement(0), None);
     }
 
     #[test]

@@ -133,6 +133,9 @@ pub struct KittyCmd {
     pub more: bool,
     /// C=1: leave the cursor where it is instead of stepping past the placement
     pub no_cursor_move: bool,
+    /// U=1: a virtual placement — unicode placeholder cells show it, the
+    /// placement itself paints nothing and never moves the cursor
+    pub unicode_placeholder: bool,
     /// q: 0 = all responses, 1 = errors only, 2 = silent
     pub quiet: u8,
     /// the base64-decoded image bytes for this chunk
@@ -164,6 +167,7 @@ impl KittyCmd {
             delete: 0,
             more: false,
             no_cursor_move: false,
+            unicode_placeholder: false,
             quiet: 0,
             payload: Vec::new(),
         };
@@ -187,6 +191,7 @@ impl KittyCmd {
                 b"d" => cmd.delete = val.first().copied().unwrap_or(0),
                 b"m" => cmd.more = vs == "1",
                 b"C" => cmd.no_cursor_move = vs == "1",
+                b"U" => cmd.unicode_placeholder = vs == "1",
                 b"q" => cmd.quiet = vs.parse().unwrap_or(0),
                 _ => {}
             }
@@ -342,6 +347,9 @@ mod tests {
         assert_eq!((q.action, q.quiet), (b'q', 2));
         let still = KittyCmd::parse(b"Ga=T,C=1;AAAA").expect("C=1");
         assert!(still.no_cursor_move);
+        let virt = KittyCmd::parse(b"Ga=p,U=1,i=3,c=4,r=2;").expect("U=1");
+        assert!(virt.unicode_placeholder);
+        assert!(!still.unicode_placeholder);
         let under = KittyCmd::parse(b"Ga=T,z=-7;AAAA").expect("z=-7");
         assert_eq!(under.z, -7);
         assert_eq!(d.z, 0); // unspecified stays at the text layer

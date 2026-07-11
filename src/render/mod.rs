@@ -2803,6 +2803,63 @@ impl Renderer {
         }
     }
 
+    /// paint the (row, col) cell tile of an image's virtual (U=1) placement:
+    /// the image aspect-fits inside the placement's cell box, centered, and a
+    /// placeholder cell shows its intersection with the fitted rect
+    #[allow(clippy::too_many_arguments)]
+    fn push_placeholder_tile(
+        atlas: &mut GlyphAtlas,
+        out: &mut Vec<Instance>,
+        term: &Terminal,
+        image_id: u32,
+        row: u16,
+        col: u16,
+        x: f32,
+        y: f32,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        let Some((vc, vr)) = term.grid.virtual_placement(image_id) else {
+            return;
+        };
+        let Some(img) = term.images.get(image_id) else {
+            return;
+        };
+        let Some(g) = atlas.get_image(img.key, &img.rgba, img.width, img.height) else {
+            return;
+        };
+        // U=1 wants c=/r=; a zero axis falls back to the image's natural cell size
+        let vc = if vc > 0 { vc as f32 } else { (g.width / cell_w).ceil().max(1.0) };
+        let vr = if vr > 0 { vr as f32 } else { (g.height / cell_h).ceil().max(1.0) };
+        let (row, col) = (row as f32, col as f32);
+        if row >= vr || col >= vc {
+            return;
+        }
+        let (bw, bh) = (vc * cell_w, vr * cell_h);
+        let scale = (bw / g.width.max(1.0)).min(bh / g.height.max(1.0));
+        let (fw, fh) = (g.width * scale, g.height * scale);
+        let (fx, fy) = ((bw - fw) / 2.0, (bh - fh) / 2.0);
+        // this cell's rect in box coordinates, clipped to the fitted image
+        let (cx0, cy0) = (col * cell_w, row * cell_h);
+        let ix0 = cx0.max(fx);
+        let iy0 = cy0.max(fy);
+        let ix1 = (cx0 + cell_w).min(fx + fw);
+        let iy1 = (cy0 + cell_h).min(fy + fh);
+        if ix1 <= ix0 || iy1 <= iy0 {
+            return;
+        }
+        let (us, vs) = (g.uv_max[0] - g.uv_min[0], g.uv_max[1] - g.uv_min[1]);
+        out.push(Instance {
+            pos: [x + ix0 - cx0, y + iy0 - cy0],
+            size: [ix1 - ix0, iy1 - iy0],
+            uv_min: [g.uv_min[0] + us * (ix0 - fx) / fw, g.uv_min[1] + vs * (iy0 - fy) / fh],
+            uv_max: [g.uv_min[0] + us * (ix1 - fx) / fw, g.uv_min[1] + vs * (iy1 - fy) / fh],
+            color: [0.0, 0.0, 0.0, 1.0],
+            kind: 3,
+            _pad: [0; 3],
+        });
+    }
+
     /// draw one terminal grid at a pixel origin
     #[allow(clippy::too_many_arguments)]
     fn draw_grid(
@@ -2852,6 +2909,16 @@ impl Renderer {
             }
         }
 
+        // the placeholder cell drawn immediately to the left, for kitty's
+        // omitted-diacritic inheritance; the `at` column guards against gaps
+        struct PhPrev {
+            fg: crate::color::Color,
+            ul: crate::color::Color,
+            row: u16,
+            col: u16,
+            msb: u16,
+            at: usize,
+        }
         let mut run_buf = String::new();
         for r in 0..grid.rows {
             let line = grid.line_at(r);
@@ -2861,6 +2928,7 @@ impl Renderer {
             // per cell, later in the vec, and thus painted over it otherwise)
             let mut liga_until = 0usize;
             let mut liga_strip: Option<Instance> = None;
+            let mut ph_prev: Option<PhPrev> = None;
             for c in 0..grid.cols {
                 let cell = line.get(c).copied().unwrap_or_default();
                 if cell.attrs.hidden() {
@@ -2980,6 +3048,41 @@ impl Renderer {
                         {
                             out.push(strip);
                         }
+                    } else if cell.c == crate::image::PLACEHOLDER {
+                        // kitty unicode placeholder: the cell paints one tile
+                        // of its image's virtual (U=1) placement instead of a
+                        // glyph; missing row/col diacritics inherit from the
+                        // placeholder cell to its left, per the protocol
+                        let inherit = ph_prev
+                            .as_ref()
+                            .filter(|q| q.at + 1 == c && q.fg == cell.fg && q.ul == cell.attrs.ul);
+                        let marks =
+                            if cell.cluster != 0 { grid.cluster_str(cell.cluster) } else { "" };
+                        let mut placed = None;
+                        if let Some(p) = crate::image::decode_placeholder(cell.fg, marks) {
+                            let row = p.row.or(inherit.map(|q| q.row));
+                            let col = p.col.or_else(|| {
+                                inherit
+                                    .filter(|q| p.row.is_none() || p.row == Some(q.row))
+                                    .map(|q| q.col + 1)
+                            });
+                            let msb = p.msb.or(inherit.map(|q| q.msb)).unwrap_or(0);
+                            if let (Some(prow), Some(pcol)) = (row, col) {
+                                let id = (msb as u32) << 24 | p.id_low;
+                                Self::push_placeholder_tile(
+                                    atlas, out, term, id, prow, pcol, x, y, cell_w, cell_h,
+                                );
+                                placed = Some(PhPrev {
+                                    fg: cell.fg,
+                                    ul: cell.attrs.ul,
+                                    row: prow,
+                                    col: pcol,
+                                    msb,
+                                    at: c,
+                                });
+                            }
+                        }
+                        ph_prev = placed;
                     } else if Self::draw_box(out, x, y, cell_w, cell_h, cell.c, fg) {
                         // handled
                     } else {
@@ -5581,6 +5684,55 @@ mod tests {
         assert!(!bgs.is_empty(), "the red cells push bg rects");
         assert!(quads[0] < *bgs.first().unwrap(), "z=-1 sits beneath every cell rect");
         assert!(quads[1] > *bgs.last().unwrap(), "z=0 sits above the cell rects");
+    }
+
+    // kitty unicode placeholders: each placeholder cell paints its own tile of
+    // the virtual placement, and a bare cell inherits row/col from its left
+    // neighbor per the protocol's omitted-diacritic rules
+    #[test]
+    fn placeholder_cells_tile_their_virtual_placement() {
+        let mut term = Terminal::new(2, 10);
+        // a 2x1 image virtually placed into a 2x1 cell box
+        let id = term.images.insert(2, 1, vec![255, 255, 255, 255, 0, 0, 0, 255]);
+        term.grid.set_virtual_placement(id, 2, 1);
+        // fg indexed color = image id; first cell says row 0 col 0, the bare
+        // second cell inherits row 0 and col 1
+        let mut p = vte::Parser::new();
+        let text = format!("\x1b[38;5;{id}m\u{10EEEE}\u{305}\u{305}\u{10EEEE}\x1b[0m");
+        p.advance(&mut term, text.as_bytes());
+        let mut atlas = GlyphAtlas::new(14.0, 12.5, 1.0, None, 1.32);
+        let palette = Palette::from_theme(ThemeId::Instrument);
+        let mut out = Vec::new();
+        Renderer::draw_grid(
+            &mut atlas,
+            &palette,
+            &mut out,
+            &term,
+            0.0,
+            0.0,
+            true,
+            true,
+            true,
+            2.0,
+            CursorShape::Block,
+            None,
+            None,
+            &[],
+            true,
+            1.0,
+            false,
+        );
+        let tiles: Vec<&super::Instance> = out.iter().filter(|i| i.kind == 3).collect();
+        assert_eq!(tiles.len(), 2, "both placeholder cells paint a tile");
+        let cell_w = atlas.metrics(super::FontId::Content).cell_w;
+        assert_eq!(tiles[0].pos[0], 0.0);
+        assert!((tiles[1].pos[0] - cell_w).abs() < 0.01, "second tile sits in column 1");
+        // the box is wider than tall, so the fit spans the full width: the
+        // left tile samples the image's left half, the right tile its right
+        assert!((tiles[0].uv_max[0] - tiles[1].uv_min[0]).abs() < 1e-6);
+        assert!(tiles[0].uv_min[0] < tiles[0].uv_max[0]);
+        // no glyph instances: the placeholder chars render as image, not text
+        assert!(!out.iter().any(|i| i.kind == 1), "no text glyphs for placeholder cells");
     }
 
     #[test]
