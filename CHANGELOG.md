@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-07-11
+
 ### Security
 - **Image memory is bounded as a whole, not just per image.** The kitty/sixel stores capped each image at 64 MB and kept 32 of them — which let one hostile stream pin about 2 GB. A 256 MB total budget now evicts oldest-first, and concurrent chunked transfers are capped at 4 reassembly buffers so interleaved never-finished uploads can't hold 64 MB each across unbounded ids.
 - **`cargo audit` is clean of vulnerabilities.** Bumped `anyhow` (RUSTSEC-2026-0190) and `memmap2` (RUSTSEC-2026-0186), pulled `zbus_xml` past the vulnerable `quick-xml` 0.39 line, and patched `wayland-scanner` to the upstream commit that uses `quick-xml` 0.41 (RUSTSEC-2026-0194/0195) until crates.io ships it. The remaining audit note is the informational `ttf-parser` unmaintained warning via `cosmic-text`/`fontdb`.
