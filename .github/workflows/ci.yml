@@ -85,9 +85,23 @@ jobs:
         run: cargo build --all-targets
       - name: test
         run: cargo test
+      - name: bubblewrap capability
+        id: bubblewrap
+        run: |
+          if bwrap --unshare-all --ro-bind /usr /usr --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp -- /bin/true; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::kernel denies bubblewrap namespaces; sandbox integration test skipped"
+          fi
       - name: linux integration tests
-        # old setuid bubblewrap builds can reject simultaneous namespace setup
-        run: cargo test -- --ignored --test-threads=1
+        # keep real shell and namespace launches deterministic across runner images
+        run: |
+          if [[ "${{ steps.bubblewrap.outputs.supported }}" == true ]]; then
+            cargo test -- --ignored --test-threads=1
+          else
+            cargo test -- --ignored --test-threads=1 --skip plugin::sandbox::tests::sandboxed_child_cannot_see_home_or_host_environment
+          fi
       - name: clippy
         run: cargo clippy --all-targets
 
