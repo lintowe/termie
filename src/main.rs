@@ -246,7 +246,10 @@ enum PaletteAction {
     /// open one fresh window carrying the focused pane's shell and cwd
     NewWindow,
     /// relaunch elevated via UAC: a new admin termie window with the focused
-    /// pane's shell and cwd (an unelevated process can't host an elevated pty)
+    /// pane's shell and cwd (an unelevated process can't host an elevated pty).
+    /// windows-only, but the variant exists everywhere so keybinding configs
+    /// parse identically on both OSes
+    #[cfg_attr(not(windows), allow(dead_code))]
     AdminWindow,
     SplitV,
     SplitH,
@@ -266,7 +269,9 @@ enum PaletteAction {
     MarkMode,
     /// select the focused pane's retained history and live screen
     SelectAll,
-    /// toggle termie as the windows default terminal (console-app handoff)
+    /// toggle termie as the windows default terminal (console-app handoff);
+    /// windows-only, kept everywhere like AdminWindow
+    #[cfg_attr(not(windows), allow(dead_code))]
     DefaultTerminal,
     Quake,
     Theme,
@@ -10302,10 +10307,20 @@ mod tests {
     #[test]
     fn same_dir_ignores_case_separators_and_trailing_slash() {
         use std::path::Path;
-        // non-existent paths exercise the literal-normalization fallback
-        assert!(same_dir(Path::new("C:\\Users\\Me"), Path::new("c:/users/me/")));
-        assert!(same_dir(Path::new("C:\\Users\\Me\\"), Path::new("C:\\users\\me")));
-        assert!(!same_dir(Path::new("C:\\Users\\Me"), Path::new("C:\\Users\\Other")));
+        // non-existent paths exercise the literal-normalization fallback.
+        // windows filesystems fold case; unix ones are case-sensitive
+        #[cfg(windows)]
+        {
+            assert!(same_dir(Path::new("C:\\Users\\Me"), Path::new("c:/users/me/")));
+            assert!(same_dir(Path::new("C:\\Users\\Me\\"), Path::new("C:\\users\\me")));
+            assert!(!same_dir(Path::new("C:\\Users\\Me"), Path::new("C:\\Users\\Other")));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(same_dir(Path::new("/home/me"), Path::new("/home/me/")));
+            assert!(!same_dir(Path::new("/home/me"), Path::new("/home/Me")));
+            assert!(!same_dir(Path::new("/home/me"), Path::new("/home/other")));
+        }
     }
 
     #[test]

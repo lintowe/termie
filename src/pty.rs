@@ -11,6 +11,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 // already defined — the pwsh default, or the profile's starship/oh-my-posh
 // when load_profile is on — instead of replacing it. single-quoted pwsh +
 // string concatenation so the command line carries no double quotes
+#[cfg(windows)]
 const PWSH_PROMPT_HOOK: &str = r#"$global:__termie_prompt = $function:prompt; function prompt { $p=$PWD.ProviderPath; [char]27+']133;A'+[char]27+'\'+[char]27+']7;file:///'+($p -replace '\\','/')+[char]27+'\'+(& $global:__termie_prompt) }"#;
 
 // cmd expands $e to ESC and %PROMPT% before it installs the new prompt
@@ -82,11 +83,14 @@ pub enum ShellKind {
     #[default]
     Auto,
     Pwsh,
+    // the windows shells exist in the enum on unix too (cross-OS session
+    // snapshots), but nothing on unix ever constructs them — and vice versa
+    #[cfg_attr(not(windows), allow(dead_code))]
     PowerShell,
+    #[cfg_attr(not(windows), allow(dead_code))]
     Cmd,
+    #[cfg_attr(not(windows), allow(dead_code))]
     Wsl,
-    // the unix shells exist in the enum on windows too (cross-OS session
-    // snapshots), but nothing on windows ever constructs them
     #[cfg_attr(windows, allow(dead_code))]
     Bash,
     #[cfg_attr(windows, allow(dead_code))]
@@ -814,10 +818,104 @@ mod tests {
         assert_eq!(ShellKind::from_label(k.label()), k);
         // a profile removed from config degrades to auto, never panics
         assert_eq!(ShellKind::from_label("gone"), ShellKind::Auto);
-        // built-ins are never shadowed by the profile lookup
-        assert_eq!(ShellKind::from_label("cmd"), ShellKind::Cmd);
+        // built-ins are never shadowed by the profile lookup, and a label
+        // that only exists on the other OS degrades to auto
+        #[cfg(windows)]
+        {
+            assert_eq!(ShellKind::from_label("cmd"), ShellKind::Cmd);
+            assert_eq!(ShellKind::from_label("bash"), ShellKind::Auto);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(ShellKind::from_label("bash"), ShellKind::Bash);
+            assert_eq!(ShellKind::from_label("cmd"), ShellKind::Auto);
+        }
         // cycling out of a custom profile lands on auto
         assert_eq!(k.next(), ShellKind::Auto);
+    }
+}
+
+// live integration tests, unix flavor: the same spawn -> read -> parse path
+// through a real /bin/sh. #[ignore]d like the windows set; run locally with
+// `cargo test -- --ignored`
+#[cfg(all(test, unix))]
+mod live_tests_unix {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "spawns a real shell; run locally with `cargo test -- --ignored`"]
+    fn pty_runs_a_command_and_streams_output() {
+        let argv = ["/bin/sh", "-c", "echo termie-itest-OK"].map(String::from);
+        let mut pty =
+            Pty::spawn(24, 80, ShellKind::Auto, false, None, Some(&argv[..]), None, "termie", 0, 0)
+                .expect("spawn pty");
+        let (tx, rx) = mpsc::channel();
+        pty.start_reader(move |m| {
+            let _ = tx.send(m);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut out = Vec::new();
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(PtyMsg::Output(b)) => {
+                    out.extend_from_slice(&b);
+                    if out.windows(b"termie-itest-OK".len()).any(|w| w == b"termie-itest-OK") {
+                        break;
+                    }
+                }
+                Ok(PtyMsg::Exited) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        pty.kill();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("termie-itest-OK"), "output not seen; got: {text:?}");
+    }
+
+    #[test]
+    #[ignore = "spawns a real shell; run locally with `cargo test -- --ignored`"]
+    fn bash_integration_hook_emits_prompt_marks() {
+        // resolve bash directly; skip quietly on systems without it
+        if find_in_path("bash").is_none() {
+            eprintln!("skip: no bash on PATH");
+            return;
+        }
+        let mut pty =
+            Pty::spawn(24, 80, ShellKind::Bash, false, None, None, None, "termie", 0, 0)
+                .expect("spawn pty");
+        let (tx, rx) = mpsc::channel();
+        pty.start_reader(move |m| {
+            let _ = tx.send(m);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut out = Vec::new();
+        let needle = b"\x1b]133;A\x1b\\";
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(PtyMsg::Output(b)) => {
+                    out.extend_from_slice(&b);
+                    if out.windows(needle.len()).any(|w| w == needle) {
+                        break;
+                    }
+                }
+                Ok(PtyMsg::Exited) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        pty.kill();
+        assert!(
+            out.windows(needle.len()).any(|w| w == needle),
+            "bash never emitted a prompt mark: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(
+            out.windows(b"\x1b]7;file://".len()).any(|w| w == b"\x1b]7;file://"),
+            "no OSC 7 cwd report"
+        );
     }
 }
 

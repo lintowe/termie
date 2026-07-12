@@ -268,9 +268,6 @@ pub fn flash_taskbar(hwnd_handle: isize) {
     }
 }
 
-#[cfg(not(windows))]
-pub fn flash_taskbar(_hwnd_handle: isize) {}
-
 /// the cross-platform "needs attention" signal for a bell in an unfocused
 /// window: taskbar flash on windows, urgency hint / attention request elsewhere
 pub fn request_attention(w: &winit::window::Window) {
@@ -629,18 +626,8 @@ mod defterm_reg_tests {
     }
 }
 
-#[cfg(not(windows))]
-pub fn defterm_registered() -> bool {
-    false
-}
-#[cfg(not(windows))]
-pub fn register_defterm() -> bool {
-    false
-}
-#[cfg(not(windows))]
-pub fn unregister_defterm() -> bool {
-    false
-}
+// every defterm call site is cfg(windows) except the refresh on the startup
+// worker thread, so only that one keeps a unix stub
 #[cfg(not(windows))]
 pub fn refresh_defterm_server_path() {}
 
@@ -981,10 +968,12 @@ pub fn foreground_window() -> isize {
     0
 }
 
+#[cfg(windows)]
 struct ComGuard {
     needs_uninit: bool,
 }
 
+#[cfg(windows)]
 impl ComGuard {
     fn new() -> Self {
         unsafe {
@@ -998,6 +987,7 @@ impl ComGuard {
     }
 }
 
+#[cfg(windows)]
 impl Drop for ComGuard {
     fn drop(&mut self) {
         if self.needs_uninit {
