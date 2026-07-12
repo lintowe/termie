@@ -75,7 +75,8 @@ jobs:
       - name: test
         run: cargo test
       - name: linux integration tests
-        run: cargo test -- --ignored
+        # old setuid bubblewrap builds can reject simultaneous namespace setup
+        run: cargo test -- --ignored --test-threads=1
       - name: clippy
         run: cargo clippy --all-targets
 
