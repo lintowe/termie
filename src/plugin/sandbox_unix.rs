@@ -108,39 +108,27 @@ mod tests {
         assert!(moniker_for(&"x".repeat(100)).len() <= 64);
     }
 
-    // a real end-to-end launch: the jailed child must not see the user's home.
+    // a real end-to-end launch: the jailed child must not see the host environment or home
     // #[ignore]d because it needs bwrap installed; run with `cargo test -- --ignored`
     #[test]
     #[ignore = "needs bubblewrap installed"]
-    fn sandboxed_child_cannot_see_home() {
-        use std::io::Read;
-        let dir = std::env::temp_dir();
-        let sh = Path::new("/bin/sh");
-        let args = vec![
-            "-c".to_string(),
-            "if [ -e /home ]; then printf visible; else printf hidden; fi".to_string(),
-        ];
-        let mut sb = spawn("termie.plugin.selftest", sh, &args, &dir, false).expect("bwrap spawn");
-        let mut out = String::new();
-        sb.take_stdout().unwrap().read_to_string(&mut out).unwrap();
-        sb.kill();
-        assert_eq!(out, "hidden", "home should be invisible, got: {out:?}");
-    }
-
-    #[test]
-    #[ignore = "needs bubblewrap installed"]
-    fn sandboxed_child_cannot_read_host_environment() {
+    fn sandboxed_child_cannot_see_home_or_host_environment() {
         use std::io::Read;
         const SECRET: &str = "TERMIE_SANDBOX_TEST_SECRET";
         unsafe { std::env::set_var(SECRET, "visible-on-host") };
         let dir = std::env::temp_dir();
         let sh = Path::new("/bin/sh");
-        let args = vec!["-c".to_string(), format!("printf %s \"${{{SECRET}-}}\"")];
-        let mut sb = spawn("termie.plugin.env-test", sh, &args, &dir, false).expect("bwrap spawn");
+        let args = vec![
+            "-c".to_string(),
+            format!(
+                r#"printf %s "${{{SECRET}-}}|"; if [ -e /home ]; then printf visible; else printf hidden; fi"#
+            ),
+        ];
+        let mut sb = spawn("termie.plugin.selftest", sh, &args, &dir, false).expect("bwrap spawn");
         let mut out = String::new();
         sb.take_stdout().unwrap().read_to_string(&mut out).unwrap();
         sb.kill();
         unsafe { std::env::remove_var(SECRET) };
-        assert!(out.is_empty(), "sandbox inherited host secret: {out:?}");
+        assert_eq!(out, "|hidden", "sandbox exposed host state: {out:?}");
     }
 }
