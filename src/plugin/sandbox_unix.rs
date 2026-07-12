@@ -47,6 +47,11 @@ pub fn spawn(
     dir: &Path,
     net: bool,
 ) -> io::Result<Sandboxed> {
+    const PLUGIN_DIR: &str = "/plugin";
+    let sandbox_program = program
+        .strip_prefix(dir)
+        .map(|relative| Path::new(PLUGIN_DIR).join(relative))
+        .unwrap_or_else(|_| program.to_path_buf());
     let mut cmd = Command::new("bwrap");
     cmd.args(["--die-with-parent", "--unshare-all", "--new-session", "--clearenv"])
         .args(["--setenv", "PATH", "/usr/bin:/bin"])
@@ -63,16 +68,16 @@ pub fn spawn(
         .args(["--proc", "/proc"])
         .args(["--dev", "/dev"])
         .args(["--tmpfs", "/tmp"]);
-    // the plugin sees its own install dir (exe + assets), nothing else of the user's
-    cmd.arg("--ro-bind").arg(dir).arg(dir);
+    // use a fixed in-jail path because the host path's parents are intentionally hidden
+    cmd.arg("--ro-bind").arg(dir).arg(PLUGIN_DIR);
     if net {
         cmd.args(["--share-net"])
             .args(["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"])
             .args(["--ro-bind-try", "/etc/ssl", "/etc/ssl"])
             .args(["--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates"]);
     }
-    cmd.arg("--chdir").arg(dir);
-    cmd.arg("--").arg(program).args(args);
+    cmd.arg("--chdir").arg(PLUGIN_DIR);
+    cmd.arg("--").arg(sandbox_program).args(args);
     // discard the plugin's stderr in the sandbox so its logs can't corrupt
     // the protocol stream
     let child = cmd
