@@ -1,5 +1,7 @@
-//! windows-specific window effects: rounded corners (DWM) + flat per-pixel
-//! window opacity (premultiplied alpha — not acrylic/mica)
+//! the platform layer: window effects, clipboard, shell/OS integration.
+//! every function has an implementation per OS — real Win32/DWM/COM on
+//! windows, XDG/wayland/x11 equivalents on unix, and an honest no-op where
+//! the concept doesn't exist on the other side (jump lists, UAC, WSL)
 
 /// suppress the OS "application was unable to start correctly" / crash dialogs
 /// for this process and the children it spawns. without this, a pre-warmed pool
@@ -269,6 +271,22 @@ pub fn flash_taskbar(hwnd_handle: isize) {
 #[cfg(not(windows))]
 pub fn flash_taskbar(_hwnd_handle: isize) {}
 
+/// the cross-platform "needs attention" signal for a bell in an unfocused
+/// window: taskbar flash on windows, urgency hint / attention request elsewhere
+pub fn request_attention(w: &winit::window::Window) {
+    #[cfg(windows)]
+    {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        if let Ok(handle) = w.window_handle()
+            && let RawWindowHandle::Win32(h) = handle.as_raw()
+        {
+            flash_taskbar(h.hwnd.get());
+        }
+    }
+    #[cfg(not(windows))]
+    w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+}
+
 /// the user's "roll the wheel to scroll N lines" setting; u32::MAX is the
 /// "one screen at a time" sentinel (WHEEL_PAGESCROLL)
 #[cfg(windows)]
@@ -300,9 +318,28 @@ pub fn local_hm() -> String {
     format!("{:02}:{:02}", st.wHour, st.wMinute)
 }
 
-#[cfg(not(windows))]
+/// local wall-clock time as (year, month, day, hour, minute, second)
+#[cfg(unix)]
+pub fn local_ymdhms() -> (i32, u32, u32, u32, u32, u32) {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        (
+            tm.tm_year + 1900,
+            (tm.tm_mon + 1) as u32,
+            tm.tm_mday as u32,
+            tm.tm_hour as u32,
+            tm.tm_min as u32,
+            tm.tm_sec as u32,
+        )
+    }
+}
+
+#[cfg(unix)]
 pub fn local_hm() -> String {
-    String::new()
+    let (_, _, _, h, m, _) = local_ymdhms();
+    format!("{h:02}:{m:02}")
 }
 
 /// open an http(s) URL in the default browser via the shell. the scheme is
@@ -330,8 +367,19 @@ pub fn open_url(url: &str) {
     }
 }
 
-#[cfg(not(windows))]
-pub fn open_url(_url: &str) {}
+/// open an http(s) URL in the default browser via xdg-open. the scheme is
+/// re-checked here so only web links can ever be launched
+#[cfg(unix)]
+pub fn open_url(url: &str) {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return;
+    }
+    let _ = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
 
 /// small registry helpers for the default-terminal registration: read and
 /// write REG_SZ values under HKCU. every step is fallible and never panics
@@ -532,9 +580,10 @@ pub fn is_elevated() -> bool {
     })
 }
 
-#[cfg(not(windows))]
+/// true when running as root — the unix analogue of an elevated token
+#[cfg(unix)]
 pub fn is_elevated() -> bool {
-    false
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// relaunch termie elevated through the UAC prompt with `args` as its command
@@ -693,8 +742,15 @@ pub fn show_fatal_error(msg: &str) {
     }
 }
 
-#[cfg(not(windows))]
-pub fn show_fatal_error(_msg: &str) {}
+/// print the fatal boot error and best-effort raise a dialog (zenity ships on
+/// most gtk desktops; its absence just means stderr only)
+#[cfg(unix)]
+pub fn show_fatal_error(msg: &str) {
+    eprintln!("termie: GPU initialization failed: {msg}");
+    let _ = std::process::Command::new("zenity")
+        .args(["--error", "--title", "termie \u{2014} GPU initialization failed", "--text", msg])
+        .spawn();
+}
 
 /// the clipboard is a shared resource — a clipboard manager or another app
 /// often holds it for a few ms exactly when we want it. retry briefly (1+2+4+8
@@ -796,12 +852,71 @@ pub fn clipboard_get() -> String {
     out
 }
 
-#[cfg(not(windows))]
-pub fn clipboard_set(_text: &str) {}
+/// linux clipboard via copypasta (smithay-clipboard on wayland, x11-clipboard
+/// on x11). the provider isn't Send, and every caller is on the UI thread, so
+/// it lives in a thread-local initialized once from the first window's display
+#[cfg(all(unix, not(target_os = "macos")))]
+mod unix_clipboard {
+    use copypasta::ClipboardProvider;
+    use std::cell::RefCell;
 
-#[cfg(not(windows))]
+    thread_local! {
+        pub(super) static CLIP: RefCell<Option<Box<dyn ClipboardProvider>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) fn init(window: &winit::window::Window) {
+        use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+        let Ok(dh) = window.display_handle() else {
+            return;
+        };
+        CLIP.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.is_some() {
+                return;
+            }
+            *c = match dh.as_raw() {
+                RawDisplayHandle::Wayland(w) => {
+                    // the wayland clipboard rides the compositor connection the
+                    // window already holds; the display outlives every window
+                    let (_primary, clip) = unsafe {
+                        copypasta::wayland_clipboard::create_clipboards_from_external(
+                            w.display.as_ptr(),
+                        )
+                    };
+                    Some(Box::new(clip) as Box<dyn ClipboardProvider>)
+                }
+                _ => copypasta::x11_clipboard::X11ClipboardContext::<
+                    copypasta::x11_clipboard::Clipboard,
+                >::new()
+                .ok()
+                .map(|c| Box::new(c) as Box<dyn ClipboardProvider>),
+            };
+        });
+    }
+}
+
+/// hook the clipboard up to the first window's display connection; a no-op on
+/// windows (the Win32 clipboard needs no handle) and on repeat calls
+pub fn clipboard_init(_window: &winit::window::Window) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    unix_clipboard::init(_window);
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn clipboard_set(text: &str) {
+    unix_clipboard::CLIP.with(|c| {
+        if let Some(p) = c.borrow_mut().as_mut() {
+            let _ = p.set_contents(text.to_string());
+        }
+    });
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn clipboard_get() -> String {
-    String::new()
+    unix_clipboard::CLIP.with(|c| {
+        c.borrow_mut().as_mut().and_then(|p| p.get_contents().ok()).unwrap_or_default()
+    })
 }
 
 /// register a process-global hotkey on a dedicated thread and call `on_press`

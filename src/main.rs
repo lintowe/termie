@@ -72,6 +72,7 @@ enum UserEvent {
     /// the user asked from the palette, so silence is worth a status notice
     UpdateCheckDone(Option<update::Update>, bool),
     /// the setup exe finished downloading (or failed) on a worker thread
+    #[cfg(windows)]
     UpdateDownloaded(Result<std::path::PathBuf, String>),
     /// an accesskit adapter event (screen-reader tree request / action)
     Accessibility(accesskit_winit::Event),
@@ -320,9 +321,18 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("new tab here", PaletteAction::NewTabHere),
     ("duplicate tab", PaletteAction::DuplicateTab),
     ("new tab: pwsh", PaletteAction::NewShell(ShellKind::Pwsh)),
+    #[cfg(windows)]
     ("new tab: cmd", PaletteAction::NewShell(ShellKind::Cmd)),
+    #[cfg(windows)]
     ("new tab: wsl", PaletteAction::NewShell(ShellKind::Wsl)),
+    #[cfg(not(windows))]
+    ("new tab: bash", PaletteAction::NewShell(ShellKind::Bash)),
+    #[cfg(not(windows))]
+    ("new tab: zsh", PaletteAction::NewShell(ShellKind::Zsh)),
+    #[cfg(not(windows))]
+    ("new tab: fish", PaletteAction::NewShell(ShellKind::Fish)),
     ("new window", PaletteAction::NewWindow),
+    #[cfg(windows)]
     ("new admin window", PaletteAction::AdminWindow),
     ("split vertical", PaletteAction::SplitV),
     ("split horizontal", PaletteAction::SplitH),
@@ -364,6 +374,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("clear scrollback", PaletteAction::ClearScrollback),
     ("export scrollback", PaletteAction::ExportScrollback),
     ("install update", PaletteAction::InstallUpdate),
+    #[cfg(windows)]
     ("default terminal", PaletteAction::DefaultTerminal),
     ("broadcast input", PaletteAction::ToggleBroadcast),
     ("close pane", PaletteAction::CloseFocusedPane),
@@ -456,13 +467,20 @@ fn profile_mut<'a>(profiles: &'a mut Vec<pty::Profile>, name: &str) -> &'a mut p
     }
 }
 
-/// the new-tab '+' dropdown rows: the three built-in shells then one per custom
-/// profile, as (menu label, shell to spawn). the ordering is the click index
+/// the new-tab '+' dropdown rows: the built-in shells for this OS then one per
+/// custom profile, as (menu label, shell to spawn). the ordering is the click index
 fn new_tab_menu_entries() -> Vec<(String, ShellKind)> {
+    #[cfg(windows)]
     let mut rows = vec![
         ("pwsh".to_string(), ShellKind::Pwsh),
         ("cmd".to_string(), ShellKind::Cmd),
         ("wsl".to_string(), ShellKind::Wsl),
+    ];
+    #[cfg(not(windows))]
+    let mut rows = vec![
+        ("bash".to_string(), ShellKind::Bash),
+        ("zsh".to_string(), ShellKind::Zsh),
+        ("fish".to_string(), ShellKind::Fish),
     ];
     rows.extend(pty::profiles().iter().map(|p| (p.name.clone(), ShellKind::Custom(p.name.as_str()))));
     rows
@@ -669,10 +687,13 @@ fn first_leaf(node: &Node) -> usize {
     }
 }
 
+/// the tab label when a pane has no cwd or title yet: the OS's default shell
+const FALLBACK_LABEL: &str = if cfg!(windows) { "pwsh" } else { "shell" };
+
 /// derive a short tab/title label from an OSC-7 cwd uri (e.g. file:///C:/Users/dev -> dev)
 fn cwd_label(cwd: Option<&str>) -> String {
     let Some(u) = cwd else {
-        return "pwsh".to_string();
+        return FALLBACK_LABEL.to_string();
     };
     let path = u
         .strip_prefix("file://")
@@ -694,7 +715,7 @@ fn cwd_label(cwd: Option<&str>) -> String {
         .take(64)
         .collect();
     if seg.is_empty() {
-        "pwsh".to_string()
+        FALLBACK_LABEL.to_string()
     } else {
         seg
     }
@@ -715,7 +736,7 @@ fn boring_title(t: &str) -> bool {
     matches!(
         lower.as_str(),
         "pwsh" | "powershell" | "windows powershell" | "powershell 7" | "cmd"
-            | "command prompt" | "nu" | "nushell" | "bash" | "wsl"
+            | "command prompt" | "nu" | "nushell" | "bash" | "wsl" | "zsh" | "fish" | "sh"
     )
 }
 
@@ -750,7 +771,9 @@ fn pane_state_event(pane: usize, status: PaneStatus, title: &str) -> plugin::Hos
     }
 }
 
-/// turn an OSC-7 file:// uri into a filesystem path (forward slashes are fine for std::fs)
+/// turn an OSC-7 file:// uri into a filesystem path (forward slashes are fine
+/// for std::fs). the leading slash is only an artifact on windows drive paths
+/// (`file:///C:/x` → `C:/x`); a unix path keeps it (`file:///home/x` → `/home/x`)
 fn cwd_path(cwd: Option<&str>) -> Option<String> {
     let u = cwd?;
     let path = u
@@ -760,7 +783,9 @@ fn cwd_path(cwd: Option<&str>) -> Option<String> {
             None => r,
         })
         .unwrap_or(u);
-    Some(path.strip_prefix('/').unwrap_or(path).replace("%20", " "))
+    let drive = path.len() > 2 && path.starts_with('/') && path.as_bytes()[2] == b':';
+    let path = if drive { &path[1..] } else { path };
+    Some(path.replace("%20", " "))
 }
 
 /// parse a color as #rrggbb, #rgb, or r,g,b
@@ -794,10 +819,10 @@ fn parse_color(s: &str) -> Option<color::Rgb> {
 /// e.g. `bg=#101216`, `ansi1=#bf6360`); missing file yields no overrides
 fn load_color_overrides() -> Vec<(String, color::Rgb)> {
     let mut out = Vec::new();
-    let Some(dir) = std::env::var_os("APPDATA") else {
+    let Some(dir) = app_dir() else {
         return out;
     };
-    let path = std::path::Path::new(&dir).join("termie").join("colors.conf");
+    let path = dir.join("colors.conf");
     let Ok(text) = std::fs::read_to_string(path) else {
         return out;
     };
@@ -1273,10 +1298,10 @@ fn apply_keybindings_conf(
 fn load_keybindings() -> (Vec<(ModifiersState, Key, PaletteAction)>, Vec<String>, usize) {
     let mut out = default_keybindings();
     let mut sends = Vec::new();
-    let Some(dir) = std::env::var_os("APPDATA") else {
+    let Some(dir) = app_dir() else {
         return (out, sends, 0);
     };
-    let path = std::path::Path::new(&dir).join("termie").join("keybindings.conf");
+    let path = dir.join("keybindings.conf");
     let Ok(text) = std::fs::read_to_string(path) else {
         return (out, sends, 0);
     };
@@ -1323,10 +1348,9 @@ fn keybindings_template() -> String {
 /// write the commented template on first run so keybindings.conf is discoverable;
 /// never touches an existing config
 fn write_keybindings_template_if_absent() {
-    let Some(dir) = std::env::var_os("APPDATA") else {
+    let Some(dir) = app_dir() else {
         return;
     };
-    let dir = std::path::Path::new(&dir).join("termie");
     let path = dir.join("keybindings.conf");
     if path.exists() {
         return;
@@ -1700,17 +1724,16 @@ fn discover_plugins() -> Vec<Discovered> {
     out
 }
 
-/// spawn one plugin, confined to a windows appcontainer when `sandbox` is set,
-/// otherwise as a normal child process. the appcontainer path needs the plugin's
-/// install dir (for the working dir + exe grant) and maps the `network`
-/// permission to the internetClient capability
+/// spawn one plugin, confined to the OS sandbox (windows appcontainer / linux
+/// bwrap jail) when `sandbox` is set, otherwise as a normal child process. the
+/// sandboxed path needs the plugin's install dir (working dir + the one mount
+/// it may read) and maps the `network` permission to outbound network access
 fn spawn_plugin(
     sandbox: bool,
     id: &str,
     d: &Discovered,
     on_msg: impl Fn(plugin::PluginMsg) + Send + 'static,
 ) -> std::io::Result<plugin::Plugin> {
-    #[cfg(windows)]
     if sandbox
         && let Some(dir) = plugins_dir().map(|b| b.join(&d.manifest.id))
     {
@@ -1726,8 +1749,6 @@ fn spawn_plugin(
             on_msg,
         );
     }
-    #[cfg(not(windows))]
-    let _ = sandbox;
     plugin::Plugin::spawn(id.to_string(), &d.program, &d.manifest.args, on_msg)
 }
 
@@ -1984,7 +2005,7 @@ fn base64_encode(data: &[u8]) -> Vec<u8> {
 /// launches all land in the home dir with a non-explorer foreground window, so
 /// they return None and restore the saved session instead
 fn launch_cwd(fg: isize) -> Option<String> {
-    let home = std::env::var_os("USERPROFILE");
+    let home = home_dir();
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(std::path::Path::to_path_buf));
     // dirs we were handed incidentally rather than chosen by the user: the home
     // dir (start-menu / desktop / taskbar / run-box launches) and the exe's own
@@ -2012,16 +2033,19 @@ fn launch_cwd(fg: isize) -> Option<String> {
     Some(dir)
 }
 
-/// case-insensitive path equality that ignores a trailing separator, resolving
-/// each side first so e.g. C:\Users\me and C:\Users\me\ compare equal
+/// path equality that ignores a trailing separator, resolving each side first
+/// so e.g. C:\Users\me and C:\Users\me\ compare equal. windows filesystems are
+/// case-insensitive, so the comparison folds case there; unix ones are not
 fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
     let norm = |p: &std::path::Path| {
-        std::fs::canonicalize(p)
+        let s = std::fs::canonicalize(p)
             .unwrap_or_else(|_| p.to_path_buf())
             .to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_ascii_lowercase()
+            .into_owned();
+        #[cfg(windows)]
+        return s.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+        #[cfg(not(windows))]
+        return s.trim_end_matches('/').to_string();
     };
     norm(a) == norm(b)
 }
@@ -2484,8 +2508,9 @@ struct Persisted {
     quake_key_raw: Option<String>,
     /// the WSL distribution `new tab: wsl` launches (None = wsl.exe default)
     wsl_distro: Option<String>,
-    /// run plugins inside a windows appcontainer for privilege isolation
-    /// (`plugin_sandbox=appcontainer`); off by default
+    /// run plugins inside the OS sandbox for privilege isolation — a windows
+    /// appcontainer (`plugin_sandbox=appcontainer`) or a linux bwrap jail
+    /// (`plugin_sandbox=bwrap`); off by default
     plugin_sandbox: bool,
     /// win11 mica backdrop behind the window (`acrylic=true`, alias `mica`);
     /// off by default, visible only when opacity is below 100
@@ -2668,13 +2693,11 @@ fn is_settings_hot(h: Hot) -> bool {
 /// nothing. the config file is deliberately not watched: the app writes it
 /// itself on every settings change, which would echo straight back here
 fn spawn_conf_watcher(proxy: EventLoopProxy<UserEvent>) {
-    let Some(base) = std::env::var_os("APPDATA") else {
+    let Some(base) = app_dir() else {
         return;
     };
-    let paths: Vec<std::path::PathBuf> = ["colors.conf", "keybindings.conf"]
-        .iter()
-        .map(|f| std::path::Path::new(&base).join("termie").join(f))
-        .collect();
+    let paths: Vec<std::path::PathBuf> =
+        ["colors.conf", "keybindings.conf"].iter().map(|f| base.join(f)).collect();
     std::thread::spawn(move || {
         let stat = |p: &std::path::PathBuf| {
             std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()))
@@ -2693,10 +2716,36 @@ fn spawn_conf_watcher(proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-/// %APPDATA%\termie\config — a simple key=value store for every setting
+/// termie's per-user config/data directory: %APPDATA%\termie on windows,
+/// $XDG_CONFIG_HOME/termie (falling back to ~/.config/termie) elsewhere
+pub fn app_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("APPDATA")?;
+        Some(std::path::PathBuf::from(base).join("termie"))
+    }
+    #[cfg(not(windows))]
+    {
+        // the xdg spec says a relative XDG_CONFIG_HOME must be ignored
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+        Some(base.join("termie"))
+    }
+}
+
+/// the user's home directory (%USERPROFILE% / $HOME)
+fn home_dir() -> Option<std::ffi::OsString> {
+    #[cfg(windows)]
+    return std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    return std::env::var_os("HOME");
+}
+
+/// the `config` file under app_dir() — a simple key=value store for every setting
 fn config_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(std::path::PathBuf::from(base).join("termie").join("config"))
+    Some(app_dir()?.join("config"))
 }
 
 /// split a config command line into argv: whitespace separates, double quotes
@@ -2725,7 +2774,7 @@ fn split_cmdline(s: &str) -> Vec<String> {
 /// write exported scrollback text into Downloads (or the profile dir when
 /// Downloads is missing), timestamped so repeated exports never collide
 fn export_scrollback(text: &str) -> std::io::Result<std::path::PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
+    let home = home_dir()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let downloads = home.join("Downloads");
@@ -2745,11 +2794,10 @@ fn local_timestamp() -> String {
     )
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn local_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    format!("{secs}")
+    let (y, mo, d, h, mi, s) = win::local_ymdhms();
+    format!("{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
 /// %APPDATA%\termie\termie.log — the `log` facade's sink. the release build is
@@ -2776,10 +2824,9 @@ impl log::Log for FileLog {
 }
 
 fn install_file_log() {
-    let Some(base) = std::env::var_os("APPDATA") else {
+    let Some(dir) = app_dir() else {
         return;
     };
-    let dir = std::path::PathBuf::from(base).join("termie");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("termie.log");
     // bound the file: start over once it passes ~512 KB
@@ -2799,21 +2846,18 @@ fn install_file_log() {
 }
 
 fn session_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(std::path::PathBuf::from(base).join("termie").join("session.json"))
+    Some(app_dir()?.join("session.json"))
 }
 
-/// %APPDATA%\termie\plugins — one subdirectory per installed plugin
+/// the `plugins` dir under app_dir() — one subdirectory per installed plugin
 fn plugins_dir() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(std::path::PathBuf::from(base).join("termie").join("plugins"))
+    Some(app_dir()?.join("plugins"))
 }
 
-/// %APPDATA%\termie\plugins.cfg — per-plugin enabled state + granted perms.
+/// `plugins.cfg` under app_dir() — per-plugin enabled state + granted perms.
 /// one line per plugin: `id=on` or `id=off`, optionally `;perms=a,b`
 fn plugins_cfg_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(std::path::PathBuf::from(base).join("termie").join("plugins.cfg"))
+    Some(app_dir()?.join("plugins.cfg"))
 }
 
 /// persisted per-plugin state, keyed by plugin id
@@ -3060,7 +3104,9 @@ fn parse_persisted(text: &str) -> Persisted {
                     p.wsl_distro = Some(v.to_string());
                 }
             }
-            "plugin_sandbox" => p.plugin_sandbox = v == "appcontainer" || v == "on" || v == "true",
+            "plugin_sandbox" => {
+                p.plugin_sandbox = v == "appcontainer" || v == "bwrap" || v == "on" || v == "true"
+            }
             "acrylic" | "mica" => p.acrylic = v == "true" || v == "on",
             "inline_paint" => p.inline_paint = v == "true" || v == "on",
             "latency_hud" => p.latency_hud = v == "true" || v == "on",
@@ -3532,6 +3578,7 @@ impl App {
         }
         timing("window created");
 
+        win::clipboard_init(&window);
         if let Ok(handle) = window.window_handle()
             && let RawWindowHandle::Win32(h) = handle.as_raw() {
                 win::apply_window_effects(h.hwnd.get());
@@ -4683,11 +4730,25 @@ impl App {
             ConfirmAction::Quit => self.quit_app(event_loop),
             ConfirmAction::InstallUpdate => {
                 if let Some(u) = self.update.clone() {
-                    self.show_notice(&format!("downloading {}\u{2026}", u.version));
-                    let proxy = self.proxy.clone();
-                    std::thread::spawn(move || {
-                        let _ = proxy.send_event(UserEvent::UpdateDownloaded(update::download(&u)));
-                    });
+                    // windows has a native setup with a silent /update mode; on
+                    // linux installs come from a package/tarball the app must
+                    // not overwrite, so hand the user the release page instead
+                    #[cfg(windows)]
+                    {
+                        self.show_notice(&format!("downloading {}\u{2026}", u.version));
+                        let proxy = self.proxy.clone();
+                        std::thread::spawn(move || {
+                            let _ = proxy.send_event(UserEvent::UpdateDownloaded(update::download(&u)));
+                        });
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        win::open_url(&format!(
+                            "https://github.com/lintowe/termie/releases/tag/v{}",
+                            u.version
+                        ));
+                        self.show_notice(&format!("release page for {} opened", u.version));
+                    }
                 }
             }
             ConfirmAction::CloseWindow => {
@@ -5555,6 +5616,7 @@ impl App {
                 self.show_notice(if self.pw.on_top { "always on top" } else { "normal stacking" });
                 self.redraw();
             }
+            #[cfg(windows)]
             PaletteAction::DefaultTerminal => {
                 let msg = if win::defterm_registered() {
                     if win::unregister_defterm() {
@@ -5576,6 +5638,9 @@ impl App {
                 self.show_notice(msg);
                 self.redraw();
             }
+            // the "default terminal" delegation only exists on windows
+            #[cfg(not(windows))]
+            PaletteAction::DefaultTerminal => {}
             PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {
                 self.persisted.theme_auto = false;
@@ -6550,7 +6615,8 @@ impl App {
             let _ = writeln!(s, "wsl_distro={d}");
         }
         if self.persisted.plugin_sandbox {
-            let _ = writeln!(s, "plugin_sandbox=appcontainer");
+            let spelling = if cfg!(windows) { "appcontainer" } else { "bwrap" };
+            let _ = writeln!(s, "plugin_sandbox={spelling}");
         }
         if self.persisted.acrylic {
             let _ = writeln!(s, "acrylic=true");
@@ -8880,10 +8946,8 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         if !self.pw.focused
                             && let Some(w) = self.pw.window.as_ref()
-                            && let Ok(handle) = w.window_handle()
-                            && let RawWindowHandle::Win32(h) = handle.as_raw()
                         {
-                            win::flash_taskbar(h.hwnd.get());
+                            win::request_attention(w);
                         }
                     }
                     if let Some(w) = self.pw.window.as_ref() {
@@ -8948,10 +9012,8 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if !self.pw.focused
                         && let Some(w) = self.pw.window.as_ref()
-                        && let Ok(handle) = w.window_handle()
-                        && let RawWindowHandle::Win32(h) = handle.as_raw()
                     {
-                        win::flash_taskbar(h.hwnd.get());
+                        win::request_attention(w);
                     }
                 }
                 if !found {
@@ -9185,6 +9247,7 @@ impl ApplicationHandler<UserEvent> for App {
                     None => {}
                 }
             }
+            #[cfg(windows)]
             UserEvent::UpdateDownloaded(result) => match result {
                 Ok(path) => match update::run_setup(&path) {
                     // the installer takes over: update, relaunch, session restore

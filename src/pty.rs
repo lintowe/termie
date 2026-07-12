@@ -16,11 +16,67 @@ const PWSH_PROMPT_HOOK: &str = r#"$global:__termie_prompt = $function:prompt; fu
 // cmd expands $e to ESC and %PROMPT% before it installs the new prompt
 const CMD_PROMPT_HOOK: &str = r#"$e]133;D$e\$e]133;A$e\$e]9;9;$P$e\%PROMPT%$e]133;B$e\"#;
 
+/// the pwsh hook, with the OSC-7 uri shaped per OS: windows paths need the
+/// authority-less `file:///C:/...` form, unix paths are already absolute
+fn pwsh_prompt_hook() -> &'static str {
+    #[cfg(windows)]
+    {
+        PWSH_PROMPT_HOOK
+    }
+    #[cfg(not(windows))]
+    {
+        PWSH_PROMPT_HOOK_UNIX
+    }
+}
+
+#[cfg(not(windows))]
+const PWSH_PROMPT_HOOK_UNIX: &str = r#"$global:__termie_prompt = $function:prompt; function prompt { $p=$PWD.ProviderPath; [char]27+']133;A'+[char]27+'\'+[char]27+']7;file://'+$p+[char]27+'\'+(& $global:__termie_prompt) }"#;
+
+// fish registers the hook inline via -C; no rc file dance needed
+#[cfg(unix)]
+const FISH_PROMPT_HOOK: &str = r#"function __termie_prompt --on-event fish_prompt; printf '\033]133;A\033\\\033]7;file://%s\033\\' $PWD; end"#;
+
+#[cfg(unix)]
+const BASH_RC: &str = r#"# termie's bash integration: source the user's own rc, then wrap the prompt
+# with OSC 133;A (prompt mark) + OSC 7 (cwd) so prompt-jump and cwd tracking work
+[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+__termie_prompt() { printf '\033]133;A\033\\\033]7;file://%s\033\\' "$PWD"; }
+PROMPT_COMMAND="__termie_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+"#;
+
+#[cfg(unix)]
+const ZSH_ENV: &str = r#"# termie's zsh integration: hand startup back to $HOME for the user's own
+# files, registering a precmd that emits OSC 133;A + OSC 7 first
+ZDOTDIR="$HOME"
+[ -r "$HOME/.zshenv" ] && . "$HOME/.zshenv"
+autoload -Uz add-zsh-hook
+__termie_prompt() { printf '\033]133;A\033\\\033]7;file://%s\033\\' "$PWD"; }
+add-zsh-hook precmd __termie_prompt
+"#;
+
+/// write the bash/zsh integration files once per process and hand back their
+/// dir; None (and a plain shell, no hook) when the config dir is unavailable
+#[cfg(unix)]
+fn integration_dir() -> Option<std::path::PathBuf> {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = crate::app_dir()?.join("shell");
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(dir.join("bashrc"), BASH_RC).ok()?;
+        std::fs::write(dir.join(".zshenv"), ZSH_ENV).ok()?;
+        Some(dir)
+    })
+    .clone()
+}
+
 // WSLENV names which windows env vars cross into the linux side, so colors and
 // terminal identity reach programs running inside a distro
 const WSLENV_FORWARD: &str = "TERM/u:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u:TERMIE/u";
 
-/// which shell a new pane should launch
+/// which shell a new pane should launch. every variant exists on both
+/// platforms (a session snapshot written on one OS must load on the other),
+/// but cycling, labels-from-config, and resolution only honor the kinds that
+/// exist on the running OS — a foreign label degrades to Auto
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ShellKind {
     #[default]
@@ -29,19 +85,39 @@ pub enum ShellKind {
     PowerShell,
     Cmd,
     Wsl,
+    // the unix shells exist in the enum on windows too (cross-OS session
+    // snapshots), but nothing on windows ever constructs them
+    #[cfg_attr(windows, allow(dead_code))]
+    Bash,
+    #[cfg_attr(windows, allow(dead_code))]
+    Zsh,
+    #[cfg_attr(windows, allow(dead_code))]
+    Fish,
     /// a config-defined profile (`profile.<name>=<command line>`); the name
     /// borrows from the process-lifetime registry, keeping the enum Copy
     Custom(&'static str),
 }
 
 impl ShellKind {
+    #[cfg(windows)]
     pub fn next(self) -> Self {
         match self {
             ShellKind::Auto => ShellKind::Pwsh,
             ShellKind::Pwsh => ShellKind::PowerShell,
             ShellKind::PowerShell => ShellKind::Cmd,
             ShellKind::Cmd => ShellKind::Wsl,
-            ShellKind::Wsl | ShellKind::Custom(_) => ShellKind::Auto,
+            _ => ShellKind::Auto,
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn next(self) -> Self {
+        match self {
+            ShellKind::Auto => ShellKind::Bash,
+            ShellKind::Bash => ShellKind::Zsh,
+            ShellKind::Zsh => ShellKind::Fish,
+            ShellKind::Fish => ShellKind::Pwsh,
+            _ => ShellKind::Auto,
         }
     }
 
@@ -52,6 +128,9 @@ impl ShellKind {
             ShellKind::PowerShell => "powershell",
             ShellKind::Cmd => "cmd",
             ShellKind::Wsl => "wsl",
+            ShellKind::Bash => "bash",
+            ShellKind::Zsh => "zsh",
+            ShellKind::Fish => "fish",
             ShellKind::Custom(name) => name,
         }
     }
@@ -59,11 +138,21 @@ impl ShellKind {
     pub fn from_label(s: &str) -> Self {
         match s {
             "pwsh" => ShellKind::Pwsh,
+            #[cfg(windows)]
             "powershell" => ShellKind::PowerShell,
+            #[cfg(windows)]
             "cmd" => ShellKind::Cmd,
+            #[cfg(windows)]
             "wsl" => ShellKind::Wsl,
+            #[cfg(not(windows))]
+            "bash" => ShellKind::Bash,
+            #[cfg(not(windows))]
+            "zsh" => ShellKind::Zsh,
+            #[cfg(not(windows))]
+            "fish" => ShellKind::Fish,
             // a session snapshot or config may name a custom profile; unknown
-            // names (a profile since removed from config) fall back to auto
+            // names (a profile since removed from config, or a shell that only
+            // exists on the other OS) fall back to auto
             other => match profiles().iter().find(|p| p.name == other) {
                 Some(p) => ShellKind::Custom(p.name.as_str()),
                 None => ShellKind::Auto,
@@ -176,30 +265,61 @@ impl Pty {
                 let shell = resolve_shell_cached(shell);
                 // suppress the banner (and the profile unless asked) for a fast
                 // prompt, and inject an OSC-7 hook so termie learns the cwd
-                let lower = shell.to_ascii_lowercase();
+                let stem = std::path::Path::new(&shell)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
                 let mut c = CommandBuilder::new(&shell);
-                if lower.ends_with("pwsh.exe") || lower.ends_with("powershell.exe") {
-                    c.arg("-NoLogo");
-                    if !load_profile {
-                        c.arg("-NoProfile");
+                match stem.as_str() {
+                    "pwsh" | "powershell" => {
+                        c.arg("-NoLogo");
+                        if !load_profile {
+                            c.arg("-NoProfile");
+                        }
+                        c.arg("-NoExit");
+                        c.arg("-Command");
+                        c.arg(pwsh_prompt_hook());
                     }
-                    c.arg("-NoExit");
-                    c.arg("-Command");
-                    c.arg(PWSH_PROMPT_HOOK);
-                }
-                if lower.ends_with("cmd.exe") {
-                    c.arg("/K");
-                    c.arg(format!("prompt {CMD_PROMPT_HOOK}"));
-                }
-                if lower.ends_with("wsl.exe") {
-                    // launch a specific distro when one is configured (else the
-                    // wsl default), and forward the terminal env in so colors and
-                    // identity reach programs running inside wsl
-                    if let Some(d) = wsl_distro {
-                        c.arg("-d");
-                        c.arg(d);
+                    "cmd" => {
+                        c.arg("/K");
+                        c.arg(format!("prompt {CMD_PROMPT_HOOK}"));
                     }
-                    c.env("WSLENV", WSLENV_FORWARD);
+                    "wsl" => {
+                        // launch a specific distro when one is configured (else the
+                        // wsl default), and forward the terminal env in so colors and
+                        // identity reach programs running inside wsl
+                        if let Some(d) = wsl_distro {
+                            c.arg("-d");
+                            c.arg(d);
+                        }
+                        c.env("WSLENV", WSLENV_FORWARD);
+                    }
+                    #[cfg(unix)]
+                    "bash" => {
+                        // an rcfile that sources the user's own ~/.bashrc first,
+                        // so termie's prompt hook wraps it instead of replacing it
+                        if let Some(dir) = integration_dir() {
+                            c.arg("--rcfile");
+                            c.arg(dir.join("bashrc"));
+                        }
+                        c.arg("-i");
+                    }
+                    #[cfg(unix)]
+                    "zsh" => {
+                        // a ZDOTDIR whose .zshenv chains back to $HOME for the
+                        // user's own startup files after registering the hook
+                        if let Some(dir) = integration_dir() {
+                            c.env("ZDOTDIR", dir);
+                        }
+                        c.arg("-i");
+                    }
+                    #[cfg(unix)]
+                    "fish" => {
+                        c.arg("-i");
+                        c.arg("-C");
+                        c.arg(FISH_PROMPT_HOOK);
+                    }
+                    _ => {}
                 }
                 c
             }
@@ -208,7 +328,7 @@ impl Pty {
         // falling back to home if it's unset or no longer a valid directory
         if let Some(dir) = cwd.filter(|d| std::path::Path::new(*d).is_dir()) {
             cmd.cwd(dir);
-        } else if let Some(home) = env::var_os("USERPROFILE") {
+        } else if let Some(home) = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
             cmd.cwd(home);
         }
         cmd.env("TERM", "xterm-256color");
@@ -355,6 +475,7 @@ fn find_in_path(exe: &str) -> Option<PathBuf> {
 
 /// resolve a shell kind to an executable path, falling back to whatever is
 /// available (pwsh → powershell → cmd) for Auto or when the request isn't found
+#[cfg(windows)]
 fn resolve_shell(kind: ShellKind) -> String {
     let auto = || {
         find_in_path("pwsh.exe")
@@ -377,8 +498,35 @@ fn resolve_shell(kind: ShellKind) -> String {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "wsl.exe".to_string()),
         // only reached when a profile vanished from config or has an empty
-        // command line; fall back like Auto does
-        ShellKind::Custom(_) => auto(),
+        // command line; fall back like Auto does — and for the shells that only
+        // exist on unix, which a cross-OS session snapshot can still name
+        _ => auto(),
+    }
+}
+
+/// resolve a shell kind to an executable path. Auto prefers the user's login
+/// shell ($SHELL), then falls back through the common shells
+#[cfg(not(windows))]
+fn resolve_shell(kind: ShellKind) -> String {
+    let auto = || {
+        env::var("SHELL")
+            .ok()
+            .filter(|s| std::path::Path::new(s).is_file())
+            .or_else(|| find_in_path("bash").map(|p| p.to_string_lossy().into_owned()))
+            .or_else(|| find_in_path("zsh").map(|p| p.to_string_lossy().into_owned()))
+            .or_else(|| find_in_path("fish").map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "/bin/sh".to_string())
+    };
+    let find = |exe: &str| find_in_path(exe).map(|p| p.to_string_lossy().into_owned());
+    match kind {
+        ShellKind::Auto => auto(),
+        ShellKind::Bash => find("bash").unwrap_or_else(auto),
+        ShellKind::Zsh => find("zsh").unwrap_or_else(auto),
+        ShellKind::Fish => find("fish").unwrap_or_else(auto),
+        ShellKind::Pwsh => find("pwsh").unwrap_or_else(auto),
+        // windows-only kinds (a cross-OS session snapshot) and vanished
+        // profiles fall back like Auto does
+        _ => auto(),
     }
 }
 

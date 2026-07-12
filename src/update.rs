@@ -21,8 +21,7 @@ pub struct Update {
 }
 
 fn stamp_path() -> Option<PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(base).join("termie").join("update.stamp"))
+    Some(crate::app_dir()?.join("update.stamp"))
 }
 
 /// at most one automatic check per ~20h (a manual palette check skips this)
@@ -65,22 +64,31 @@ fn fetch_latest() -> Option<Update> {
     let json = Json::parse(&text)?;
     let tag = json.get_str("tag_name")?;
     let version = tag.trim_start_matches('v').to_string();
-    let assets = json.get("assets")?.as_array()?;
-    let (url, digest) = assets.iter().find_map(|a| {
-        let name = a.get_str("name")?;
-        if !name.ends_with("-setup.exe") {
-            return None;
-        }
-        // the installer only ever ships from this repo's release downloads;
-        // an api response pointing anywhere else is treated as tampering,
-        // and one without a digest can't be verified so it doesn't count
-        let url = a
-            .get_str("browser_download_url")
-            .filter(|u| u.starts_with("https://github.com/lintowe/termie/releases/download/"))?;
-        let digest = a.get_str("digest")?.strip_prefix("sha256:")?;
-        Some((url.to_string(), digest.to_ascii_lowercase()))
-    })?;
-    Some(Update { version, url, digest })
+    // on linux the app never installs anything itself (the chip links to the
+    // release page), so a newer tag alone is enough — no asset to verify
+    #[cfg(not(windows))]
+    {
+        Some(Update { version, url: String::new(), digest: String::new() })
+    }
+    #[cfg(windows)]
+    {
+        let assets = json.get("assets")?.as_array()?;
+        let (url, digest) = assets.iter().find_map(|a| {
+            let name = a.get_str("name")?;
+            if !name.ends_with("-setup.exe") {
+                return None;
+            }
+            // the installer only ever ships from this repo's release downloads;
+            // an api response pointing anywhere else is treated as tampering,
+            // and one without a digest can't be verified so it doesn't count
+            let url = a
+                .get_str("browser_download_url")
+                .filter(|u| u.starts_with("https://github.com/lintowe/termie/releases/download/"))?;
+            let digest = a.get_str("digest")?.strip_prefix("sha256:")?;
+            Some((url.to_string(), digest.to_ascii_lowercase()))
+        })?;
+        Some(Update { version, url, digest })
+    }
 }
 
 /// strict x.y.z compare against the running build; pre-release tags and
@@ -108,6 +116,7 @@ fn newer(remote: &str, local: &str) -> bool {
 }
 
 /// download the setup exe to %TEMP%; blocking — run on a worker thread
+#[cfg(windows)]
 pub fn download(u: &Update) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("termie-{}-setup.exe", u.version));
@@ -140,6 +149,7 @@ pub fn download(u: &Update) -> Result<PathBuf, String> {
 
 /// fips 180-4 sha-256, hand-rolled like the rest of termie's codecs; the
 /// updater must not run a downloaded installer on file size alone
+#[cfg(any(windows, test))]
 fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -207,6 +217,7 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// hand off to the installer's silent update mode; the caller exits right after
+#[cfg(windows)]
 pub fn run_setup(path: &PathBuf) -> Result<(), String> {
     std::process::Command::new(path)
         .arg("/update")

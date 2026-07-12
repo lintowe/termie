@@ -13,6 +13,9 @@ pub mod market;
 mod proto;
 #[cfg(windows)]
 pub mod sandbox;
+#[cfg(unix)]
+#[path = "sandbox_unix.rs"]
+pub mod sandbox;
 
 pub use manifest::{id_is_safe, Manifest, KNOWN_PERMISSIONS};
 pub use proto::{DrawCmd, HostEvent, PluginCmd, API_VERSION};
@@ -32,7 +35,6 @@ pub enum PluginMsg {
 /// enabled, an appcontainer-confined process spawned through `sandbox`
 enum Proc {
     Std(Child),
-    #[cfg(windows)]
     Sandbox(sandbox::Sandboxed),
 }
 
@@ -42,7 +44,6 @@ impl Proc {
             Proc::Std(c) => {
                 let _ = c.kill();
             }
-            #[cfg(windows)]
             Proc::Sandbox(s) => s.kill(),
         }
     }
@@ -88,10 +89,10 @@ impl Plugin {
         Ok(Plugin { proc: Proc::Std(child), writer })
     }
 
-    /// spawn `program args...` as a plugin confined to a windows appcontainer
-    /// named `moniker`, with `dir` as its working dir and granted dir, allowing
-    /// outbound network only when `net` is set
-    #[cfg(windows)]
+    /// spawn `program args...` as a plugin confined to the OS sandbox (a
+    /// windows appcontainer / a linux bwrap jail) named `moniker`, with `dir`
+    /// as its working dir and granted dir, allowing outbound network only
+    /// when `net` is set
     pub fn spawn_sandboxed(
         id: impl Into<String>,
         moniker: &str,
