@@ -41,7 +41,8 @@ const FISH_PROMPT_HOOK: &str = r#"function __termie_preexec --on-event fish_pree
 const BASH_RC: &str = r#"# termie's bash integration: source the user's own rc, then add lifecycle marks
 [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 __termie_prompt() { local s=$?; printf '\033]133;D;%d\033\\\033]133;A\033\\\033]7;file://%s\033\\' "$s" "$PWD"; }
-PS0=$'\033]133;B\033\\\033]133;C\033\\'"${PS0-}"
+# bel avoids escaping a leading command substitution in an existing PS0
+PS0=$'\033]133;B\007\033]133;C\007'"${PS0-}"
 PROMPT_COMMAND="__termie_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 "#;
 
@@ -933,7 +934,12 @@ mod live_tests_unix {
             out.windows(b"\x1b]7;file://".len()).any(|w| w == b"\x1b]7;file://"),
             "no OSC 7 cwd report"
         );
-        for mark in [b"\x1b]133;B\x1b\\".as_slice(), b"\x1b]133;C\x1b\\", done] {
+        let command_marks: [&[u8]; 2] = if shell == ShellKind::Bash {
+            [b"\x1b]133;B\x07", b"\x1b]133;C\x07"]
+        } else {
+            [b"\x1b]133;B\x1b\\", b"\x1b]133;C\x1b\\"]
+        };
+        for mark in command_marks.into_iter().chain([done.as_slice()]) {
             assert!(
                 out.windows(mark.len()).any(|w| w == mark),
                 "missing lifecycle mark {mark:?}: {:?}",
