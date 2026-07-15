@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/lintowe/termie/security/advisories/new
+    url: https://github.com/zeo/termie/security/advisories/new
     about: Report security issues privately via a GitHub advisory — see SECURITY.md. Please don't open a public issue for them.

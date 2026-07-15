@@ -4,8 +4,8 @@ A fast, lightweight GPU terminal multiplexer for Windows and Linux — tabs, spl
 
 ![termie](shot.png)
 
-- downloads: [GitHub Releases](https://github.com/lintowe/termie/releases) (Windows x64 installer; Linux x86-64 archive)
-- plugins: registry at [`lintowe/termie-plugins`](https://github.com/lintowe/termie-plugins)
+- downloads: [GitHub Releases](https://github.com/zeo/termie/releases) (Windows x64 installer; Linux x86-64 archive)
+- plugins: registry at [`zeo/termie-plugins`](https://github.com/zeo/termie-plugins)
 - license: MIT OR Apache-2.0
 
 > Early but daily-usable. Windows and Linux (X11 and Wayland) run the same rendering, emulation, and plugin core. Default-terminal handoff, Quake mode, Mica, admin relaunch, and the taskbar jump list are Windows-only.
@@ -28,7 +28,7 @@ A plugin system: plugins run as separate processes over a small JSON protocol, r
 
 ## install
 
-**Windows.** Download `termie-<version>-setup.exe` from the [latest release](https://github.com/lintowe/termie/releases/latest) and run it — a small native installer in termie's own style, not a wizard. It installs per-user (no admin prompt), and the options are right on its one page: `PATH`, Start-menu and desktop shortcuts, and the "Open in termie" right-click entry. It shows up in Add/Remove Programs, replaces any older install (including the previous MSI, after asking), and uninstalls cleanly. The build is unsigned, so SmartScreen may warn first: **More info → Run anyway**.
+**Windows.** Download `termie-<version>-setup.exe` from the [latest release](https://github.com/zeo/termie/releases/latest) and run it — a small native installer in termie's own style, not a wizard. It installs per-user (no admin prompt), and the options are right on its one page: `PATH`, Start-menu and desktop shortcuts, and the "Open in termie" right-click entry. It shows up in Add/Remove Programs, replaces any older install (including the previous MSI, after asking), and uninstalls cleanly. The build is unsigned, so SmartScreen may warn first: **More info → Run anyway**.
 
 termie checks for a newer release once a day and shows a small `UPDATE` chip on the status bar when one exists. On Windows, clicking it (or running "install update" from the palette) installs the new version and relaunches with your session restored; nothing downloads without that confirmation. On Linux the chip opens the release page instead, since the binary comes from your package manager or a source build rather than a self-installer. Turn the check off entirely with `update_check=false` in `config`. An MSI is still attached to each release for anyone scripting Windows installs.
 
@@ -96,7 +96,7 @@ Requires the [Rust toolchain](https://rustup.rs/) (stable).
 **Windows:**
 
 ```powershell
-git clone https://github.com/lintowe/termie
+git clone https://github.com/zeo/termie
 cd termie
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
@@ -112,7 +112,7 @@ sudo apt install pkg-config libwayland-dev libxkbcommon-dev libx11-dev \
 #         libXcursor-devel libXi-devel libXrandr-devel
 # Arch:   pkgconf wayland libxkbcommon libx11 libxcursor libxi libxrandr
 
-git clone https://github.com/lintowe/termie
+git clone https://github.com/zeo/termie
 cd termie
 cargo build --release      # target/release/termie
 ```
@@ -130,7 +130,7 @@ cargo build --release  # optimized
 
 ## plugins
 
-Plugins are separate processes termie talks to over newline-delimited JSON, so a plugin can be written in any language and be as heavy as it likes while the core stays lean. They render widgets in a side dock — Tier-1 text or Tier-2 immediate-mode graphics — talk to each other over an in-process bus, and can be confined to an OS sandbox (opt-in): a Windows AppContainer, or a bubblewrap jail on Linux that shows the plugin only its own install directory and grants network only with the `network` permission. The in-app marketplace (palette → "plugins") browses, installs, enables/disables, and removes them; the registry — plugin source plus the catalog — lives at [`lintowe/termie-plugins`](https://github.com/lintowe/termie-plugins), which is also where you contribute one.
+Plugins are separate processes termie talks to over newline-delimited JSON, so a plugin can be written in any language and be as heavy as it likes while the core stays lean. They render widgets in a side dock — Tier-1 text or Tier-2 immediate-mode graphics — talk to each other over an in-process bus, and can be confined to an OS sandbox (opt-in): a Windows AppContainer, or a bubblewrap jail on Linux that shows the plugin only its own install directory and grants network only with the `network` permission. The in-app marketplace (palette → "plugins") browses, installs, enables/disables, and removes them; the registry — plugin source plus the catalog — lives at [`zeo/termie-plugins`](https://github.com/zeo/termie-plugins), which is also where you contribute one.
 
 ## license
 

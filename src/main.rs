@@ -4829,7 +4829,7 @@ impl App {
                     #[cfg(not(windows))]
                     {
                         win::open_url(&format!(
-                            "https://github.com/lintowe/termie/releases/tag/v{}",
+                            "https://github.com/zeo/termie/releases/tag/v{}",
                             u.version
                         ));
                         self.show_notice(&format!("release page for {} opened", u.version));

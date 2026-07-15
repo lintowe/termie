@@ -13,7 +13,7 @@
            Name="termie"
            Language="1033"
            Version="$(var.Version)"
-           Manufacturer="lintowe"
+           Manufacturer="zeo"
            UpgradeCode="47F9CB96-4F69-487E-911F-C94B7B93F27D">
 
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
@@ -27,8 +27,8 @@
 
     <Icon Id="termie.ico" SourceFile="assets\icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="termie.ico" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/lintowe/termie" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/lintowe/termie" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/zeo/termie" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/zeo/termie" />
 
     <!-- find a leftover per-user (Inno) install; its uninstall key lives in HKCU
          and records the install dir, which we use to run its uninstaller -->

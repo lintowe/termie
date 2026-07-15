@@ -18,13 +18,13 @@ use super::manifest::{id_is_safe, Manifest};
 /// the marketplace index URL. a plain JSON catalog (see `Entry`); curated, since
 /// the security model is trust-the-store (subprocess is not a sandbox)
 pub const INDEX_URL: &str =
-    "https://raw.githubusercontent.com/lintowe/termie-plugins/main/index.json";
+    "https://raw.githubusercontent.com/zeo/termie-plugins/main/index.json";
 /// the catalog repo + ref behind the raw URLs above. files under this prefix are
 /// fetched through `gh` (authenticated) so a private catalog works; everything
 /// else falls back to anonymous curl
-const CATALOG_REPO: &str = "lintowe/termie-plugins";
+const CATALOG_REPO: &str = "zeo/termie-plugins";
 const CATALOG_REF: &str = "main";
-const CATALOG_RAW_PREFIX: &str = "https://raw.githubusercontent.com/lintowe/termie-plugins/main/";
+const CATALOG_RAW_PREFIX: &str = "https://raw.githubusercontent.com/zeo/termie-plugins/main/";
 
 /// one catalog entry from the remote index
 #[derive(Clone, Debug, PartialEq)]

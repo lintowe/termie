@@ -17,7 +17,7 @@ env:
 
 jobs:
   release:
-    if: github.actor == 'lintowe'
+    if: github.actor == 'zeo'
     runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crate::plugin::json::Json;
 use crate::plugin::market::quiet_command;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/lintowe/termie/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/latest";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Update {
@@ -85,7 +85,7 @@ fn fetch_latest() -> Option<Update> {
             // and one without a digest can't be verified so it doesn't count
             let url = a
                 .get_str("browser_download_url")
-                .filter(|u| u.starts_with("https://github.com/lintowe/termie/releases/download/"))?;
+                .filter(|u| u.starts_with("https://github.com/zeo/termie/releases/download/"))?;
             let digest = a.get_str("digest")?.strip_prefix("sha256:")?;
             Some((url.to_string(), digest.to_ascii_lowercase()))
         })?;
@@ -250,8 +250,8 @@ mod tests {
         let text = r#"{
             "tag_name": "v9.9.9",
             "assets": [
-                {"name": "termie-9.9.9-windows-x64.msi", "browser_download_url": "https://github.com/lintowe/termie/releases/download/v9.9.9/termie-9.9.9-windows-x64.msi", "digest": "sha256:aa"},
-                {"name": "termie-9.9.9-setup.exe", "browser_download_url": "https://github.com/lintowe/termie/releases/download/v9.9.9/termie-9.9.9-setup.exe", "digest": "sha256:AB12"}
+                {"name": "termie-9.9.9-windows-x64.msi", "browser_download_url": "https://github.com/zeo/termie/releases/download/v9.9.9/termie-9.9.9-windows-x64.msi", "digest": "sha256:aa"},
+                {"name": "termie-9.9.9-setup.exe", "browser_download_url": "https://github.com/zeo/termie/releases/download/v9.9.9/termie-9.9.9-setup.exe", "digest": "sha256:AB12"}
             ]
         }"#;
         let json = Json::parse(text).unwrap();

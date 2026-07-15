@@ -16,7 +16,7 @@ cargo build --release    # optimized, ~7.6 MB
 
 The `--ignored` tests spawn a real shell through the pty and aren't run in CI (they're timing-sensitive); run them locally when changing the pty or terminal-response path.
 
-Plugins live in their own repo — [`lintowe/termie-plugins`](https://github.com/lintowe/termie-plugins) — which is also where you add or change one (see its `CONTRIBUTING.md`).
+Plugins live in their own repo — [`zeo/termie-plugins`](https://github.com/zeo/termie-plugins) — which is also where you add or change one (see its `CONTRIBUTING.md`).
 
 ## House style
 
