@@ -26,6 +26,25 @@ for list in "$config_home"/xdg-terminals.list "$config_home"/*-xdg-terminals.lis
   fi
 done
 
+kde_snapshot="$config_home/termie/default-terminal-kde"
+if [ -f "$kde_snapshot" ] && command -v kreadconfig6 >/dev/null 2>&1 && command -v kwriteconfig6 >/dev/null 2>&1; then
+  current=$(kreadconfig6 --file kdeglobals --group General --key TerminalService 2>/dev/null || true)
+  if [ "$current" = termie.desktop ]; then
+    snapshot=$(tr '\000' '\n' < "$kde_snapshot")
+    application=$(printf '%s\n' "$snapshot" | sed -n '1p')
+    service=$(printf '%s\n' "$snapshot" | sed -n '2p')
+    case "$application" in
+      1*) kwriteconfig6 --file kdeglobals --group General --key TerminalApplication --notify "${application#?}" || true ;;
+      0*) kwriteconfig6 --file kdeglobals --group General --key TerminalApplication --notify --delete '' || true ;;
+    esac
+    case "$service" in
+      1*) kwriteconfig6 --file kdeglobals --group General --key TerminalService --notify "${service#?}" || true ;;
+      0*) kwriteconfig6 --file kdeglobals --group General --key TerminalService --notify --delete '' || true ;;
+    esac
+  fi
+  rm -f -- "$kde_snapshot"
+fi
+
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$prefix/share/applications" >/dev/null 2>&1 || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$prefix/share/icons/hicolor" >/dev/null 2>&1 || true
 printf 'removed termie from %s\n' "$prefix"

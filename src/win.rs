@@ -896,9 +896,8 @@ fn terminal_list_with_termie(contents: &str, enabled: bool) -> String {
     }
 }
 
-/// true when termie is the first explicit choice for this desktop
 #[cfg(target_os = "linux")]
-pub fn defterm_registered() -> bool {
+fn xdg_defterm_registered() -> bool {
     let Some(path) = terminal_list_path() else {
         return false;
     };
@@ -916,7 +915,7 @@ pub fn defterm_registered() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn set_default_terminal(enabled: bool) -> bool {
+fn set_xdg_default_terminal(enabled: bool) -> bool {
     let Some(path) = terminal_list_path() else {
         return false;
     };
@@ -951,13 +950,214 @@ fn set_default_terminal(enabled: bool) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn kde_desktop() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .any(|part| part.eq_ignore_ascii_case("kde") || part.eq_ignore_ascii_case("plasma"))
+}
+
+#[cfg(target_os = "linux")]
+fn kde_terminal_value(key: &str) -> Option<String> {
+    const MISSING: &str = "termie-kconfig-missing-7a19f20d";
+    let output = std::process::Command::new("kreadconfig6")
+        .args([
+            "--file",
+            "kdeglobals",
+            "--group",
+            "General",
+            "--key",
+            key,
+            "--default",
+            MISSING,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim_end_matches(['\r', '\n']);
+    (value != MISSING).then(|| value.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn write_kde_terminal_value(key: &str, value: Option<&str>) -> bool {
+    let mut command = std::process::Command::new("kwriteconfig6");
+    command.args([
+        "--file",
+        "kdeglobals",
+        "--group",
+        "General",
+        "--key",
+        key,
+        "--notify",
+    ]);
+    match value {
+        Some(value) => {
+            command.arg(value);
+        }
+        None => {
+            command.args(["--delete", ""]);
+        }
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn kde_terminal_snapshot(
+    application: Option<&str>,
+    service: Option<&str>,
+) -> Vec<u8> {
+    let mut snapshot = Vec::new();
+    for value in [application, service] {
+        snapshot.push(if value.is_some() { b'1' } else { b'0' });
+        if let Some(value) = value {
+            snapshot.extend_from_slice(value.as_bytes());
+        }
+        snapshot.push(0);
+    }
+    snapshot
+}
+
+#[cfg(target_os = "linux")]
+fn parse_kde_terminal_snapshot(snapshot: &[u8]) -> Option<(Option<String>, Option<String>)> {
+    let mut fields = snapshot.split(|byte| *byte == 0);
+    let mut next = || {
+        let field = fields.next()?;
+        match field.split_first()? {
+            (b'0', _) => Some(None),
+            (b'1', value) => Some(Some(String::from_utf8(value.to_vec()).ok()?)),
+            _ => None,
+        }
+    };
+    Some((next()?, next()?))
+}
+
+#[cfg(target_os = "linux")]
+fn kde_terminal_snapshot_path() -> Option<std::path::PathBuf> {
+    Some(crate::app_dir()?.join("default-terminal-kde"))
+}
+
+#[cfg(target_os = "linux")]
+fn save_kde_terminal_snapshot(application: Option<&str>, service: Option<&str>) -> bool {
+    let Some(path) = kde_terminal_snapshot_path() else {
+        return false;
+    };
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let temporary = path.with_extension("termie-tmp");
+    if std::fs::write(&temporary, kde_terminal_snapshot(application, service)).is_err() {
+        return false;
+    }
+    if std::fs::rename(&temporary, &path).is_ok() {
+        true
+    } else {
+        let _ = std::fs::remove_file(temporary);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_kde_default_terminal() -> bool {
+    let path = kde_terminal_snapshot_path();
+    let previous = match path.as_ref().map(std::fs::read) {
+        Some(Ok(snapshot)) => {
+            let Some(previous) = parse_kde_terminal_snapshot(&snapshot) else {
+                return false;
+            };
+            previous
+        }
+        Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => return false,
+        _ => (None, None),
+    };
+    let application_restored =
+        write_kde_terminal_value("TerminalApplication", previous.0.as_deref());
+    let service_restored = write_kde_terminal_value("TerminalService", previous.1.as_deref());
+    let restored = application_restored && service_restored;
+    if restored && let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+    restored
+}
+
+#[cfg(target_os = "linux")]
+fn command_quote(text: &str) -> String {
+    if text.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+    }) {
+        return text.to_string();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "linux")]
+fn set_kde_default_terminal() -> bool {
+    let application = kde_terminal_value("TerminalApplication");
+    let service = kde_terminal_value("TerminalService");
+    if service.as_deref() == Some("termie.desktop") {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    if !save_kde_terminal_snapshot(application.as_deref(), service.as_deref()) {
+        return false;
+    }
+    let executable = command_quote(&exe.to_string_lossy());
+    if write_kde_terminal_value("TerminalApplication", Some(&executable))
+        && write_kde_terminal_value("TerminalService", Some("termie.desktop"))
+    {
+        true
+    } else {
+        let _ = restore_kde_default_terminal();
+        false
+    }
+}
+
+/// true when termie is the desktop's explicit terminal choice
+#[cfg(target_os = "linux")]
+pub fn defterm_registered() -> bool {
+    if kde_desktop() {
+        kde_terminal_value("TerminalService").as_deref() == Some("termie.desktop")
+    } else {
+        xdg_defterm_registered()
+    }
+}
+
+#[cfg(target_os = "linux")]
 pub fn register_defterm() -> bool {
-    set_default_terminal(true)
+    if kde_desktop() {
+        let registered = set_kde_default_terminal();
+        if registered {
+            let _ = set_xdg_default_terminal(true);
+        }
+        registered
+    } else {
+        set_xdg_default_terminal(true)
+    }
 }
 
 #[cfg(target_os = "linux")]
 pub fn unregister_defterm() -> bool {
-    set_default_terminal(false)
+    if kde_desktop() {
+        let restored = restore_kde_default_terminal();
+        if restored {
+            let _ = set_xdg_default_terminal(false);
+        }
+        restored
+    } else {
+        set_xdg_default_terminal(false)
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -1068,9 +1268,27 @@ mod defterm_reg_tests {
     }
 }
 
-// every defterm call site is cfg(windows) except the refresh on the startup
-// worker thread, so only that one keeps a unix stub
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn refresh_defterm_server_path() {
+    if !kde_desktop()
+        || kde_terminal_value("TerminalService").as_deref() != Some("termie.desktop")
+    {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if exe.ancestors().any(|path| {
+        path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("target"))
+            || path.join("Cargo.toml").is_file()
+    }) {
+        return;
+    }
+    let executable = command_quote(&exe.to_string_lossy());
+    let _ = write_kde_terminal_value("TerminalApplication", Some(&executable));
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn refresh_defterm_server_path() {}
 
 /// the installed WSL distribution friendly-names, read from the registry
@@ -1478,8 +1696,9 @@ pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::{
-        desktop_with_profiles, kwin_keep_above_script, launcher_progress_properties,
-        parse_portal_color_scheme, terminal_list_with_termie,
+        command_quote, desktop_with_profiles, kde_terminal_snapshot,
+        kwin_keep_above_script, launcher_progress_properties,
+        parse_kde_terminal_snapshot, parse_portal_color_scheme, terminal_list_with_termie,
     };
 
     #[test]
@@ -1517,6 +1736,21 @@ mod tests {
         );
         assert_eq!(terminal_list_with_termie(&enabled, false), original);
         assert_eq!(terminal_list_with_termie("termie.desktop\n", false), "");
+    }
+
+    #[test]
+    fn kde_default_terminal_snapshot_round_trips_missing_and_quoted_values() {
+        let snapshot = kde_terminal_snapshot(Some("windows7-cmd --profile 'work'"), None);
+        assert_eq!(
+            parse_kde_terminal_snapshot(&snapshot),
+            Some((Some("windows7-cmd --profile 'work'".to_string()), None))
+        );
+        assert_eq!(parse_kde_terminal_snapshot(b"broken"), None);
+        assert_eq!(command_quote("/home/me/.local/bin/termie"), "/home/me/.local/bin/termie");
+        assert_eq!(
+            command_quote("/home/me/Termie's tools/termie"),
+            "'/home/me/Termie'\\''s tools/termie'"
+        );
     }
 
     #[test]
