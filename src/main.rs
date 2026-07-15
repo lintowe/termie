@@ -2169,14 +2169,26 @@ fn clamp_window_bounds(
     }
 }
 
+/// cap the client area so the complete outer window fits the monitor
+fn monitor_inner_limit(
+    monitor: PhysicalSize<u32>,
+    inner: PhysicalSize<u32>,
+    outer: PhysicalSize<u32>,
+) -> PhysicalSize<u32> {
+    PhysicalSize::new(
+        monitor.width.saturating_sub(outer.width.saturating_sub(inner.width)).max(1),
+        monitor.height.saturating_sub(outer.height.saturating_sub(inner.height)).max(1),
+    )
+}
+
 /// update the live resize ceiling after a window crosses onto another screen
 fn constrain_window_to_monitor(window: &Window) {
     let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) else {
         return;
     };
-    let limit = monitor.size();
-    window.set_max_inner_size(Some(limit));
     let size = window.inner_size();
+    let limit = monitor_inner_limit(monitor.size(), size, window.outer_size());
+    window.set_max_inner_size(Some(limit));
     if size.width > limit.width || size.height > limit.height {
         let _ = window.request_inner_size(PhysicalSize::new(
             size.width.min(limit.width),
@@ -3712,6 +3724,7 @@ impl App {
         if restore_max {
             window.set_maximized(true);
         }
+        constrain_window_to_monitor(&window);
         timing("window created");
 
         win::clipboard_init(&window);
@@ -7414,6 +7427,7 @@ impl App {
                 return;
             }
         };
+        constrain_window_to_monitor(&window);
         // without this a torn-off window silently drops CJK input: the OS IME
         // never engages, so no composition or commit ever reaches the pane
         window.set_ime_allowed(true);
@@ -10382,6 +10396,16 @@ mod tests {
         // a window off every monitor (its display is gone) is centered on the primary
         let two = [(0, 0, 1920u32, 1080u32), (1920, 0, 1280, 1024)];
         assert_eq!(clamp_window_bounds(&two, (-4000, -4000, 1000, 700)), (460, 190, 1000, 700));
+    }
+
+    #[test]
+    fn monitor_limit_includes_window_frame() {
+        let monitor = PhysicalSize::new(1920, 1080);
+        assert_eq!(
+            monitor_inner_limit(monitor, PhysicalSize::new(1000, 640), PhysicalSize::new(1016, 679)),
+            PhysicalSize::new(1904, 1041)
+        );
+        assert_eq!(monitor_inner_limit(monitor, monitor, monitor), monitor);
     }
 
     #[test]
