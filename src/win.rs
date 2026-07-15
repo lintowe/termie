@@ -182,8 +182,28 @@ pub fn apply_backdrop(_hwnd_handle: isize, _on: bool) {}
 
 #[cfg(target_os = "linux")]
 fn kwin_keep_above_script(pid: u32, width: f64, height: f64, on: bool) -> String {
+    kwin_window_script(pid, width, height, &format!("    target.keepAbove = {on};\n"))
+}
+
+#[cfg(target_os = "linux")]
+fn kwin_quake_script(pid: u32, width: f64, height: f64) -> String {
+    kwin_window_script(
+        pid,
+        width,
+        height,
+        "    const area = workspace.clientArea(KWin.MaximizeArea, target);\n    target.minimized = false;\n    target.frameGeometry = { x: area.x, y: area.y, width: area.width, height: Math.max(120, Math.round(area.height * 0.45)) };\n    target.keepAbove = true;\n    workspace.activeWindow = target;\n",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn kwin_hide_quake_script(pid: u32, width: f64, height: f64) -> String {
+    kwin_window_script(pid, width, height, "    target.minimized = true;\n")
+}
+
+#[cfg(target_os = "linux")]
+fn kwin_window_script(pid: u32, width: f64, height: f64, action: &str) -> String {
     format!(
-        "function matchesTarget(window) {{\n    return window.pid === {pid}\n        && Math.abs(window.width - {width:.3}) < 2\n        && Math.abs(window.height - {height:.3}) < 2;\n}}\nlet target = workspace.activeWindow;\nif (!target || !matchesTarget(target)) {{\n    const windows = workspace.windowList();\n    let match = null;\n    let matches = 0;\n    for (let i = 0; i < windows.length; i++) {{\n        if (matchesTarget(windows[i])) {{\n            match = windows[i];\n            matches++;\n        }}\n    }}\n    if (matches === 1) target = match;\n}}\nif (target && matchesTarget(target)) {{\n    target.keepAbove = {on};\n}}\n"
+        "function matchesTarget(window) {{\n    return window.pid === {pid}\n        && Math.abs(window.width - {width:.3}) < 2\n        && Math.abs(window.height - {height:.3}) < 2;\n}}\nlet target = workspace.activeWindow;\nif (!target || !matchesTarget(target)) {{\n    const windows = workspace.windowList();\n    let match = null;\n    let matches = 0;\n    for (let i = 0; i < windows.length; i++) {{\n        if (matchesTarget(windows[i])) {{\n            match = windows[i];\n            matches++;\n        }}\n    }}\n    if (matches === 1) target = match;\n}}\nif (target && matchesTarget(target)) {{\n{action}}}\n"
     )
 }
 
@@ -191,28 +211,49 @@ fn kwin_keep_above_script(pid: u32, width: f64, height: f64, on: bool) -> String
 /// generic window-level call is currently unsupported
 #[cfg(target_os = "linux")]
 pub fn set_window_above(window: &winit::window::Window, on: bool) {
+    let _ = apply_kwin_window_script(window, "keep-above", |pid, width, height| {
+        kwin_keep_above_script(pid, width, height, on)
+    });
+}
+
+#[cfg(target_os = "linux")]
+pub fn show_quake_window(window: &winit::window::Window) -> bool {
+    apply_kwin_window_script(window, "quake", kwin_quake_script)
+}
+
+#[cfg(target_os = "linux")]
+pub fn hide_quake_window(window: &winit::window::Window) -> bool {
+    apply_kwin_window_script(window, "hide-quake", kwin_hide_quake_script)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_kwin_window_script(
+    window: &winit::window::Window,
+    purpose: &str,
+    script: impl FnOnce(u32, f64, f64) -> String,
+) -> bool {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
     if !desktop.split(':').any(|part| matches!(part, "kde" | "plasma")) {
-        return;
+        return false;
     }
     let pid = std::process::id();
-    let name = format!("termie-keep-above-{pid}");
+    let name = format!("termie-{purpose}-{pid}");
     let Some(dir) = crate::cache_dir() else {
-        return;
+        return false;
     };
     if std::fs::create_dir_all(&dir).is_err() {
-        return;
+        return false;
     }
     let path = dir.join(format!("{name}.js"));
     let size = window.inner_size();
     let scale = window.scale_factor();
     if std::fs::write(
         &path,
-        kwin_keep_above_script(pid, size.width as f64 / scale, size.height as f64 / scale, on),
+        script(pid, size.width as f64 / scale, size.height as f64 / scale),
     )
     .is_err()
     {
-        return;
+        return false;
     }
     let load = std::process::Command::new("gdbus")
         .args([
@@ -236,8 +277,8 @@ pub fn set_window_above(window: &winit::window::Window, on: bool) {
                 .and_then(|id| u32::try_from(id).ok())
         })
     });
-    if let Some(id) = id {
-        let _ = std::process::Command::new("gdbus")
+    let handled = if let Some(id) = id {
+        let ran = std::process::Command::new("gdbus")
             .args([
                 "call",
                 "--session",
@@ -250,7 +291,8 @@ pub fn set_window_above(window: &winit::window::Window, on: bool) {
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .status()
+            .is_ok_and(|status| status.success());
         let _ = std::process::Command::new("gdbus")
             .args([
                 "call",
@@ -266,8 +308,12 @@ pub fn set_window_above(window: &winit::window::Window, on: bool) {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-    }
+        ran
+    } else {
+        false
+    };
     let _ = std::fs::remove_file(path);
+    handled
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1595,6 +1641,149 @@ pub fn spawn_global_hotkey(id: i32, modifiers: u32, vk: u32, on_press: impl Fn()
     rx.recv().unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
+pub fn spawn_global_hotkey(trigger: String, on_press: impl Fn() + Send + 'static) -> bool {
+    std::thread::Builder::new()
+        .name("termie-quake-hotkey".to_string())
+        .spawn(move || {
+            if let Err(error) = run_global_shortcut_portal(&trigger, on_press) {
+                log::warn!("quake hotkey unavailable: {error}");
+            }
+        })
+        .is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn run_global_shortcut_portal(
+    trigger: &str,
+    on_press: impl Fn() + Send + 'static,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use zbus::blocking::{Connection, Proxy};
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Str};
+
+    const DESTINATION: &str = "org.freedesktop.portal.Desktop";
+    const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+    const SHORTCUTS_INTERFACE: &str = "org.freedesktop.portal.GlobalShortcuts";
+    static TOKEN: AtomicU64 = AtomicU64::new(1);
+
+    fn token(prefix: &str, counter: &AtomicU64) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        format!(
+            "termie_{prefix}_{}_{}_{nanos}",
+            std::process::id(),
+            counter.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn option(value: &str) -> OwnedValue {
+        OwnedValue::from(Str::from(value))
+    }
+
+    fn request_path(connection: &Connection, token: &str) -> Result<OwnedObjectPath, Box<dyn std::error::Error>> {
+        let sender = connection
+            .unique_name()
+            .ok_or("session bus did not assign a unique name")?
+            .as_str()
+            .trim_start_matches(':')
+            .replace('.', "_");
+        Ok(OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/portal/desktop/request/{sender}/{token}"
+        ))?)
+    }
+
+    fn response(
+        connection: &Connection,
+        expected: &OwnedObjectPath,
+        returned: &OwnedObjectPath,
+        mut expected_signals: zbus::blocking::proxy::SignalIterator<'_>,
+    ) -> Result<HashMap<String, OwnedValue>, Box<dyn std::error::Error>> {
+        let message = if expected == returned {
+            expected_signals.next().ok_or("portal request ended without a response")?
+        } else {
+            drop(expected_signals);
+            let request = Proxy::new(
+                connection,
+                DESTINATION,
+                returned.as_str(),
+                "org.freedesktop.portal.Request",
+            )?;
+            request
+                .receive_signal("Response")?
+                .next()
+                .ok_or("portal request ended without a response")?
+        };
+        let (code, values): (u32, HashMap<String, OwnedValue>) = message.body().deserialize()?;
+        if code != 0 {
+            return Err(format!("portal request was declined with response {code}").into());
+        }
+        Ok(values)
+    }
+
+    let connection = Connection::session()?;
+    let portal = Proxy::new(&connection, DESTINATION, PORTAL_PATH, SHORTCUTS_INTERFACE)?;
+    let mut activations = portal.receive_signal_with_args("Activated", &[(1, "termie-quake")])?;
+
+    let create_token = token("create", &TOKEN);
+    let session_token = token("session", &TOKEN);
+    let create_path = request_path(&connection, &create_token)?;
+    let create_request = Proxy::new(
+        &connection,
+        DESTINATION,
+        create_path.as_str(),
+        "org.freedesktop.portal.Request",
+    )?;
+    let create_signals = create_request.receive_signal("Response")?;
+    let create_options = HashMap::from([
+        ("handle_token", option(&create_token)),
+        ("session_handle_token", option(&session_token)),
+    ]);
+    let returned: OwnedObjectPath = portal.call("CreateSession", &(create_options,))?;
+    let mut values = response(&connection, &create_path, &returned, create_signals)?;
+    let session = String::try_from(values.remove("session_handle").ok_or("portal omitted the session handle")?)?;
+    let session_path = OwnedObjectPath::try_from(session)?;
+
+    let bind_token = token("bind", &TOKEN);
+    let bind_path = request_path(&connection, &bind_token)?;
+    let bind_request = Proxy::new(
+        &connection,
+        DESTINATION,
+        bind_path.as_str(),
+        "org.freedesktop.portal.Request",
+    )?;
+    let bind_signals = bind_request.receive_signal("Response")?;
+    let shortcut = HashMap::from([
+        ("description", option("Show or hide the Termie drop-down")),
+        ("preferred_trigger", option(trigger)),
+    ]);
+    let shortcuts = vec![("termie-quake", shortcut)];
+    let bind_options = HashMap::from([("handle_token", option(&bind_token))]);
+    let returned: OwnedObjectPath = portal.call(
+        "BindShortcuts",
+        &(&session_path, shortcuts, "", bind_options),
+    )?;
+    let mut values = response(&connection, &bind_path, &returned, bind_signals)?;
+    let bound = values
+        .remove("shortcuts")
+        .and_then(|value| Vec::<(String, HashMap<String, OwnedValue>)>::try_from(value).ok())
+        .is_some_and(|shortcuts| shortcuts.iter().any(|(id, _)| id == "termie-quake"));
+    if !bound {
+        return Err("portal did not bind the quake shortcut".into());
+    }
+
+    for message in &mut activations {
+        let (_, shortcut, _, _): (OwnedObjectPath, String, u64, HashMap<String, OwnedValue>) =
+            message.body().deserialize()?;
+        if shortcut == "termie-quake" {
+            on_press();
+        }
+    }
+    Ok(())
+}
+
 /// the foreground window right now, as a raw HWND value (0 if none). captured at
 /// startup to remember which window launched us, before we create our own
 #[cfg(windows)]
@@ -1696,8 +1885,8 @@ pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::{
-        command_quote, desktop_with_profiles, kde_terminal_snapshot,
-        kwin_keep_above_script, launcher_progress_properties,
+        command_quote, desktop_with_profiles, kde_terminal_snapshot, kwin_hide_quake_script,
+        kwin_keep_above_script, kwin_quake_script, launcher_progress_properties,
         parse_kde_terminal_snapshot, parse_portal_color_scheme, terminal_list_with_termie,
     };
 
@@ -1795,5 +1984,16 @@ mod tests {
         assert!(on.contains("matches === 1"));
         let off = kwin_keep_above_script(4217, 1000.0, 640.0, false);
         assert!(off.contains("target.keepAbove = false"));
+    }
+
+    #[test]
+    fn kwin_quake_uses_the_active_work_area() {
+        let script = kwin_quake_script(42, 1000.0, 640.0);
+        assert!(script.contains("workspace.clientArea(KWin.MaximizeArea, target)"));
+        assert!(script.contains("height: Math.max(120, Math.round(area.height * 0.45))"));
+        assert!(script.contains("target.keepAbove = true"));
+        assert!(script.contains("workspace.activeWindow = target"));
+        assert!(script.contains("target.minimized = false"));
+        assert!(kwin_hide_quake_script(42, 1000.0, 640.0).contains("target.minimized = true"));
     }
 }

@@ -2581,6 +2581,7 @@ dependencies = [
  "windows",
  "windows-core",
  "winit",
+ "zbus",
 ]
 
 [[package]]

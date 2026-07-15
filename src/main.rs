@@ -78,7 +78,7 @@ enum UserEvent {
     /// entries, or Err with a reason the fetch failed)
     Market(Result<Vec<plugin::market::Entry>, String>),
     /// the global quake hotkey fired (from the hotkey thread)
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     ToggleQuake,
     /// colors.conf or keybindings.conf changed on disk (watcher thread):
     /// re-read both so hand edits apply live, without a restart
@@ -283,7 +283,7 @@ enum PaletteAction {
     SelectAll,
     /// toggle termie as the platform's default terminal
     DefaultTerminal,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     Quake,
     Theme,
     Plugins,
@@ -376,7 +376,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("tab color: blue", PaletteAction::SetTabColor(4)),
     ("tab color: magenta", PaletteAction::SetTabColor(5)),
     ("tab color: cyan", PaletteAction::SetTabColor(6)),
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     ("quake drop-down", PaletteAction::Quake),
     ("cycle theme", PaletteAction::Theme),
     ("plugins", PaletteAction::Plugins),
@@ -2580,8 +2580,9 @@ struct Persisted {
     opacity: i32,
     #[cfg(windows)]
     quake_key: Option<(u32, u32)>,
-    /// the quake_key line as written, kept so save_config can re-emit it —
-    /// the parsed (mods, vk) tuple can't be turned back into the user's text
+    #[cfg(target_os = "linux")]
+    quake_key: Option<String>,
+    /// the quake_key line as written, kept so save_config preserves its spelling
     quake_key_raw: Option<String>,
     /// the WSL distribution `new tab: wsl` launches (None = wsl.exe default)
     wsl_distro: Option<String>,
@@ -2643,7 +2644,7 @@ impl Default for Persisted {
             background_image_opacity: 0.3,
             ligatures: true,
             opacity: 85,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             quake_key: None,
             quake_key_raw: None,
             wsl_distro: None,
@@ -3121,6 +3122,60 @@ fn vk_from_name(name: &str) -> Option<u32> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn quake_portal_trigger(s: &str) -> Option<String> {
+    let mut modifiers = Vec::new();
+    let mut key = None;
+    for part in s.split('+') {
+        let part = part.trim().to_ascii_lowercase();
+        match part.as_str() {
+            "" => {}
+            "ctrl" | "control" => modifiers.push("CTRL"),
+            "alt" => modifiers.push("ALT"),
+            "shift" => modifiers.push("SHIFT"),
+            "win" | "super" | "meta" => modifiers.push("LOGO"),
+            other if key.is_none() => key = portal_key_name(other),
+            _ => return None,
+        }
+    }
+    if modifiers.is_empty() {
+        return None;
+    }
+    let key = key?;
+    modifiers.push(&key);
+    Some(modifiers.join("+"))
+}
+
+#[cfg(target_os = "linux")]
+fn portal_key_name(name: &str) -> Option<String> {
+    if name.len() == 1 {
+        let byte = name.as_bytes()[0];
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            return Some(name.to_string());
+        }
+    }
+    if let Some(number) = name.strip_prefix('f').and_then(|digits| digits.parse::<u8>().ok())
+        && (1..=12).contains(&number)
+    {
+        return Some(format!("F{number}"));
+    }
+    Some(match name {
+        "grave" | "backtick" | "tilde" | "`" => "grave",
+        "space" => "space",
+        "tab" => "Tab",
+        "esc" | "escape" => "Escape",
+        "enter" | "return" => "Return",
+        "minus" | "-" => "minus",
+        "equal" | "equals" | "=" => "equal",
+        "left" => "Left",
+        "up" => "Up",
+        "right" => "Right",
+        "down" => "Down",
+        _ => return None,
+    }
+    .to_string())
+}
+
 fn load_persisted() -> Persisted {
     let Some(path) = config_path() else {
         return Persisted::default();
@@ -3219,6 +3274,13 @@ fn parse_persisted(text: &str) -> Persisted {
                 #[cfg(windows)]
                 {
                     p.quake_key = parse_quake_key(v);
+                    if p.quake_key.is_none() {
+                        p.quake_key_raw = None;
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    p.quake_key = quake_portal_trigger(v);
                     if p.quake_key.is_none() {
                         p.quake_key_raw = None;
                     }
@@ -3431,10 +3493,10 @@ struct App {
     drag_divider: Option<Vec<usize>>,
     drag_pane: Option<usize>,
     /// quake drop-down currently summoned (always-on-top at screen top)
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     quake_shown: bool,
     /// the global quake hotkey thread has been spawned (once per process)
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     quake_hotkey_spawned: bool,
     /// the colors.conf/keybindings.conf watcher thread has been spawned
     conf_watch_spawned: bool,
@@ -3649,9 +3711,9 @@ impl App {
             shutting_down: false,
             drag_divider: None,
             drag_pane: None,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             quake_shown: false,
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             quake_hotkey_spawned: false,
             conf_watch_spawned: false,
             #[cfg(not(windows))]
@@ -3842,6 +3904,18 @@ impl App {
             });
             if !ok {
                 log::warn!("quake hotkey unavailable (already in use by another app)");
+            }
+        }
+        #[cfg(target_os = "linux")]
+        if !self.quake_hotkey_spawned
+            && let Some(trigger) = self.persisted.quake_key.clone()
+        {
+            self.quake_hotkey_spawned = true;
+            let proxy = self.proxy.clone();
+            if !win::spawn_global_hotkey(trigger, move || {
+                let _ = proxy.send_event(UserEvent::ToggleQuake);
+            }) {
+                log::warn!("quake hotkey worker could not start");
             }
         }
         // watch colors.conf/keybindings.conf so hand edits apply live
@@ -5835,7 +5909,7 @@ impl App {
                 });
                 self.redraw();
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {
                 self.persisted.theme_auto = false;
@@ -7746,16 +7820,23 @@ impl App {
     /// toggle the quake drop-down: summon the window to the top of the active
     /// monitor (full width, ~45% height, always-on-top, focused), or hide it.
     /// only ever reached via the global hotkey or the palette action
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn toggle_quake(&mut self) {
         let Some(win) = self.pw.window.clone() else {
             return;
         };
         if self.quake_shown {
-            win.set_visible(false);
+            #[cfg(target_os = "linux")]
+            let hidden = win::hide_quake_window(&win);
+            #[cfg(not(target_os = "linux"))]
+            let hidden = false;
+            if !hidden {
+                win.set_visible(false);
+            }
             // a user-toggled always-on-top survives quake dismissal
             if !self.pw.on_top {
                 win.set_window_level(WindowLevel::Normal);
+                win::set_window_above(&win, false);
             }
             self.quake_shown = false;
             return;
@@ -7764,6 +7845,13 @@ impl App {
             .current_monitor()
             .or_else(|| win.primary_monitor())
             .or_else(|| win.available_monitors().next());
+        #[cfg(target_os = "linux")]
+        {
+            if !win::show_quake_window(&win) {
+                win.set_visible(true);
+                win.set_minimized(false);
+            }
+        }
         if let Some(mon) = mon {
             let pos = mon.position();
             let size = mon.size();
@@ -7772,6 +7860,7 @@ impl App {
             let _ = win.request_inner_size(PhysicalSize::new(size.width, h));
         }
         win.set_window_level(WindowLevel::AlwaysOnTop);
+        #[cfg(not(target_os = "linux"))]
         win.set_visible(true);
         win.focus_window();
         self.quake_shown = true;
@@ -9443,7 +9532,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.redraw();
                 }
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             UserEvent::ToggleQuake => self.toggle_quake(),
             UserEvent::UserConfChanged => {
                 let (kb, sends, ignored) = load_keybindings();
@@ -10951,6 +11040,18 @@ mod tests {
         assert_eq!(parse_quake_key("grave"), None);
         assert_eq!(parse_quake_key(""), None);
         assert_eq!(parse_quake_key("ctrl+nonsense"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn parse_quake_portal_triggers() {
+        assert_eq!(quake_portal_trigger("ctrl+grave").as_deref(), Some("CTRL+grave"));
+        assert_eq!(quake_portal_trigger("ctrl+shift+t").as_deref(), Some("CTRL+SHIFT+t"));
+        assert_eq!(quake_portal_trigger("alt+f12").as_deref(), Some("ALT+F12"));
+        assert_eq!(quake_portal_trigger("super+enter").as_deref(), Some("LOGO+Return"));
+        assert_eq!(quake_portal_trigger("grave"), None);
+        assert_eq!(quake_portal_trigger("ctrl+nonsense"), None);
+        assert_eq!(quake_portal_trigger("ctrl+t+x"), None);
     }
 
     // ---- headless pane-tree harness ----

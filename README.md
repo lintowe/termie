@@ -24,7 +24,7 @@ Termie can be the **default terminal**: run "default terminal" from the palette 
 
 "New admin window" opens the focused directory with an elevated shell. Windows uses its UAC relaunch; Linux keeps the graphical process in the desktop session and elevates only the new PTY through Polkit, with `sudo` as the fallback.
 
-A command palette (`Ctrl+P`) for fuzzy access to every action, plus a searchable numbered tab switcher (`tab search` in the palette) for crowded windows. Seven built-in themes — three house schemes plus Catppuccin Mocha, Gruvbox, Tokyo Night, and Nord — a bundled Maple Mono Nerd Font, adjustable font size / padding / cursor / opacity, and per-user `colors.conf` and `keybindings.conf`. Windows also has an optional Quake-style drop-down (`quake_key`).
+A command palette (`Ctrl+P`) for fuzzy access to every action, plus a searchable numbered tab switcher (`tab search` in the palette) for crowded windows. Seven built-in themes — three house schemes plus Catppuccin Mocha, Gruvbox, Tokyo Night, and Nord — a bundled Maple Mono Nerd Font, adjustable font size / padding / cursor / opacity, and per-user `colors.conf` and `keybindings.conf`. Windows, Linux X11, and KDE Plasma Wayland have an optional Quake-style drop-down (`quake_key`).
 
 A plugin system: plugins run as separate processes over a small JSON protocol, render widgets in a side dock (text or drawn graphics), talk over an in-process bus, and can be confined to an OS sandbox — a Windows AppContainer or a Linux [bubblewrap](https://github.com/containers/bubblewrap) jail. An in-app marketplace browses and installs them.
 
@@ -83,7 +83,7 @@ A shell or profile can carry its own theme — `theme.<name>=<theme>` paints tha
 
 Configuration lives in `%APPDATA%\termie\` on Windows. Linux follows the XDG base-directory split: configuration in `$XDG_CONFIG_HOME/termie` (usually `~/.config/termie`), plugins in `$XDG_DATA_HOME/termie`, session state and logs in `$XDG_STATE_HOME/termie`, and generated shell hooks plus the update stamp in `$XDG_CACHE_HOME/termie`. Existing Linux files migrate from the old config directory on first use.
 
-- `config` — general settings the in-app panel also writes (`shell`, `theme`, `scrollback`, …). Opt-ins live here too: `quake_key=ctrl+grave` on Windows, `plugin_sandbox=appcontainer` on Windows or `plugin_sandbox=bwrap` on Linux, `latency_hud=true`, `acrylic=true` for Windows Mica or Linux compositor blur, `right_click=paste`, `term_program=ghostty`, `font_weight=semibold`, `min_contrast=3`, `background_image=<path.png>` with `background_image_opacity=0.3`, and `ligatures=false`.
+- `config` — general settings the in-app panel also writes (`shell`, `theme`, `scrollback`, …). Opt-ins live here too: `quake_key=ctrl+grave` on Windows or Linux, `plugin_sandbox=appcontainer` on Windows or `plugin_sandbox=bwrap` on Linux, `latency_hud=true`, `acrylic=true` for Windows Mica or Linux compositor blur, `right_click=paste`, `term_program=ghostty`, `font_weight=semibold`, `min_contrast=3`, `background_image=<path.png>` with `background_image_opacity=0.3`, and `ligatures=false`.
 - `colors.conf` — override theme colors, one `key=color` per line (`fg`, `bg`, `cursor`, `sel`, `ansi0`..`ansi255`; `#rrggbb`, `#rgb`, or `r,g,b`).
 - `keybindings.conf` — rebind keys, one `combo=action` per line, e.g. `ctrl+alt+t=new tab here`.
 

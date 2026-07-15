@@ -40,6 +40,10 @@ libc = "0.2"
 # the same pair alacritty ships; no image stack comes along
 copypasta = "0.10.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# direct access to the portal connection already carried by accesskit
+zbus = { version = "5.17.0", default-features = false, features = ["async-io", "blocking-api"] }
+
 [features]
 # private cpu microbenchmark harness (`--microbench`); compiled out by default so
 # the shipped binary carries no bench code. build: cargo run --release --features microbench
