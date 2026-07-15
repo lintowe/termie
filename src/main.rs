@@ -2121,14 +2121,8 @@ fn rect_overlap(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> i64 {
     w * h
 }
 
-/// physical px of the window's top strip (the tab/title bar) that must stay on a
-/// monitor for the window to be reachable; below this it counts as off-screen
-const TITLE_STRIP_PX: u32 = 40;
-
-/// keep a saved window rect reachable: cap its size to the monitor it most
-/// overlaps, then keep its saved position when the top strip is still on a
-/// monitor, or center it on that monitor when the rect is off every one (e.g.
-/// the display it was on is gone). rects are (x, y, w, h) in physical pixels
+/// keep a saved window rect inside the monitor it most overlaps, or center it
+/// on the primary monitor when its old display is gone. rects are physical px
 fn clamp_window_bounds(
     monitors: &[(i32, i32, u32, u32)],
     b: (i32, i32, u32, u32),
@@ -2142,16 +2136,30 @@ fn clamp_window_bounds(
     let Some((mx, my, mw, mh)) = target else {
         return b; // no monitors known: leave the saved rect as-is
     };
-    let (x, y) = (b.0, b.1);
     let w = b.2.min(mw);
     let h = b.3.min(mh);
-    // reachable as long as the top strip overlaps some monitor; only recenter
-    // when the whole window would open off-screen (not full containment)
-    let strip = (x, y, w, h.min(TITLE_STRIP_PX));
-    if monitors.iter().any(|&m| rect_overlap(m, strip) > 0) {
+    if rect_overlap((mx, my, mw, mh), b) > 0 {
+        let x = b.0.clamp(mx, mx + mw as i32 - w as i32);
+        let y = b.1.clamp(my, my + mh as i32 - h as i32);
         (x, y, w, h)
     } else {
         (mx + (mw as i32 - w as i32) / 2, my + (mh as i32 - h as i32) / 2, w, h)
+    }
+}
+
+/// update the live resize ceiling after a window crosses onto another screen
+fn constrain_window_to_monitor(window: &Window) {
+    let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) else {
+        return;
+    };
+    let limit = monitor.size();
+    window.set_max_inner_size(Some(limit));
+    let size = window.inner_size();
+    if size.width > limit.width || size.height > limit.height {
+        let _ = window.request_inner_size(PhysicalSize::new(
+            size.width.min(limit.width),
+            size.height.min(limit.height),
+        ));
     }
 }
 
@@ -3649,10 +3657,18 @@ impl App {
         // on a now-disconnected display doesn't open off-screen); the size goes on
         // the attributes so the renderer builds at the right size, while position
         // and maximize are applied after creation (winit-on-windows friendly)
-        let placement =
-            restore_bounds.map(|b| clamp_window_bounds(&monitor_rects(event_loop), (b.x, b.y, b.width, b.height)));
+        let monitors = monitor_rects(event_loop);
+        let placement = restore_bounds.map(|b| clamp_window_bounds(&monitors, (b.x, b.y, b.width, b.height)));
         let restore_max = restore_bounds.is_some_and(|b| b.maximized);
-        let attrs = Window::default_attributes()
+        let launch_monitor = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next());
+        let default_size = launch_monitor.as_ref().map(|monitor| {
+            let desired = LogicalSize::new(1000.0, 640.0).to_physical::<u32>(monitor.scale_factor());
+            let screen = monitor.size();
+            PhysicalSize::new(desired.width.min(screen.width), desired.height.min(screen.height))
+        });
+        let mut attrs = Window::default_attributes()
             .with_title("termie")
             .with_window_icon(icon)
             .with_decorations(false)
@@ -3661,9 +3677,19 @@ impl App {
             // would overlap (no room for all the chrome); clamp so the window is
             // always usable
             .with_min_inner_size(LogicalSize::new(560.0, 380.0));
+        if let Some((max_width, max_height)) = monitors
+            .iter()
+            .map(|m| (m.2, m.3))
+            .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))
+        {
+            attrs = attrs.with_max_inner_size(PhysicalSize::new(max_width, max_height));
+        }
         let attrs = match placement {
             Some((_, _, w, h)) => attrs.with_inner_size(PhysicalSize::new(w, h)),
-            None => attrs.with_inner_size(LogicalSize::new(1000.0, 640.0)),
+            None => match default_size {
+                Some(size) => attrs.with_inner_size(size),
+                None => attrs.with_inner_size(LogicalSize::new(1000.0, 640.0)),
+            },
         };
         // app id so wayland and x11 match every window to termie.desktop
         let attrs = platform_window_attrs(attrs);
@@ -7496,6 +7522,9 @@ impl App {
         match event {
             WindowEvent::RedrawRequested => self.paint(),
             WindowEvent::Resized(size) => {
+                if let Some(window) = self.pw.window.as_ref() {
+                    constrain_window_to_monitor(window);
+                }
                 // reconfigure the satellite's GPU surface before relayout — this is
                 // the only place config.width/height + surface.configure() update
                 if let Some(r) = self.pw.renderer.as_mut() {
@@ -7504,7 +7533,15 @@ impl App {
                 self.relayout_all();
                 self.paint();
             }
+            WindowEvent::Moved(_) => {
+                if let Some(window) = self.pw.window.as_ref() {
+                    constrain_window_to_monitor(window);
+                }
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(window) = self.pw.window.as_ref() {
+                    constrain_window_to_monitor(window);
+                }
                 if let Some(r) = self.pw.renderer.as_mut() {
                     r.set_scale(scale_factor as f32);
                 }
@@ -9500,6 +9537,9 @@ impl ApplicationHandler<UserEvent> for App {
                 state, button, ..
             } => self.on_mouse_input(state, button, event_loop),
             WindowEvent::Resized(size) => {
+                if let Some(window) = self.pw.window.as_ref() {
+                    constrain_window_to_monitor(window);
+                }
                 // reflow on a width change moves cell coordinates, so a stale
                 // selection would highlight the wrong cells
                 self.selection = None;
@@ -9515,8 +9555,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.redraw();
             }
             // moving the window persists its new position on the same debounce
-            WindowEvent::Moved(_) => self.mark_session_dirty(),
+            WindowEvent::Moved(_) => {
+                if let Some(window) = self.pw.window.as_ref() {
+                    constrain_window_to_monitor(window);
+                }
+                self.mark_session_dirty();
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(window) = self.pw.window.as_ref() {
+                    constrain_window_to_monitor(window);
+                }
                 // monitor/dpi change: re-raster the atlas at the new scale so text
                 // stays crisp. winit applies the os-suggested size and a Resized
                 // follows (which arms the resize-settle reflow at the new size)
@@ -10283,9 +10331,10 @@ mod tests {
         let one = [(0, 0, 1920u32, 1080u32)];
         // fully inside: untouched
         assert_eq!(clamp_window_bounds(&one, (100, 100, 800, 600)), (100, 100, 800, 600));
-        // partly off the right edge but the top strip is visible: position kept,
-        // not force-contained
-        assert_eq!(clamp_window_bounds(&one, (1600, 100, 800, 600)), (1600, 100, 800, 600));
+        // every edge stays contained, even when the saved title bar was reachable
+        assert_eq!(clamp_window_bounds(&one, (1600, 100, 800, 600)), (1120, 100, 800, 600));
+        assert_eq!(clamp_window_bounds(&one, (-100, -80, 800, 600)), (0, 0, 800, 600));
+        assert_eq!(clamp_window_bounds(&one, (100, 900, 800, 600)), (100, 480, 800, 600));
         // larger than the monitor is capped to its size
         assert_eq!(clamp_window_bounds(&one, (0, 0, 5000, 5000)), (0, 0, 1920, 1080));
         // a window off every monitor (its display is gone) is centered on the primary
