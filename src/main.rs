@@ -88,8 +88,7 @@ enum UserEvent {
     /// a release check finished (None = up to date / unreachable); bool =
     /// the user asked from the palette, so silence is worth a status notice
     UpdateCheckDone(Option<update::Update>, bool),
-    /// the setup exe finished downloading (or failed) on a worker thread
-    #[cfg(windows)]
+    /// the native update finished downloading and installing (or failed)
     UpdateDownloaded(Result<std::path::PathBuf, String>),
     /// an accesskit adapter event (screen-reader tree request / action)
     Accessibility(accesskit_winit::Event),
@@ -397,10 +396,7 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("scroll to bottom", PaletteAction::ScrollBottom),
     ("clear scrollback", PaletteAction::ClearScrollback),
     ("export scrollback", PaletteAction::ExportScrollback),
-    #[cfg(windows)]
-    ("install update", PaletteAction::InstallUpdate),
-    #[cfg(not(windows))]
-    ("open release page", PaletteAction::InstallUpdate),
+    ("update termie", PaletteAction::InstallUpdate),
     #[cfg(windows)]
     ("default terminal", PaletteAction::DefaultTerminal),
     ("broadcast input", PaletteAction::ToggleBroadcast),
@@ -4841,19 +4837,13 @@ impl App {
             ConfirmAction::Quit => self.quit_app(event_loop),
             ConfirmAction::InstallUpdate => {
                 if let Some(u) = self.update.clone() {
-                    // windows has a native setup with a silent /update mode; on
-                    // linux installs come from a package/tarball the app must
-                    // not overwrite, so hand the user the release page instead
-                    #[cfg(windows)]
-                    {
+                    if update::can_install() {
                         self.show_notice(&format!("downloading {}\u{2026}", u.version));
                         let proxy = self.proxy.clone();
                         std::thread::spawn(move || {
                             let _ = proxy.send_event(UserEvent::UpdateDownloaded(update::download(&u)));
                         });
-                    }
-                    #[cfg(not(windows))]
-                    {
+                    } else {
                         win::open_url(&format!(
                             "https://github.com/zeo/termie/releases/tag/v{}",
                             u.version
@@ -9396,13 +9386,14 @@ impl ApplicationHandler<UserEvent> for App {
                             r.set_update(Some(u.version.clone()));
                         }
                         if manual {
+                            let install = update::can_install();
                             self.pw.confirm = Some(ConfirmState {
-                                prompt: if cfg!(windows) {
+                                prompt: if install {
                                     format!("install termie {} and restart?", u.version)
                                 } else {
                                     format!("open the termie {} release page?", u.version)
                                 },
-                                hint: if cfg!(windows) {
+                                hint: if install {
                                     "enter: update \u{b7} esc: not now".to_string()
                                 } else {
                                     "enter: open \u{b7} esc: not now".to_string()
@@ -9410,7 +9401,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 action: ConfirmAction::InstallUpdate,
                             });
                         } else {
-                            let action = if cfg!(windows) { "install update" } else { "open release page" };
+                            let action = if update::can_install() { "update termie" } else { "open release page" };
                             self.show_notice(&format!("update {} available \u{2014} palette: {action}", u.version));
                         }
                         self.update = Some(u);
@@ -9422,7 +9413,6 @@ impl ApplicationHandler<UserEvent> for App {
                     None => {}
                 }
             }
-            #[cfg(windows)]
             UserEvent::UpdateDownloaded(result) => match result {
                 Ok(path) => match update::run_setup(&path) {
                     // the installer takes over: update, relaunch, session restore

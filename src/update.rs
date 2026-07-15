@@ -1,8 +1,7 @@
-//! in-app update check + download. once a day (or on the palette's "install
-//! update") termie asks GitHub for the latest release; a newer version puts an
-//! UPDATE chip on the status bar. nothing downloads or installs until the user
-//! confirms — then the native setup runs with /update and termie restarts into
-//! the new build with its session restored. opt out with `update_check=false`
+//! in-app update check + verified native update. once a day (or on request)
+//! termie asks GitHub for the latest release; a newer version puts an UPDATE
+//! chip on the status bar. confirmed Windows and archive-managed Linux installs
+//! replace themselves and restart. opt out with `update_check=false`
 
 use std::path::PathBuf;
 
@@ -14,12 +13,36 @@ const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/lat
 #[derive(Clone, Debug, PartialEq)]
 pub struct Update {
     pub version: String,
-    #[cfg(windows)]
     pub url: String,
-    /// sha256 hex of the setup asset, from the release api; the download is
+    /// sha256 hex of the release asset, from the release api; the download is
     /// refused unless it hashes to exactly this
-    #[cfg(windows)]
     pub digest: String,
+}
+
+#[cfg(windows)]
+pub fn can_install() -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+pub fn archive_install_prefix() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let bin = exe.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    let prefix = bin.parent()?.to_path_buf();
+    prefix.join("share/termie/archive-install").is_file().then_some(prefix)
+}
+
+#[cfg(target_os = "linux")]
+pub fn can_install() -> bool {
+    archive_install_prefix().is_some()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn can_install() -> bool {
+    false
 }
 
 fn stamp_path() -> Option<PathBuf> {
@@ -62,35 +85,40 @@ fn fetch_latest() -> Option<Update> {
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let json = Json::parse(&text)?;
+    parse_release(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn asset_name(version: &str) -> Option<String> {
+    #[cfg(windows)]
+    return Some(format!("termie-{version}-setup.exe"));
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return Some(format!("termie-{version}-linux-x86_64.tar.gz"));
+    #[allow(unreachable_code)]
+    None
+}
+
+fn parse_release(text: &str) -> Option<Update> {
+    let json = Json::parse(text)?;
     let tag = json.get_str("tag_name")?;
     let version = tag.trim_start_matches('v').to_string();
-    // on linux the app never installs anything itself (the chip links to the
-    // release page), so a newer tag alone is enough — no asset to verify
-    #[cfg(not(windows))]
-    {
-        Some(Update { version })
-    }
-    #[cfg(windows)]
-    {
-        let assets = json.get("assets")?.as_array()?;
-        let (url, digest) = assets.iter().find_map(|a| {
-            let name = a.get_str("name")?;
-            if !name.ends_with("-setup.exe") {
-                return None;
-            }
-            // the installer only ever ships from this repo's release downloads;
-            // an api response pointing anywhere else is treated as tampering,
-            // and one without a digest can't be verified so it doesn't count
-            let url = a
-                .get_str("browser_download_url")
-                .filter(|u| u.starts_with("https://github.com/zeo/termie/releases/download/"))?;
-            let digest = a.get_str("digest")?.strip_prefix("sha256:")?;
-            Some((url.to_string(), digest.to_ascii_lowercase()))
-        })?;
-        Some(Update { version, url, digest })
-    }
+    parse_triple(&version)?;
+    let name = asset_name(&version)?;
+    let release_url = format!("https://github.com/zeo/termie/releases/download/v{version}/");
+    let assets = json.get("assets")?.as_array()?;
+    let (url, digest) = assets.iter().find_map(|a| {
+        if a.get_str("name")? != name {
+            return None;
+        }
+        let url = a
+            .get_str("browser_download_url")
+            .filter(|url| url.starts_with(&release_url) && url.ends_with(&name))?;
+        let digest = a.get_str("digest")?.strip_prefix("sha256:")?;
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some((url.to_string(), digest.to_ascii_lowercase()))
+    })?;
+    Some(Update { version, url, digest })
 }
 
 /// strict x.y.z compare against the running build; pre-release tags and
@@ -117,41 +145,166 @@ fn newer(remote: &str, local: &str) -> bool {
     }
 }
 
-/// download the setup exe to %TEMP%; blocking — run on a worker thread
-#[cfg(windows)]
-pub fn download(u: &Update) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("termie-{}-setup.exe", u.version));
-    let out = quiet_command("curl")
-        .args([
-            "-sSL",
-            "--max-time",
-            "300",
-            "-o",
-            &path.to_string_lossy(),
-            &u.url,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+fn fresh_temp_dir() -> Result<PathBuf, String> {
+    let base = std::env::temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    for attempt in 0..32 {
+        let dir = base.join(format!("termie-update-{}-{nonce}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
     }
-    // a payload-bearing setup is megabytes; a tiny file is an error page
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Err("couldn't create update directory".into())
+}
+
+/// download and verify the native release asset; blocking — run on a worker thread
+pub fn download(u: &Update) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    let prefix = archive_install_prefix();
+    #[cfg(not(target_os = "linux"))]
+    let prefix: Option<PathBuf> = None;
+    download_to_prefix(u, prefix.as_deref())
+}
+
+fn download_to_prefix(u: &Update, prefix: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = prefix;
+    let name = asset_name(&u.version).ok_or("updates aren't available for this platform")?;
+    let dir = fresh_temp_dir()?;
+    let path = dir.join(name);
+    let fetched = (|| {
+        let out = quiet_command("curl")
+            .args([
+                "-fsSL",
+                "--max-time",
+                "300",
+                "-o",
+                &path.to_string_lossy(),
+                &u.url,
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        verify_download(&bytes, &u.digest)
+    })();
+    if let Err(e) = fetched {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
+    #[cfg(windows)]
+    return Ok(path);
+    #[cfg(target_os = "linux")]
+    {
+        let installed = prefix
+            .ok_or_else(|| "this installation is managed outside termie".to_string())
+            .and_then(|prefix| install_linux_archive(&path, u, prefix));
+        let _ = std::fs::remove_dir_all(&dir);
+        return installed;
+    }
+    #[allow(unreachable_code)]
+    Err("updates aren't available for this platform".into())
+}
+
+fn verify_download(bytes: &[u8], digest: &str) -> Result<(), String> {
     if bytes.len() < 1024 * 1024 {
         return Err("download incomplete".into());
     }
-    // nothing runs unless it hashes to what the release api published
-    if sha256_hex(&bytes) != u.digest {
-        let _ = std::fs::remove_file(&path);
-        return Err("checksum mismatch".into());
+    (sha256_hex(bytes) == digest).then_some(()).ok_or_else(|| "checksum mismatch".into())
+}
+
+#[cfg(target_os = "linux")]
+fn archive_path_is_safe(path: &str, root: &str) -> bool {
+    let mut parts = std::path::Path::new(path).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(first)) if first == root)
+        && parts.all(|part| matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir))
+}
+
+#[cfg(target_os = "linux")]
+fn reject_symlinks(dir: &std::path::Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() {
+            return Err("archive contains a symlink".into());
+        }
+        if kind.is_dir() {
+            reject_symlinks(&entry.path())?;
+        }
     }
-    Ok(path)
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn install_linux_archive(
+    archive: &std::path::Path,
+    u: &Update,
+    prefix: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let root = format!("termie-{}-linux-x86_64", u.version);
+    let listing = quiet_command("/bin/tar")
+        .args(["-tzf"])
+        .arg(archive)
+        .output()
+        .map_err(|e| format!("couldn't inspect update: {e}"))?;
+    if !listing.status.success() {
+        return Err("couldn't inspect update archive".into());
+    }
+    let listing = String::from_utf8(listing.stdout).map_err(|_| "archive contains non-UTF-8 paths")?;
+    if listing.is_empty() || listing.lines().any(|path| !archive_path_is_safe(path, &root)) {
+        return Err("archive contains an unsafe path".into());
+    }
+    let kinds = quiet_command("/bin/tar")
+        .args(["-tvzf"])
+        .arg(archive)
+        .output()
+        .map_err(|e| format!("couldn't inspect update types: {e}"))?;
+    if !kinds.status.success()
+        || String::from_utf8_lossy(&kinds.stdout)
+            .lines()
+            .any(|line| !matches!(line.as_bytes().first(), Some(b'-' | b'd')))
+    {
+        return Err("archive contains a link or special file".into());
+    }
+    let dir = archive.parent().ok_or("invalid update path")?;
+    let status = quiet_command("/bin/tar")
+        .args(["--no-same-owner", "--no-same-permissions", "-xzf"])
+        .arg(archive)
+        .arg("-C")
+        .arg(dir)
+        .status()
+        .map_err(|e| format!("couldn't unpack update: {e}"))?;
+    if !status.success() {
+        return Err("couldn't unpack update".into());
+    }
+    let unpacked = dir.join(root);
+    reject_symlinks(&unpacked)?;
+    let installer = unpacked.join("install.sh");
+    if !installer.is_file() {
+        return Err("update archive has no installer".into());
+    }
+    let out = quiet_command("/bin/sh")
+        .arg(installer)
+        .arg(prefix)
+        .output()
+        .map_err(|e| format!("couldn't run update installer: {e}"))?;
+    if !out.status.success() {
+        let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if reason.is_empty() { "update installer failed".into() } else { reason });
+    }
+    let exe = prefix.join("bin/termie");
+    exe.is_file().then_some(exe).ok_or_else(|| "updated executable is missing".into())
 }
 
 /// fips 180-4 sha-256, hand-rolled like the rest of termie's codecs; the
 /// updater must not run a downloaded installer on file size alone
-#[cfg(any(windows, test))]
 fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -220,12 +373,40 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// hand off to the installer's silent update mode; the caller exits right after
 #[cfg(windows)]
-pub fn run_setup(path: &PathBuf) -> Result<(), String> {
+pub fn run_setup(path: &std::path::Path) -> Result<(), String> {
     std::process::Command::new(path)
         .arg("/update")
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn run_setup(_path: &std::path::Path) -> Result<(), String> {
+    Err("updates aren't available for this platform".into())
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_after(parent: u32, path: &std::path::Path) -> Result<std::process::Child, String> {
+    let parent = parent.to_string();
+    std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "while kill -0 \"$1\" 2>/dev/null; do sleep 1; done; exec \"$2\"",
+            "termie-update",
+            &parent,
+        ])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_setup(path: &std::path::Path) -> Result<(), String> {
+    spawn_after(std::process::id(), path).map(|_| ())
 }
 
 #[cfg(test)]
@@ -247,21 +428,125 @@ mod tests {
 
     #[test]
     fn release_json_parses() {
-        let text = r#"{
-            "tag_name": "v9.9.9",
-            "assets": [
-                {"name": "termie-9.9.9-windows-x64.msi", "browser_download_url": "https://github.com/zeo/termie/releases/download/v9.9.9/termie-9.9.9-windows-x64.msi", "digest": "sha256:aa"},
-                {"name": "termie-9.9.9-setup.exe", "browser_download_url": "https://github.com/zeo/termie/releases/download/v9.9.9/termie-9.9.9-setup.exe", "digest": "sha256:AB12"}
-            ]
-        }"#;
-        let json = Json::parse(text).unwrap();
-        assert_eq!(json.get_str("tag_name").unwrap(), "v9.9.9");
-        let assets = json.get("assets").unwrap().as_array().unwrap();
-        let setup = assets.iter().find(|a| a.get_str("name").unwrap().ends_with("-setup.exe")).unwrap();
-        assert!(setup.get_str("browser_download_url").unwrap().contains("/releases/download/"));
-        // digest is normalized to bare lowercase hex the way fetch_latest does
-        let digest = setup.get_str("digest").unwrap().strip_prefix("sha256:").unwrap().to_ascii_lowercase();
-        assert_eq!(digest, "ab12");
+        let name = asset_name("9.9.9").unwrap();
+        let digest = "AB".repeat(32);
+        let text = format!(
+            r#"{{"tag_name":"v9.9.9","assets":[{{"name":"{name}","browser_download_url":"https://github.com/zeo/termie/releases/download/v9.9.9/{name}","digest":"sha256:{digest}"}}]}}"#
+        );
+        let update = parse_release(&text).unwrap();
+        assert_eq!(update.version, "9.9.9");
+        assert_eq!(update.digest, digest.to_ascii_lowercase());
+        assert!(update.url.ends_with(&name));
+        assert!(parse_release(&text.replace(&digest, "AB12")).is_none());
+        assert!(parse_release(&text.replace("github.com/zeo", "example.com/zeo")).is_none());
+    }
+
+    #[test]
+    fn download_verification_rejects_short_and_wrong_payloads() {
+        assert_eq!(verify_download(b"error page", &sha256_hex(b"error page")), Err("download incomplete".into()));
+        let bytes = vec![0x5a; 1024 * 1024];
+        assert_eq!(verify_download(&bytes, &"00".repeat(32)), Err("checksum mismatch".into()));
+        assert_eq!(verify_download(&bytes, &sha256_hex(&bytes)), Ok(()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_archive_paths_stay_under_the_release_root() {
+        let root = "termie-1.2.3-linux-x86_64";
+        assert!(archive_path_is_safe("termie-1.2.3-linux-x86_64/bin/termie", root));
+        assert!(archive_path_is_safe("termie-1.2.3-linux-x86_64/", root));
+        assert!(!archive_path_is_safe("../termie/bin/termie", root));
+        assert!(!archive_path_is_safe("termie-1.2.3-linux-x86_64/../outside", root));
+        assert!(!archive_path_is_safe("other/bin/termie", root));
+        assert!(!archive_path_is_safe("/termie-1.2.3-linux-x86_64/bin/termie", root));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_archive_rejects_links_before_extraction() {
+        let work = fresh_temp_dir().unwrap();
+        let root = "termie-9.9.9-linux-x86_64";
+        let package = work.join("build").join(root);
+        std::fs::create_dir_all(&package).unwrap();
+        std::os::unix::fs::symlink("/tmp", package.join("escape")).unwrap();
+        let archive = work.join("linked.tar.gz");
+        let status = std::process::Command::new("tar")
+            .args(["-C", &work.join("build").to_string_lossy(), "-czf", &archive.to_string_lossy(), root])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let update = Update {
+            version: "9.9.9".into(),
+            url: String::new(),
+            digest: String::new(),
+        };
+        assert_eq!(
+            install_linux_archive(&archive, &update, &work.join("prefix")),
+            Err("archive contains a link or special file".into())
+        );
+        assert!(!work.join(root).exists());
+        let _ = std::fs::remove_dir_all(work);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_archive_download_verifies_and_installs() {
+        let work = fresh_temp_dir().unwrap();
+        let root = "termie-9.9.9-linux-x86_64";
+        let package = work.join("build").join(root);
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        let mut state = 0x9e37_79b9_u32;
+        let payload: Vec<u8> = (0..1_100_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+        std::fs::write(package.join("bin/termie"), &payload).unwrap();
+        std::fs::write(
+            package.join("install.sh"),
+            b"#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\ninstall -d \"$1/bin\" \"$1/share/termie\"\ninstall -m755 \"$root/bin/termie\" \"$1/bin/termie\"\ninstall -m644 /dev/null \"$1/share/termie/archive-install\"\n",
+        )
+        .unwrap();
+        let archive = work.join("update.tar.gz");
+        let status = std::process::Command::new("tar")
+            .args(["-C", &work.join("build").to_string_lossy(), "-czf", &archive.to_string_lossy(), root])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let prefix = work.join("prefix");
+        let archive_bytes = std::fs::read(&archive).unwrap();
+        assert!(archive_bytes.len() >= 1024 * 1024);
+        let update = Update {
+            version: "9.9.9".into(),
+            url: format!("file://{}", archive.display()),
+            digest: sha256_hex(&archive_bytes),
+        };
+        let exe = download_to_prefix(&update, Some(&prefix)).unwrap();
+        assert_eq!(std::fs::read(exe).unwrap(), payload);
+        assert!(prefix.join("share/termie/archive-install").is_file());
+        let _ = std::fs::remove_dir_all(work);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_relaunch_waits_for_the_old_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = fresh_temp_dir().unwrap();
+        let marker = work.join("started");
+        let target = work.join("new-termie");
+        std::fs::write(&target, format!("#!/bin/sh\nprintf started > '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut old = std::process::Command::new("/bin/sh").args(["-c", "sleep 0.2"]).spawn().unwrap();
+        let mut relaunch = spawn_after(old.id(), &target).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!marker.exists());
+        assert!(old.wait().unwrap().success());
+        assert!(relaunch.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "started");
+        let _ = std::fs::remove_dir_all(work);
     }
 
     #[test]
