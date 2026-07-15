@@ -285,9 +285,7 @@ enum PaletteAction {
     MarkMode,
     /// select the focused pane's retained history and live screen
     SelectAll,
-    /// toggle termie as the windows default terminal (console-app handoff);
-    /// windows-only, kept everywhere like AdminWindow
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// toggle termie as the platform's default terminal
     DefaultTerminal,
     #[cfg(windows)]
     Quake,
@@ -397,7 +395,6 @@ const PALETTE_ACTIONS: &[(&str, PaletteAction)] = &[
     ("clear scrollback", PaletteAction::ClearScrollback),
     ("export scrollback", PaletteAction::ExportScrollback),
     ("update termie", PaletteAction::InstallUpdate),
-    #[cfg(windows)]
     ("default terminal", PaletteAction::DefaultTerminal),
     ("broadcast input", PaletteAction::ToggleBroadcast),
     ("close pane", PaletteAction::CloseFocusedPane),
@@ -5757,31 +5754,29 @@ impl App {
                 self.show_notice(if self.pw.on_top { "always on top" } else { "normal stacking" });
                 self.redraw();
             }
-            #[cfg(windows)]
             PaletteAction::DefaultTerminal => {
-                let msg = if win::defterm_registered() {
-                    if win::unregister_defterm() {
-                        "termie is no longer the default terminal"
-                    } else {
-                        "could not update the default terminal"
-                    }
-                } else if win::register_defterm() {
+                let enabling = !win::defterm_registered();
+                let changed = if enabling {
+                    win::register_defterm()
+                } else {
+                    win::unregister_defterm()
+                };
+                #[cfg(windows)]
+                if changed && enabling {
                     // start serving immediately so it works without a relaunch
                     let proxy = self.proxy.clone();
                     defterm::serve_running(move |h| match h {
                         Some(h) => proxy.send_event(UserEvent::Handoff(h)).is_ok(),
                         None => true,
                     });
-                    "termie is now the default terminal — console apps open here"
-                } else {
-                    "could not update the default terminal"
-                };
-                self.show_notice(msg);
+                }
+                self.show_notice(match (changed, enabling) {
+                    (true, true) => "termie is now the default terminal",
+                    (true, false) => "termie is no longer the default terminal",
+                    (false, _) => "could not update the default terminal",
+                });
                 self.redraw();
             }
-            // the "default terminal" delegation only exists on windows
-            #[cfg(not(windows))]
-            PaletteAction::DefaultTerminal => {}
             #[cfg(windows)]
             PaletteAction::Quake => self.toggle_quake(),
             PaletteAction::Theme => {

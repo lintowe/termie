@@ -620,6 +620,117 @@ pub fn unregister_defterm() -> bool {
     ok
 }
 
+#[cfg(target_os = "linux")]
+fn terminal_list_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .and_then(|s| s.split(':').find(|part| !part.is_empty()).map(str::to_ascii_lowercase))
+        .filter(|s| s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')));
+    Some(base.join(match desktop {
+        Some(name) => format!("{name}-xdg-terminals.list"),
+        None => "xdg-terminals.list".to_string(),
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn terminal_list_with_termie(contents: &str, enabled: bool) -> String {
+    let mut lines: Vec<&str> = contents
+        .lines()
+        .filter(|line| line.trim() != "termie.desktop")
+        .collect();
+    if enabled {
+        lines.insert(0, "termie.desktop");
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    }
+}
+
+/// true when termie is the first explicit choice for this desktop
+#[cfg(target_os = "linux")]
+pub fn defterm_registered() -> bool {
+    let Some(path) = terminal_list_path() else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|contents| {
+            contents.lines().map(str::trim).find(|line| {
+                !line.is_empty()
+                    && !line.starts_with('#')
+                    && !line.starts_with('+')
+                    && !line.starts_with('-')
+                    && line.contains(".desktop")
+            }) == Some("termie.desktop")
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn set_default_terminal(enabled: bool) -> bool {
+    let Some(path) = terminal_list_path() else {
+        return false;
+    };
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return false,
+    };
+    let updated = terminal_list_with_termie(&contents, enabled);
+    if updated == contents {
+        return true;
+    }
+    if updated.is_empty() {
+        return std::fs::remove_file(path).is_ok();
+    }
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let temporary = path.with_extension("list.termie-tmp");
+    if std::fs::write(&temporary, updated).is_err() {
+        return false;
+    }
+    if std::fs::rename(&temporary, path).is_ok() {
+        true
+    } else {
+        let _ = std::fs::remove_file(temporary);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn register_defterm() -> bool {
+    set_default_terminal(true)
+}
+
+#[cfg(target_os = "linux")]
+pub fn unregister_defterm() -> bool {
+    set_default_terminal(false)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn defterm_registered() -> bool {
+    false
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn register_defterm() -> bool {
+    false
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn unregister_defterm() -> bool {
+    false
+}
+
 /// keep the COM server path current: after an update or a moved install, the
 /// registration must point at the exe that is actually running. a cargo build
 /// tree is exempt — running a dev binary once must not hijack the delegation
@@ -1127,7 +1238,7 @@ pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
 
 #[cfg(all(test, not(windows)))]
 mod tests {
-    use super::{launcher_progress_properties, parse_portal_color_scheme};
+    use super::{launcher_progress_properties, parse_portal_color_scheme, terminal_list_with_termie};
 
     #[test]
     fn portal_color_scheme_values_map_to_dark_and_light() {
@@ -1152,5 +1263,17 @@ mod tests {
         assert!(clear.contains("'progress-visible': <false>"));
         assert!(clear.contains("'urgent': <false>"));
         assert!(clear.contains("'updating': <false>"));
+    }
+
+    #[test]
+    fn default_terminal_list_preserves_the_previous_choice() {
+        let original = "# preferred terminal\norg.kde.konsole.desktop\nfoot.desktop\n";
+        let enabled = terminal_list_with_termie(original, true);
+        assert_eq!(
+            enabled,
+            "termie.desktop\n# preferred terminal\norg.kde.konsole.desktop\nfoot.desktop\n"
+        );
+        assert_eq!(terminal_list_with_termie(&enabled, false), original);
+        assert_eq!(terminal_list_with_termie("termie.desktop\n", false), "");
     }
 }

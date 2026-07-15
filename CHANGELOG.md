@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Platform
+- **Linux can make Termie the default terminal.** The desktop entry now declares the `xdg-terminal-exec` command and directory arguments. The existing "default terminal" palette action puts Termie first for the active desktop, toggles back to the previous choice without erasing it, and uninstall removes only Termie's selection.
 - **Windows stay inside the screen.** Fresh, restored, moved, and test-driven windows are capped to the current monitor's native pixel bounds. A saved window can no longer reopen larger than the display or leave most of itself beyond an edge.
 - **Taskbar progress reaches Linux desktops.** OSC 9;4 progress now updates the grouped Termie launcher through the desktop's D-Bus protocol, including clear, error attention, paused progress, and an indeterminate state. The launcher state is cleared on startup and shutdown so pinned icons cannot retain a finished job.
 - **Linux archive installs update in place.** The update chip now downloads the matching x86-64 release asset, checks its GitHub-published SHA-256 digest, validates its paths, installs back into the recorded archive prefix, and relaunches after the old process saves its session. Package-manager and source builds remain under their original owner and open the release page.

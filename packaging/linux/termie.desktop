@@ -8,6 +8,8 @@ Icon=termie
 Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=shell;prompt;command;terminal;
+X-TerminalArgExec=--
+X-TerminalArgDir=--cwd=
 StartupNotify=true
 StartupWMClass=termie
 Actions=NewWindow;
