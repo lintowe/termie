@@ -9,6 +9,7 @@ Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=shell;prompt;command;terminal;
 StartupNotify=true
+StartupWMClass=termie
 Actions=NewWindow;
 
 [Desktop Action NewWindow]

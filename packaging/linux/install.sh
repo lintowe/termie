@@ -10,7 +10,17 @@ esac
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 install -d "$prefix/bin" "$prefix/share/applications" "$prefix/share/icons/hicolor/256x256/apps" "$prefix/share/doc/termie" "$prefix/share/termie/fonts"
 install -m755 "$root/bin/termie" "$prefix/bin/termie"
-install -m644 "$root/share/applications/termie.desktop" "$prefix/share/applications/termie.desktop"
+desktop="$prefix/share/applications/termie.desktop"
+escaped_exe=$(printf '%s' "$prefix/bin/termie" | sed 's/[\\"`$]/\\&/g')
+while IFS= read -r line; do
+  case "$line" in
+    Exec=termie) printf 'Exec="%s"\n' "$escaped_exe" ;;
+    TryExec=termie) printf 'TryExec=%s\n' "$prefix/bin/termie" ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done < "$root/share/applications/termie.desktop" > "$desktop.tmp"
+chmod 644 "$desktop.tmp"
+mv -f "$desktop.tmp" "$desktop"
 install -m644 "$root/share/icons/hicolor/256x256/apps/termie.png" "$prefix/share/icons/hicolor/256x256/apps/termie.png"
 install -m644 "$root/share/doc/termie/"* "$prefix/share/doc/termie/"
 install -m644 "$root/share/termie/fonts/"* "$prefix/share/termie/fonts/"

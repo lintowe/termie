@@ -37,7 +37,7 @@ use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::{CursorIcon, Window, WindowId, WindowLevel};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
 use pty::{Pty, PtyMsg, ShellKind};
 use render::{Hit, Hot, PaneView, Renderer};
@@ -52,6 +52,20 @@ const POOL_TARGET: usize = 3;
 const MAX_WARM_FAILS: usize = 10;
 
 type Rect = (f32, f32, f32, f32);
+
+fn platform_window_attrs(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let attrs = {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        attrs.with_name("termie", "termie")
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let attrs = {
+        use winit::platform::x11::WindowAttributesExtX11;
+        attrs.with_name("termie", "termie")
+    };
+    attrs
+}
 
 enum UserEvent {
     Pty { id: usize, bytes: Vec<u8> },
@@ -3649,6 +3663,8 @@ impl App {
             Some((_, _, w, h)) => attrs.with_inner_size(PhysicalSize::new(w, h)),
             None => attrs.with_inner_size(LogicalSize::new(1000.0, 640.0)),
         };
+        // app id so wayland and x11 match every window to termie.desktop
+        let attrs = platform_window_attrs(attrs);
         let window = Arc::new(event_loop.create_window(attrs)?);
         if let Some((x, y, _, _)) = placement {
             window.set_outer_position(PhysicalPosition::new(x, y));
@@ -3699,7 +3715,13 @@ impl App {
             self.spawn_pool_shell(80, 24);
         }
 
-        let renderer = Renderer::new(window.clone(), CONTENT_PT, CHROME_PT, self.config.backend)?;
+        let renderer = Renderer::new(
+            window.clone(),
+            event_loop.owned_display_handle(),
+            CONTENT_PT,
+            CHROME_PT,
+            self.config.backend,
+        )?;
         timing("renderer ready (gpu init)");
         window.set_ime_allowed(true);
         self.a11y = Some(accesskit_winit::Adapter::with_event_loop_proxy(
@@ -7317,10 +7339,10 @@ impl App {
         let Some(pane) = popped else {
             return;
         };
-        let attrs = Window::default_attributes()
+        let attrs = platform_window_attrs(Window::default_attributes()
             .with_title("termie — pane")
             .with_inner_size(LogicalSize::new(760.0, 480.0))
-            .with_min_inner_size(LogicalSize::new(560.0, 380.0));
+            .with_min_inner_size(LogicalSize::new(560.0, 380.0)));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(_) => {
@@ -7332,7 +7354,13 @@ impl App {
         // without this a torn-off window silently drops CJK input: the OS IME
         // never engages, so no composition or commit ever reaches the pane
         window.set_ime_allowed(true);
-        let renderer = match render::Renderer::new(window.clone(), CONTENT_PT, CHROME_PT, self.config.backend) {
+        let renderer = match render::Renderer::new(
+            window.clone(),
+            event_loop.owned_display_handle(),
+            CONTENT_PT,
+            CHROME_PT,
+            self.config.backend,
+        ) {
             Ok(mut r) => {
                 r.set_theme(self.resolved_theme());
                 r.set_elevated(win::is_elevated());

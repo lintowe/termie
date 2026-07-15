@@ -588,6 +588,8 @@ pub struct Renderer {
     device_lost: Arc<AtomicBool>,
     /// the window, kept so recreate() can rebuild the surface (None headless)
     window: Option<Arc<Window>>,
+    /// persistent compositor connection for rebuilding a window surface
+    display_handle: Option<winit::event_loop::OwnedDisplayHandle>,
 
     instance_buffer: wgpu::Buffer,
     instance_capacity: u64,
@@ -1015,7 +1017,13 @@ fn build_gpu_resources(
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, content_pt: f32, chrome_pt: f32, backend: BackendChoice) -> Result<Renderer> {
+    pub fn new(
+        window: Arc<Window>,
+        display_handle: winit::event_loop::OwnedDisplayHandle,
+        content_pt: f32,
+        chrome_pt: f32,
+        backend: BackendChoice,
+    ) -> Result<Renderer> {
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
 
@@ -1027,7 +1035,8 @@ impl Renderer {
         // build instance+surface+adapter for a backend set; DX12 is the Windows
         // default (Vulkan is slow under injected overlay layers — OBS/Overwolf)
         let try_init = |backends: wgpu::Backends, force_fallback: bool| -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
-            let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+            let mut desc =
+                wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle.clone()));
             desc.backends = backends;
             let instance = wgpu::Instance::new(desc);
             let surface = instance.create_surface(window.clone())?;
@@ -1117,6 +1126,7 @@ impl Renderer {
         );
         r.backend_label = backend_label(adapter.get_info().backend);
         r.window = Some(window);
+        r.display_handle = Some(display_handle);
         Ok(r)
     }
 
@@ -1136,7 +1146,12 @@ impl Renderer {
             wgpu::Backends::all()
         };
         let try_init = |force_fallback: bool| -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
-            let mut desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+            let display_handle = self
+                .display_handle
+                .as_ref()
+                .ok_or_else(|| anyhow!("windowed renderer has no display handle"))?;
+            let mut desc =
+                wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle.clone()));
             desc.backends = backends;
             let instance = wgpu::Instance::new(desc);
             let surface = instance.create_surface(window.clone())?;
@@ -1300,6 +1315,7 @@ impl Renderer {
             atlas_gpu_dim: atlas.dim,
             device_lost,
             window: None,
+            display_handle: None,
             instance_buffer,
             instance_capacity,
             scratch: Vec::new(),
