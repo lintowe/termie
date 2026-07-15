@@ -3534,7 +3534,9 @@ impl App {
             sb_drag: None,
             last_click: None,
             click_seq: 0,
-            taskbar_sent: (0, 0),
+            // force one initial clear so a pinned Linux launcher can't retain
+            // stale progress from an earlier process
+            taskbar_sent: (u8::MAX, u8::MAX),
             palette: None,
             font_pick: None,
             font_families: Vec::new(),
@@ -4878,6 +4880,9 @@ impl App {
 
     /// the actual shutdown: kill every shell, flush the session, exit
     fn quit_app(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window) = self.pw.window.as_ref() {
+            win::set_taskbar_progress(window, 0, 0);
+        }
         for tab in &mut self.pw.tabs {
             if let Some(root) = tab.root.as_mut() {
                 kill_all(root);
@@ -8477,7 +8482,7 @@ impl App {
     }
 
     /// push the merged OSC 9;4 progress of every pane in this window onto the
-    /// taskbar button; the COM call is skipped while the value is unchanged
+    /// taskbar button; the platform call is skipped while the value is unchanged
     fn sync_taskbar_progress(&mut self) {
         let mut agg = (0u8, 0u8);
         for tab in &self.pw.tabs {
@@ -8491,11 +8496,8 @@ impl App {
             return;
         }
         self.taskbar_sent = agg;
-        if let Some(w) = self.pw.window.as_ref()
-            && let Ok(handle) = w.window_handle()
-            && let RawWindowHandle::Win32(h) = handle.as_raw()
-        {
-            win::set_taskbar_progress(h.hwnd.get(), agg.0, agg.1);
+        if let Some(w) = self.pw.window.as_ref() {
+            win::set_taskbar_progress(w, agg.0, agg.1);
         }
     }
 

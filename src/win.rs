@@ -185,7 +185,7 @@ pub fn apply_backdrop(_hwnd_handle: isize, _on: bool) {}
 /// pct is 0–100 and ignored for clear/indeterminate. failures are swallowed —
 /// taskbar flair must never take the terminal down
 #[cfg(windows)]
-pub fn set_taskbar_progress(hwnd_handle: isize, state: u8, pct: u8) {
+pub fn set_taskbar_progress(window: &winit::window::Window, state: u8, pct: u8) {
     use std::cell::OnceCell;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
@@ -195,12 +195,19 @@ pub fn set_taskbar_progress(hwnd_handle: isize, state: u8, pct: u8) {
         ITaskbarList3, TaskbarList, TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL,
         TBPF_PAUSED,
     };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     thread_local! {
         // created once per thread; None caches a failed creation so we don't
         // retry com on every output chunk
         static TASKBAR: OnceCell<Option<ITaskbarList3>> = const { OnceCell::new() };
     }
-    let hwnd = HWND(hwnd_handle as *mut core::ffi::c_void);
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
     TASKBAR.with(|cell| {
         let tb = cell.get_or_init(|| unsafe {
             // winit already initialized com (ole drag-drop) on this thread;
@@ -225,8 +232,39 @@ pub fn set_taskbar_progress(hwnd_handle: isize, state: u8, pct: u8) {
     });
 }
 
-#[cfg(not(windows))]
-pub fn set_taskbar_progress(_hwnd_handle: isize, _state: u8, _pct: u8) {}
+#[cfg(target_os = "linux")]
+fn launcher_progress_properties(state: u8, pct: u8) -> String {
+    let visible = matches!(state, 1 | 2 | 4);
+    let urgent = state == 2;
+    let updating = state == 3;
+    format!(
+        "{{'progress': <{:.2}>, 'progress-visible': <{visible}>, 'urgent': <{urgent}>, 'updating': <{updating}>}}",
+        pct.min(100) as f64 / 100.0
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_taskbar_progress(_window: &winit::window::Window, state: u8, pct: u8) {
+    let properties = launcher_progress_properties(state, pct);
+    let _ = std::process::Command::new("gdbus")
+        .args([
+            "emit",
+            "--session",
+            "--object-path",
+            "/com/canonical/Unity/LauncherEntry",
+            "--signal",
+            "com.canonical.Unity.LauncherEntry.Update",
+            "application://termie.desktop",
+            &properties,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn set_taskbar_progress(_window: &winit::window::Window, _state: u8, _pct: u8) {}
 
 /// populate the taskbar jump list: right-clicking the (pinned) icon offers a
 /// plain new window plus one per shell and custom profile, launching the exe
@@ -1089,12 +1127,30 @@ pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
 
 #[cfg(all(test, not(windows)))]
 mod tests {
-    use super::parse_portal_color_scheme;
+    use super::{launcher_progress_properties, parse_portal_color_scheme};
 
     #[test]
     fn portal_color_scheme_values_map_to_dark_and_light() {
         assert_eq!(parse_portal_color_scheme("(<<uint32 1>>,)"), Some(true));
         assert_eq!(parse_portal_color_scheme("(<uint32 2>,)"), Some(false));
         assert_eq!(parse_portal_color_scheme("(<uint32 0>,)"), None);
+    }
+
+    #[test]
+    fn launcher_progress_maps_terminal_states() {
+        let normal = launcher_progress_properties(1, 42);
+        assert!(normal.contains("'progress': <0.42>"));
+        assert!(normal.contains("'progress-visible': <true>"));
+        assert!(normal.contains("'urgent': <false>"));
+        let error = launcher_progress_properties(2, 150);
+        assert!(error.contains("'progress': <1.00>"));
+        assert!(error.contains("'urgent': <true>"));
+        let indeterminate = launcher_progress_properties(3, 0);
+        assert!(indeterminate.contains("'progress-visible': <false>"));
+        assert!(indeterminate.contains("'updating': <true>"));
+        let clear = launcher_progress_properties(0, 0);
+        assert!(clear.contains("'progress-visible': <false>"));
+        assert!(clear.contains("'urgent': <false>"));
+        assert!(clear.contains("'updating': <false>"));
     }
 }
