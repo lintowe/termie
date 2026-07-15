@@ -8,7 +8,7 @@ A fast, lightweight GPU terminal multiplexer for Windows and Linux — tabs, spl
 - plugins: registry at [`zeo/termie-plugins`](https://github.com/zeo/termie-plugins)
 - license: MIT OR Apache-2.0
 
-> Early but daily-usable. Windows and Linux (X11 and Wayland) run the same rendering, emulation, and plugin core. Quake mode and Mica are Windows-only.
+> Early but daily-usable. Windows and Linux (X11 and Wayland) run the same rendering, emulation, and plugin core. The global Quake hotkey is Windows-only.
 
 ## features
 
@@ -83,7 +83,7 @@ A shell or profile can carry its own theme — `theme.<name>=<theme>` paints tha
 
 Configuration lives in `%APPDATA%\termie\` on Windows. Linux follows the XDG base-directory split: configuration in `$XDG_CONFIG_HOME/termie` (usually `~/.config/termie`), plugins in `$XDG_DATA_HOME/termie`, session state and logs in `$XDG_STATE_HOME/termie`, and generated shell hooks plus the update stamp in `$XDG_CACHE_HOME/termie`. Existing Linux files migrate from the old config directory on first use.
 
-- `config` — general settings the in-app panel also writes (`shell`, `theme`, `scrollback`, …). Opt-ins live here too: `quake_key=ctrl+grave` on Windows, `plugin_sandbox=appcontainer` on Windows or `plugin_sandbox=bwrap` on Linux, `latency_hud=true`, `acrylic=true` on Windows 11, `right_click=paste`, `term_program=ghostty`, `font_weight=semibold`, `min_contrast=3`, `background_image=<path.png>` with `background_image_opacity=0.3`, and `ligatures=false`.
+- `config` — general settings the in-app panel also writes (`shell`, `theme`, `scrollback`, …). Opt-ins live here too: `quake_key=ctrl+grave` on Windows, `plugin_sandbox=appcontainer` on Windows or `plugin_sandbox=bwrap` on Linux, `latency_hud=true`, `acrylic=true` for Windows Mica or Linux compositor blur, `right_click=paste`, `term_program=ghostty`, `font_weight=semibold`, `min_contrast=3`, `background_image=<path.png>` with `background_image_opacity=0.3`, and `ligatures=false`.
 - `colors.conf` — override theme colors, one `key=color` per line (`fg`, `bg`, `cursor`, `sel`, `ansi0`..`ansi255`; `#rrggbb`, `#rgb`, or `r,g,b`).
 - `keybindings.conf` — rebind keys, one `combo=action` per line, e.g. `ctrl+alt+t=new tab here`.
 

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Platform
+- **Linux gets a native backdrop.** The appearance panel exposes the existing backdrop setting as "system blur" on Linux. KDE Wayland receives Winit's compositor blur request live and on restored or torn-off windows; unsupported compositors keep the same transparent background without failing.
 - **Linux launchers have shell actions.** Right-clicking a pinned Termie icon now offers a plain new window plus Bash, Zsh, and Fish windows, matching the built-in-shell entries in the Windows taskbar jump list.
 - **Admin windows work on Linux.** "New admin window" keeps Termie's renderer in the user's Wayland/X11 session and elevates the new shell through `pkexec --keep-cwd`, falling back to `sudo -s`. The focused directory carries into the new window and root state uses the same badge Windows already shows.
 - **Linux can make Termie the default terminal.** The desktop entry now declares the `xdg-terminal-exec` command and directory arguments. The existing "default terminal" palette action puts Termie first for the active desktop, toggles back to the previous choice without erasing it, and uninstall removes only Termie's selection.

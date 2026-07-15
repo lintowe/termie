@@ -2572,8 +2572,8 @@ struct Persisted {
     /// appcontainer (`plugin_sandbox=appcontainer`) or a linux bwrap jail
     /// (`plugin_sandbox=bwrap`); off by default
     plugin_sandbox: bool,
-    /// win11 mica backdrop behind the window (`acrylic=true`, alias `mica`);
-    /// off by default, visible only when opacity is below 100
+    /// system backdrop behind the window (`acrylic=true`, alias `mica`): mica
+    /// on windows 11 and compositor blur on linux
     acrylic: bool,
     /// custom shell profiles, kept both raw as (`profile.` sub-key, value) so
     /// save_config re-emits every line the user wrote, and parsed into Profiles
@@ -2745,10 +2745,7 @@ fn is_settings_hot(h: Hot) -> bool {
             | Hot::CloseActionCycle
             | Hot::BackendCycle
     );
-    #[cfg(windows)]
-    return common || h == Hot::Mica;
-    #[cfg(not(windows))]
-    return common;
+    common || h == Hot::Mica
 }
 
 /// poll the hand-edited conf files (colors.conf, keybindings.conf) once a
@@ -3732,6 +3729,10 @@ impl App {
                     win::set_no_activate(h.hwnd.get());
                 }
             }
+        #[cfg(not(windows))]
+        if self.persisted.acrylic {
+            window.set_blur(true);
+        }
         if let Some(path) = self.cli.drive.clone() {
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
@@ -5065,7 +5066,6 @@ impl App {
                 copy_on_select: config.copy_on_select,
                 load_profile: config.load_profile,
                 theme_auto: self.persisted.theme_auto,
-                #[cfg(windows)]
                 acrylic: self.persisted.acrylic,
                 shell_name: config.shell.label(),
                 close_action_name: config.close_action.label(),
@@ -6617,16 +6617,19 @@ impl App {
                 }
                 self.redraw();
             }
-            #[cfg(windows)]
             Hot::Mica => {
                 self.persisted.acrylic = !self.persisted.acrylic;
                 let on = self.persisted.acrylic;
                 for pw in std::iter::once(&self.pw).chain(self.satellites.iter()) {
-                    if let Some(w) = pw.window.as_ref()
-                        && let Ok(handle) = w.window_handle()
+                    if let Some(w) = pw.window.as_ref() {
+                        #[cfg(not(windows))]
+                        w.set_blur(on);
+                        #[cfg(windows)]
+                        if let Ok(handle) = w.window_handle()
                         && let RawWindowHandle::Win32(h) = handle.as_raw()
-                    {
-                        win::apply_backdrop(h.hwnd.get(), on);
+                        {
+                            win::apply_backdrop(h.hwnd.get(), on);
+                        }
                     }
                 }
                 self.redraw();
@@ -7414,6 +7417,10 @@ impl App {
         // without this a torn-off window silently drops CJK input: the OS IME
         // never engages, so no composition or commit ever reaches the pane
         window.set_ime_allowed(true);
+        #[cfg(not(windows))]
+        if self.persisted.acrylic {
+            window.set_blur(true);
+        }
         let renderer = match render::Renderer::new(
             window.clone(),
             event_loop.owned_display_handle(),
@@ -10345,7 +10352,7 @@ mod tests {
         // an empty value leaves the default (no distro pinned)
         assert_eq!(parse_persisted("wsl_distro=").wsl_distro, None);
 
-        // the win11 backdrop accepts both spellings, off by default
+        // the system backdrop accepts both spellings, off by default
         assert!(parse_persisted("acrylic=true").acrylic);
         assert!(parse_persisted("mica=on").acrylic);
         assert!(!parse_persisted("acrylic=false").acrylic);
