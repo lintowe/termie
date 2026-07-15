@@ -1151,7 +1151,12 @@ fn default_keybindings() -> Vec<(ModifiersState, Key, PaletteAction)> {
 /// than risk a mangled argv
 fn jumplist_entries() -> Vec<(String, String)> {
     let mut v = vec![("new window".to_string(), String::new())];
+    #[cfg(windows)]
     for label in ["pwsh", "cmd", "wsl"] {
+        v.push((format!("new window: {label}"), format!("--shell {label}")));
+    }
+    #[cfg(not(windows))]
+    for label in ["bash", "zsh", "fish"] {
         v.push((format!("new window: {label}"), format!("--shell {label}")));
     }
     for prof in pty::profiles() {
@@ -3915,9 +3920,8 @@ impl App {
             let msg = format!("keybindings.conf: {} {noun} ignored", self.kb_ignored);
             self.show_notice(&msg);
         }
-        // populate the taskbar jump list and keep the default-terminal COM
-        // registration pointed at this exe, both off-thread; COM shell calls
-        // have no business on the startup render path
+        // refresh the launcher's shell actions and keep the default-terminal
+        // registration pointed at this exe, both off the startup render path
         let entries = jumplist_entries();
         std::thread::spawn(move || {
             win::refresh_defterm_server_path();
@@ -5803,6 +5807,7 @@ impl App {
                     } else {
                         WindowLevel::Normal
                     });
+                    win::set_window_above(w, self.pw.on_top);
                 }
                 self.show_notice(if self.pw.on_top { "always on top" } else { "normal stacking" });
                 self.redraw();
@@ -7655,7 +7660,7 @@ impl App {
             }
             WindowEvent::Focused(f) => {
                 if f && let Some(window) = self.pw.window.as_ref() {
-                    window.request_user_attention(None);
+                    win::clear_attention(window);
                 }
                 // a --drive window paints focused no matter the real focus
                 // (it is WS_EX_NOACTIVATE, so real focus never arrives)
@@ -9548,7 +9553,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(f) => {
                 if f && let Some(window) = self.pw.window.as_ref() {
-                    window.request_user_attention(None);
+                    win::clear_attention(window);
                 }
                 // a --drive window paints focused no matter the real focus
                 // (it is WS_EX_NOACTIVATE, so real focus never arrives)

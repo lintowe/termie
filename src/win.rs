@@ -1,7 +1,7 @@
 //! the platform layer: window effects, clipboard, shell/OS integration.
 //! every function has an implementation per OS — real Win32/DWM/COM on
 //! windows, XDG/wayland/x11 equivalents on unix, and an honest no-op where
-//! the concept doesn't exist on the other side (jump lists, UAC, WSL)
+//! the concept doesn't exist on the other side (UAC, WSL)
 
 /// suppress the OS "application was unable to start correctly" / crash dialogs
 /// for this process and the children it spawns. without this, a pre-warmed pool
@@ -180,6 +180,99 @@ pub fn apply_backdrop(hwnd_handle: isize, on: bool) {
 #[cfg(not(windows))]
 pub fn apply_backdrop(_hwnd_handle: isize, _on: bool) {}
 
+#[cfg(target_os = "linux")]
+fn kwin_keep_above_script(pid: u32, width: f64, height: f64, on: bool) -> String {
+    format!(
+        "function matchesTarget(window) {{\n    return window.pid === {pid}\n        && Math.abs(window.width - {width:.3}) < 2\n        && Math.abs(window.height - {height:.3}) < 2;\n}}\nlet target = workspace.activeWindow;\nif (!target || !matchesTarget(target)) {{\n    const windows = workspace.windowList();\n    let match = null;\n    let matches = 0;\n    for (let i = 0; i < windows.length; i++) {{\n        if (matchesTarget(windows[i])) {{\n            match = windows[i];\n            matches++;\n        }}\n    }}\n    if (matches === 1) target = match;\n}}\nif (target && matchesTarget(target)) {{\n    target.keepAbove = {on};\n}}\n"
+    )
+}
+
+/// apply keep-above to the active termie window on kde wayland, where winit's
+/// generic window-level call is currently unsupported
+#[cfg(target_os = "linux")]
+pub fn set_window_above(window: &winit::window::Window, on: bool) {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
+    if !desktop.split(':').any(|part| matches!(part, "kde" | "plasma")) {
+        return;
+    }
+    let pid = std::process::id();
+    let name = format!("termie-keep-above-{pid}");
+    let Some(dir) = crate::cache_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("{name}.js"));
+    let size = window.inner_size();
+    let scale = window.scale_factor();
+    if std::fs::write(
+        &path,
+        kwin_keep_above_script(pid, size.width as f64 / scale, size.height as f64 / scale, on),
+    )
+    .is_err()
+    {
+        return;
+    }
+    let load = std::process::Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.kde.KWin",
+            "--object-path",
+            "/Scripting",
+            "--method",
+            "org.kde.kwin.Scripting.loadScript",
+        ])
+        .arg(&path)
+        .arg(&name)
+        .output();
+    let id = load.ok().and_then(|output| {
+        output.status.success().then(|| String::from_utf8_lossy(&output.stdout)).and_then(|text| {
+            text.split(|c: char| !c.is_ascii_digit() && c != '-')
+                .filter_map(|part| part.parse::<i32>().ok())
+                .next_back()
+                .and_then(|id| u32::try_from(id).ok())
+        })
+    });
+    if let Some(id) = id {
+        let _ = std::process::Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                "org.kde.KWin",
+                "--object-path",
+                &format!("/Scripting/Script{id}"),
+                "--method",
+                "org.kde.kwin.Script.run",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                "org.kde.KWin",
+                "--object-path",
+                "/Scripting",
+                "--method",
+                "org.kde.kwin.Scripting.unloadScript",
+                &name,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_window_above(_window: &winit::window::Window, _on: bool) {}
+
 /// reflect OSC 9;4 progress on the window's taskbar button. state: 0 clear,
 /// 1 normal (green), 2 error (red), 3 indeterminate (pulse), 4 paused (yellow);
 /// pct is 0–100 and ignored for clear/indeterminate. failures are swallowed —
@@ -244,8 +337,7 @@ fn launcher_progress_properties(state: u8, pct: u8) -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub fn set_taskbar_progress(_window: &winit::window::Window, state: u8, pct: u8) {
-    let properties = launcher_progress_properties(state, pct);
+fn emit_launcher_update(properties: &str) {
     let _ = std::process::Command::new("gdbus")
         .args([
             "emit",
@@ -255,12 +347,17 @@ pub fn set_taskbar_progress(_window: &winit::window::Window, state: u8, pct: u8)
             "--signal",
             "com.canonical.Unity.LauncherEntry.Update",
             "application://termie.desktop",
-            &properties,
+            properties,
         ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_taskbar_progress(_window: &winit::window::Window, state: u8, pct: u8) {
+    emit_launcher_update(&launcher_progress_properties(state, pct));
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -337,7 +434,146 @@ pub fn update_jumplist(tasks: &[(String, String)]) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn desktop_exec_quote(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for c in text.chars() {
+        match c {
+            '"' | '`' | '$' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            '\\' => quoted.push_str(r"\\\\"),
+            '%' => quoted.push_str("%%"),
+            _ => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_name_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => {},
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_with_profiles(contents: &str, tasks: &[(String, String)], exe: &str) -> String {
+    let profiles: Vec<_> = tasks
+        .iter()
+        .filter(|(_, args)| {
+            !matches!(
+                args.as_str(),
+                "" | "--shell bash" | "--shell zsh" | "--shell fish"
+            )
+        })
+        .collect();
+    let ids: Vec<String> = (0..profiles.len()).map(|i| format!("TermieProfile{i}")).collect();
+    let mut kept = Vec::new();
+    let mut generated_section = false;
+    let mut actions_seen = false;
+    for line in contents.lines() {
+        if line.starts_with('[') {
+            generated_section = line.starts_with("[Desktop Action TermieProfile");
+        }
+        if generated_section {
+            continue;
+        }
+        if let Some(actions) = line.strip_prefix("Actions=") {
+            let mut actions: Vec<&str> = actions
+                .split(';')
+                .filter(|action| !action.is_empty() && !action.starts_with("TermieProfile"))
+                .collect();
+            actions.extend(ids.iter().map(String::as_str));
+            kept.push(format!("Actions={};", actions.join(";")));
+            actions_seen = true;
+        } else {
+            kept.push(line.to_string());
+        }
+    }
+    if !actions_seen || profiles.is_empty() {
+        return if contents.ends_with('\n') {
+            format!("{}\n", kept.join("\n"))
+        } else {
+            kept.join("\n")
+        };
+    }
+    let exe = desktop_exec_quote(exe);
+    for ((title, _), id) in profiles.iter().zip(&ids) {
+        if !kept.last().is_some_and(String::is_empty) {
+            kept.push(String::new());
+        }
+        let profile = title.strip_prefix("new window: ").unwrap_or(title);
+        kept.push(format!("[Desktop Action {id}]"));
+        kept.push(format!("Name={}", desktop_name_escape(title)));
+        kept.push(format!("Exec={exe} --shell {}", desktop_exec_quote(profile)));
+    }
+    format!("{}\n", kept.join("\n"))
+}
+
+#[cfg(target_os = "linux")]
+fn installed_desktop_path(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let beside = exe.parent()?.parent()?.join("share/applications/termie.desktop");
+    if beside.is_file() {
+        return Some(beside);
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/share"))
+        })?;
+    let desktop = data.join("applications/termie.desktop");
+    desktop.is_file().then_some(desktop)
+}
+
+#[cfg(target_os = "linux")]
+pub fn update_jumplist(tasks: &[(String, String)]) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(desktop) = installed_desktop_path(&exe) else {
+        return;
+    };
+    let Ok(contents) = std::fs::read_to_string(&desktop) else {
+        return;
+    };
+    let updated = desktop_with_profiles(&contents, tasks, &exe.to_string_lossy());
+    if updated == contents {
+        return;
+    }
+    let temporary = desktop.with_extension("desktop.termie-tmp");
+    if std::fs::write(&temporary, updated).is_err() {
+        return;
+    }
+    if std::fs::rename(&temporary, &desktop).is_err() {
+        let _ = std::fs::remove_file(temporary);
+        return;
+    }
+    if let Some(dir) = desktop.parent() {
+        let _ = std::process::Command::new("update-desktop-database")
+            .arg(dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn update_jumplist(_tasks: &[(String, String)]) {}
 
 /// flash the window's taskbar button until it regains the foreground — the
@@ -374,6 +610,14 @@ pub fn request_attention(w: &winit::window::Window) {
     }
     #[cfg(not(windows))]
     w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
+    #[cfg(target_os = "linux")]
+    emit_launcher_update("{'urgent': <true>}");
+}
+
+pub fn clear_attention(w: &winit::window::Window) {
+    w.request_user_attention(None);
+    #[cfg(target_os = "linux")]
+    emit_launcher_update("{'urgent': <false>}");
 }
 
 /// the user's "roll the wheel to scroll N lines" setting; u32::MAX is the
@@ -1233,7 +1477,10 @@ pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
 
 #[cfg(all(test, not(windows)))]
 mod tests {
-    use super::{launcher_progress_properties, parse_portal_color_scheme, terminal_list_with_termie};
+    use super::{
+        desktop_with_profiles, kwin_keep_above_script, launcher_progress_properties,
+        parse_portal_color_scheme, terminal_list_with_termie,
+    };
 
     #[test]
     fn portal_color_scheme_values_map_to_dark_and_light() {
@@ -1270,5 +1517,49 @@ mod tests {
         );
         assert_eq!(terminal_list_with_termie(&enabled, false), original);
         assert_eq!(terminal_list_with_termie("termie.desktop\n", false), "");
+    }
+
+    #[test]
+    fn linux_launcher_profiles_replace_the_generated_actions() {
+        let desktop = "[Desktop Entry]\nActions=NewWindow;NewBash;TermieProfile0;\n\n\
+[Desktop Action NewWindow]\nName=New Window\nExec=termie\n\n\
+[Desktop Action TermieProfile0]\nName=old\nExec=old\n";
+        let tasks = vec![
+            ("new window".to_string(), String::new()),
+            ("new window: bash".to_string(), "--shell bash".to_string()),
+            ("new window: zsh".to_string(), "--shell zsh".to_string()),
+            ("new window: fish".to_string(), "--shell fish".to_string()),
+            ("new window: dev tools".to_string(), "--shell \"dev tools\"".to_string()),
+            ("new window: cash$box".to_string(), "--shell \"cash$box\"".to_string()),
+            ("new window: 50%\\work".to_string(), "--shell \"50%\\work\"".to_string()),
+        ];
+        let updated = desktop_with_profiles(desktop, &tasks, "/opt/Termie $/bin/termie");
+        assert!(updated.contains(
+            "Actions=NewWindow;NewBash;TermieProfile0;TermieProfile1;TermieProfile2;"
+        ));
+        assert!(updated.contains("Name=new window: dev tools"));
+        assert!(updated.contains("Exec=\"/opt/Termie \\$/bin/termie\" --shell \"dev tools\""));
+        assert!(updated.contains("Exec=\"/opt/Termie \\$/bin/termie\" --shell \"cash\\$box\""));
+        assert!(updated.contains("--shell \"50%%\\\\\\\\work\""));
+        assert!(!updated.contains("Name=old"));
+
+        let builtins = &tasks[..4];
+        let cleared = desktop_with_profiles(&updated, builtins, "/opt/termie");
+        assert!(cleared.contains("Actions=NewWindow;NewBash;"));
+        assert!(!cleared.contains("TermieProfile"));
+    }
+
+    #[test]
+    fn kwin_keep_above_targets_only_this_process() {
+        let on = kwin_keep_above_script(4217, 1000.0, 640.0, true);
+        assert!(on.contains("window.pid === 4217"));
+        assert!(on.contains("window.width - 1000.000"));
+        assert!(on.contains("window.height - 640.000"));
+        assert!(on.contains("target.keepAbove = true"));
+        assert!(on.contains("workspace.activeWindow"));
+        assert!(on.contains("workspace.windowList()"));
+        assert!(on.contains("matches === 1"));
+        let off = kwin_keep_above_script(4217, 1000.0, 640.0, false);
+        assert!(off.contains("target.keepAbove = false"));
     }
 }

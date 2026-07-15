@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Platform
+- **Always-on-top works on KDE Wayland.** The palette toggle keeps Winit's native Windows and X11 path and uses KWin's `keepAbove` property for the matching Termie window where Wayland has no generic window-level protocol. The helper script is loaded for the toggle, unloaded immediately, and removed from cache.
+- **Bell attention reaches Linux launchers.** An unfocused bell now marks the pinned Termie launcher urgent through the desktop taskbar protocol as well as requesting window attention, and focusing the window clears both signals. This covers Wayland compositors where Winit's generic attention request is unavailable.
+- **Linux launcher actions include custom profiles.** The installed desktop entry now refreshes its right-click actions from `profile.*` configuration at startup, matching the dynamic Windows jump list. Stale generated actions are removed without touching the built-in Bash, Zsh, and Fish entries or unrelated desktop metadata.
 - **Linux gets a native backdrop.** The appearance panel exposes the existing backdrop setting as "system blur" on Linux. KDE Wayland receives Winit's compositor blur request live and on restored or torn-off windows; unsupported compositors keep the same transparent background without failing.
 - **Linux launchers have shell actions.** Right-clicking a pinned Termie icon now offers a plain new window plus Bash, Zsh, and Fish windows, matching the built-in-shell entries in the Windows taskbar jump list.
 - **Admin windows work on Linux.** "New admin window" keeps Termie's renderer in the user's Wayland/X11 session and elevates the new shell through `pkexec --keep-cwd`, falling back to `sudo -s`. The focused directory carries into the new window and root state uses the same badge Windows already shows.
