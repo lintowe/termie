@@ -902,6 +902,8 @@ fn parse_key(s: &str) -> Option<Key> {
         "f10" => Key::Named(NamedKey::F10),
         "f11" => Key::Named(NamedKey::F11),
         "f12" => Key::Named(NamedKey::F12),
+        "f23" | "mouse4" | "xbutton1" => Key::Named(NamedKey::F23),
+        "f24" | "mouse5" | "xbutton2" => Key::Named(NamedKey::F24),
         "insert" | "ins" => Key::Named(NamedKey::Insert),
         "delete" | "del" => Key::Named(NamedKey::Delete),
         "home" => Key::Named(NamedKey::Home),
@@ -968,6 +970,8 @@ fn key_label(key: &Key) -> Option<String> {
             NamedKey::F10 => named("f10"),
             NamedKey::F11 => named("f11"),
             NamedKey::F12 => named("f12"),
+            NamedKey::F23 => named("mouse4"),
+            NamedKey::F24 => named("mouse5"),
             _ => None,
         },
         _ => None,
@@ -8019,6 +8023,14 @@ impl App {
     /// click-to-focus, divider/pane drag, link open, widget click, title-bar buttons
     fn on_mouse_input(&mut self, state: ElementState, button: MouseButton, event_loop: &ActiveEventLoop) {
         match button {
+            MouseButton::Back | MouseButton::Forward => {
+                let logical = if button == MouseButton::Back {
+                    Key::Named(NamedKey::F23)
+                } else {
+                    Key::Named(NamedKey::F24)
+                };
+                self.handle_shortcut(&logical, None, state, event_loop);
+            }
             MouseButton::Right if state == ElementState::Pressed => {
                 // right-click opens a context menu at the cursor: over a pane it
                 // targets that pane (focus it first so the actions land there);
@@ -10509,6 +10521,10 @@ mod tests {
         assert_eq!(m4, ModifiersState::empty());
         assert_eq!(k4, Key::Named(NamedKey::F11));
         assert_eq!(parse_combo("pgdn").unwrap().1, Key::Named(NamedKey::PageDown));
+        assert_eq!(parse_combo("mouse4").unwrap().1, Key::Named(NamedKey::F23));
+        assert_eq!(parse_combo("xbutton2").unwrap().1, Key::Named(NamedKey::F24));
+        assert_eq!(key_label(&Key::Named(NamedKey::F23)).as_deref(), Some("mouse4"));
+        assert_eq!(key_label(&Key::Named(NamedKey::F24)).as_deref(), Some("mouse5"));
         assert!(parse_combo("ctrl+").is_none());
     }
 
