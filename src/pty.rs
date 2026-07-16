@@ -7,54 +7,46 @@ use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 #[cfg(target_os = "linux")]
-fn systemd_run() -> Option<&'static std::path::PathBuf> {
-    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    PATH.get_or_init(|| {
-        if !std::path::Path::new("/run/systemd/system").is_dir() {
-            return None;
-        }
-        let path = env::var_os("PATH").and_then(|paths| {
-            env::split_paths(&paths)
-                .map(|dir| dir.join("systemd-run"))
-                .find(|candidate| candidate.is_file())
-        })?;
-        let unit = format!("termie-scope-probe-{}", std::process::id());
-        std::process::Command::new(&path)
-            .args(["--user", "--scope", "--quiet", "--collect", "--unit", &unit, "true"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .ok()
-            .filter(|status| status.success())
-            .map(|_| path)
-    })
-    .as_ref()
+fn systemd_scope_tools() -> Option<&'static (PathBuf, PathBuf)> {
+    static TOOLS: std::sync::OnceLock<Option<(PathBuf, PathBuf)>> = std::sync::OnceLock::new();
+    TOOLS
+        .get_or_init(|| {
+            if !std::path::Path::new("/run/systemd/system").is_dir() {
+                return None;
+            }
+            Some((find_in_path("systemd-run")?, find_in_path("timeout")?))
+        })
+        .as_ref()
 }
+
+#[cfg(target_os = "linux")]
+const LINUX_SCOPE_LAUNCHER: &str = r#"timeout=$1; runner=$2; probe=$3; unit=$4; shift 4
+if "$timeout" 2s "$runner" --user --scope --quiet --collect --unit "$probe" -- /usr/bin/true >/dev/null 2>&1; then
+    exec "$runner" --user --scope --quiet --collect --unit "$unit" -- "$@"
+fi
+exec "$@""#;
 
 #[cfg(target_os = "linux")]
 fn isolate_in_user_scope(cmd: &mut CommandBuilder) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
-    let Some(systemd_run) = systemd_run() else {
+    let Some((systemd_run, timeout)) = systemd_scope_tools() else {
         return;
     };
-    let unit = format!(
-        "termie-pane-{}-{}",
-        std::process::id(),
-        NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)
-    );
+    let id = NEXT_SCOPE.fetch_add(1, Ordering::Relaxed);
+    let unit = format!("termie-pane-{}-{id}", std::process::id());
+    let probe = format!("termie-pane-probe-{}-{id}", std::process::id());
     let command = std::mem::take(cmd.get_argv_mut());
     cmd.get_argv_mut().extend([
+        "/bin/sh".into(),
+        "-c".into(),
+        LINUX_SCOPE_LAUNCHER.into(),
+        "termie-scope".into(),
+        timeout.as_os_str().to_owned(),
         systemd_run.as_os_str().to_owned(),
-        "--user".into(),
-        "--scope".into(),
-        "--quiet".into(),
-        "--collect".into(),
-        "--unit".into(),
+        probe.into(),
         unit.into(),
-        "--".into(),
     ]);
     cmd.get_argv_mut().extend(command);
 }
@@ -858,6 +850,27 @@ mod null_pty {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_scope_probe_falls_back_to_direct_command() {
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                LINUX_SCOPE_LAUNCHER,
+                "termie-scope",
+                "/usr/bin/timeout",
+                "/usr/bin/false",
+                "probe",
+                "pane",
+                "/usr/bin/printf",
+                "shell-ok",
+            ])
+            .output()
+            .expect("run scope fallback");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"shell-ok");
+    }
 
     // one test owns every profile-registry assertion: the OnceLock takes only
     // the first set_profiles of the process, so splitting these across tests

@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Platform
-- **Linux panes fail independently under memory pressure.** Each shell runs in its own transient systemd scope when a user manager is available, so an out-of-memory kill takes one pane instead of every tab and split in the Termie process. Systems without systemd keep the direct PTY spawn path.
+- **Linux panes fail independently under memory pressure without depending on systemd for startup.** Each shell uses its own transient scope when the user manager answers a two-second probe. A stalled or unavailable manager falls back to a direct PTY spawn, so new tabs and splits still open.
 - **The Quake drop-down works on Linux.** `quake_key=ctrl+grave` registers through the cross-desktop GlobalShortcuts portal and keeps its D-Bus session alive for the process. X11 uses its native focus and placement path; KDE Wayland moves the window to the active work area, raises it, and gives it focus through KWin because the Wayland window API cannot position or activate an existing surface.
 - **Always-on-top works on KDE Wayland.** The palette toggle keeps Winit's native Windows and X11 path and uses KWin's `keepAbove` property for the matching Termie window where Wayland has no generic window-level protocol. The helper script is loaded for the toggle, unloaded immediately, and removed from cache.
 - **Bell attention reaches Linux launchers.** An unfocused bell now marks the pinned Termie launcher urgent through the desktop taskbar protocol as well as requesting window attention, and focusing the window clears both signals. This covers Wayland compositors where Winit's generic attention request is unavailable.
