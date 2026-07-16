@@ -6,6 +6,59 @@ use std::thread;
 use anyhow::Result;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
+#[cfg(target_os = "linux")]
+fn systemd_run() -> Option<&'static std::path::PathBuf> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        if !std::path::Path::new("/run/systemd/system").is_dir() {
+            return None;
+        }
+        let path = env::var_os("PATH").and_then(|paths| {
+            env::split_paths(&paths)
+                .map(|dir| dir.join("systemd-run"))
+                .find(|candidate| candidate.is_file())
+        })?;
+        let unit = format!("termie-scope-probe-{}", std::process::id());
+        std::process::Command::new(&path)
+            .args(["--user", "--scope", "--quiet", "--collect", "--unit", &unit, "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .filter(|status| status.success())
+            .map(|_| path)
+    })
+    .as_ref()
+}
+
+#[cfg(target_os = "linux")]
+fn isolate_in_user_scope(cmd: &mut CommandBuilder) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
+    let Some(systemd_run) = systemd_run() else {
+        return;
+    };
+    let unit = format!(
+        "termie-pane-{}-{}",
+        std::process::id(),
+        NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)
+    );
+    let command = std::mem::take(cmd.get_argv_mut());
+    cmd.get_argv_mut().extend([
+        systemd_run.as_os_str().to_owned(),
+        "--user".into(),
+        "--scope".into(),
+        "--quiet".into(),
+        "--collect".into(),
+        "--unit".into(),
+        unit.into(),
+        "--".into(),
+    ]);
+    cmd.get_argv_mut().extend(command);
+}
+
 // a prompt hook that emits OSC-133 command lifecycle marks and OSC-7 cwd
 // reporting around the prompt text. it wraps whatever prompt is
 // already defined — the pwsh default, or the profile's starship/oh-my-posh
@@ -368,6 +421,10 @@ impl Pty {
                 cmd.env(k, val);
             }
         }
+
+        // separate panes so pressure kills one workload instead of the whole terminal
+        #[cfg(target_os = "linux")]
+        isolate_in_user_scope(&mut cmd);
 
         let child = pair.slave.spawn_command(cmd)?;
         // close the slave side in the parent so EOF propagates on child exit

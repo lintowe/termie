@@ -119,7 +119,7 @@ cd termie
 cargo build --release      # target/release/termie
 ```
 
-At runtime the binary needs those same libraries, `unzip` for marketplace installs, and a Vulkan or GL driver. `mesa-vulkan-drivers` covers the software fallback. Optional: `bubblewrap` for the plugin sandbox and `xdg-open` for opening links. `theme=auto` reads and monitors the desktop color scheme through `xdg-desktop-portal` using `gdbus`. Copy `assets/fonts/` next to a source-built binary (or run from the repo); the release archive already carries them.
+At runtime the binary needs those same libraries, `unzip` for marketplace installs, and a Vulkan or GL driver. `mesa-vulkan-drivers` covers the software fallback. Optional: `systemd-run` isolates each pane for independent out-of-memory handling, `bubblewrap` confines plugins, and `xdg-open` opens links. `theme=auto` reads and monitors the desktop color scheme through `xdg-desktop-portal` using `gdbus`. Copy `assets/fonts/` next to a source-built binary (or run from the repo); the release archive already carries them.
 
 Every platform:
 
