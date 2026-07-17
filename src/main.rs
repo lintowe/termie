@@ -2039,7 +2039,19 @@ enum DriveStep {
     Key(ModifiersState, Key),
     Type(String),
     Pointer(PhysicalPosition<f64>),
+    PointerWindow(usize, PhysicalPosition<f64>),
     Mouse(ElementState),
+    Assert(DriveMetric, usize),
+    Exit,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DriveMetric {
+    Windows,
+    Tabs,
+    Panes,
+    WindowTabs(usize),
+    WindowPanes(usize),
 }
 
 /// a parsed `--drive` script: steps at cumulative offsets from the moment the
@@ -2050,8 +2062,7 @@ struct Drive {
     started: Option<Instant>,
 }
 
-/// parse a drive script: key, type, pointer, or left-mouse steps with delays
-/// relative to the previous line; '#' lines are comments
+/// parse a drive script into steps with delays relative to the previous line
 fn parse_drive_script(text: &str) -> Vec<(Duration, DriveStep)> {
     let mut out = Vec::new();
     let mut at = Duration::ZERO;
@@ -2085,11 +2096,48 @@ fn parse_drive_script(text: &str) -> Vec<(Duration, DriveStep)> {
                     out.push((at, DriveStep::Pointer(PhysicalPosition::new(x, y))));
                 }
             }
+            "pointer-window" => {
+                let mut coords = arg.split_whitespace();
+                if let (Some(window), Some(x), Some(y), None) =
+                    (coords.next(), coords.next(), coords.next(), coords.next())
+                    && let (Ok(window), Ok(x), Ok(y)) =
+                        (window.parse(), x.parse::<f64>(), y.parse::<f64>())
+                    && x.is_finite() && y.is_finite()
+                {
+                    out.push((
+                        at,
+                        DriveStep::PointerWindow(window, PhysicalPosition::new(x, y)),
+                    ));
+                }
+            }
             "mouse" => match arg {
                 "down" => out.push((at, DriveStep::Mouse(ElementState::Pressed))),
                 "up" => out.push((at, DriveStep::Mouse(ElementState::Released))),
                 _ => {}
             },
+            "assert" => {
+                let mut spec = arg.split_whitespace();
+                let metric = match spec.next() {
+                    Some("windows") => Some(DriveMetric::Windows),
+                    Some("tabs") => Some(DriveMetric::Tabs),
+                    Some("panes") => Some(DriveMetric::Panes),
+                    Some("window-tabs") => spec
+                        .next()
+                        .and_then(|index| index.parse().ok())
+                        .map(DriveMetric::WindowTabs),
+                    Some("window-panes") => spec
+                        .next()
+                        .and_then(|index| index.parse().ok())
+                        .map(DriveMetric::WindowPanes),
+                    _ => None,
+                };
+                if let (Some(metric), Some(count), None) = (metric, spec.next(), spec.next())
+                    && let Ok(count) = count.parse()
+                {
+                    out.push((at, DriveStep::Assert(metric, count)));
+                }
+            }
+            "exit" if arg.is_empty() => out.push((at, DriveStep::Exit)),
             _ => {}
         }
     }
@@ -3696,6 +3744,10 @@ struct App {
     bench_left: u32,
     /// a running --drive script; steps fire from about_to_wait wakeups
     drive: Option<Drive>,
+    /// window index that received the most recent synthetic pointer move
+    drive_window: usize,
+    /// a drive assertion failed; returned as a nonzero process exit after cleanup
+    drive_failed: bool,
     #[cfg(debug_assertions)]
     bench_next: Option<Instant>,
     /// pool shells currently spawning on worker threads (not yet in `pool`)
@@ -3928,6 +3980,8 @@ impl App {
             #[cfg(not(windows))]
             theme_watch_spawned: false,
             drive: None,
+            drive_window: 0,
+            drive_failed: false,
         }
     }
 
@@ -4056,7 +4110,11 @@ impl App {
                     if steps.is_empty() {
                         log::warn!("--drive: no runnable steps in {path}");
                     } else {
-                        self.drive = Some(Drive { steps, next: 0, started: None });
+                        #[cfg(debug_assertions)]
+                        let started = std::env::var_os("TERMIE_DRIVE_NOW").map(|_| Instant::now());
+                        #[cfg(not(debug_assertions))]
+                        let started = None;
+                        self.drive = Some(Drive { steps, next: 0, started });
                         self.pw.focused = true;
                     }
                 }
@@ -8587,25 +8645,103 @@ impl App {
                     }
                 }
                 DriveStep::Pointer(position) => {
-                    let inside = self.pw.window.as_ref().is_some_and(|window| {
-                        let size = window.inner_size();
-                        position.x >= 0.0
-                            && position.y >= 0.0
-                            && position.x < size.width as f64
-                            && position.y < size.height as f64
-                    });
-                    if inside {
-                        self.on_cursor_entered();
+                    self.drive_window = 0;
+                    self.inject_pointer(position);
+                }
+                DriveStep::PointerWindow(index, position) => {
+                    if index == 0 {
+                        self.drive_window = 0;
+                        self.inject_pointer(position);
+                    } else if index <= self.satellites.len() {
+                        self.drive_window = index;
+                        self.with_window(index - 1, |app| app.inject_pointer(position));
                     } else {
-                        self.on_cursor_left();
+                        log::error!("--drive: pointer-window {index} is unavailable");
+                        self.drive_failed = true;
                     }
-                    self.on_cursor_moved(position);
                 }
                 DriveStep::Mouse(state) => {
-                    self.on_mouse_input(state, MouseButton::Left, event_loop);
+                    if self.drive_window == 0 {
+                        self.on_mouse_input(state, MouseButton::Left, event_loop);
+                    } else if self.drive_window <= self.satellites.len() {
+                        self.with_window(self.drive_window - 1, |app| {
+                            app.on_mouse_input(state, MouseButton::Left, event_loop);
+                        });
+                        self.cleanup_empty_windows();
+                    } else {
+                        log::error!(
+                            "--drive: pointer window {} closed before mouse input",
+                            self.drive_window
+                        );
+                        self.drive_failed = true;
+                    }
                 }
+                DriveStep::Assert(metric, expected) => {
+                    let window = |index: usize| {
+                        if index == 0 {
+                            Some(&self.pw)
+                        } else {
+                            self.satellites.get(index - 1)
+                        }
+                    };
+                    let actual = match metric {
+                        DriveMetric::Windows => {
+                            Some(self.satellites.len() + usize::from(self.pw.window.is_some()))
+                        }
+                        DriveMetric::Tabs => Some(self
+                            .satellites
+                            .iter()
+                            .chain(std::iter::once(&self.pw))
+                            .map(|pw| pw.tabs.len())
+                            .sum()),
+                        DriveMetric::Panes => Some(self
+                            .satellites
+                            .iter()
+                            .chain(std::iter::once(&self.pw))
+                            .flat_map(|pw| &pw.tabs)
+                            .filter_map(|tab| tab.root.as_ref())
+                            .map(pane_count)
+                            .sum()),
+                        DriveMetric::WindowTabs(index) => window(index).map(|pw| pw.tabs.len()),
+                        DriveMetric::WindowPanes(index) => window(index).map(|pw| {
+                            pw.tabs
+                                .iter()
+                                .filter_map(|tab| tab.root.as_ref())
+                                .map(pane_count)
+                                .sum()
+                        }),
+                    };
+                    if actual == Some(expected) {
+                        log::info!("--drive: {metric:?} assertion passed ({expected})");
+                    } else {
+                        let actual = actual
+                            .map(|actual| actual.to_string())
+                            .unwrap_or_else(|| "window unavailable".to_string());
+                        log::error!(
+                            "--drive: {metric:?} assertion failed (expected {expected}, got {actual})"
+                        );
+                        self.drive_failed = true;
+                    }
+                }
+                DriveStep::Exit => event_loop.exit(),
             }
         }
+    }
+
+    fn inject_pointer(&mut self, position: PhysicalPosition<f64>) {
+        let inside = self.pw.window.as_ref().is_some_and(|window| {
+            let size = window.inner_size();
+            position.x >= 0.0
+                && position.y >= 0.0
+                && position.x < size.width as f64
+                && position.y < size.height as f64
+        });
+        if inside {
+            self.on_cursor_entered();
+        } else {
+            self.on_cursor_left();
+        }
+        self.on_cursor_moved(position);
     }
 
     /// grow/shrink the focused pane along `dir` (pane-mode keyboard resize)
@@ -11561,6 +11697,16 @@ fn main() -> Result<()> {
         app.handoff = handoff;
     }
     event_loop.run_app(&mut app)?;
+    let drive_incomplete = app
+        .drive
+        .as_ref()
+        .is_some_and(|drive| drive.next < drive.steps.len());
+    if app.drive_failed {
+        anyhow::bail!("--drive script failed");
+    }
+    if drive_incomplete {
+        anyhow::bail!("--drive ended before completing its script");
+    }
     Ok(())
 }
 
@@ -11687,9 +11833,9 @@ mod tests {
     #[test]
     fn drive_scripts_parse_pointer_and_left_mouse_steps() {
         let steps = parse_drive_script(
-            "10 pointer 12.5 -4\n20 mouse down\n30 pointer NaN 2\n40 pointer 1 nope\n50 mouse up\n",
+            "10 pointer 12.5 -4\n20 mouse down\n30 pointer NaN 2\n40 pointer 1 nope\n50 pointer-window 2 80 40\n60 mouse up\n",
         );
-        assert_eq!(steps.len(), 3);
+        assert_eq!(steps.len(), 4);
         assert!(matches!(
             steps[0],
             (at, DriveStep::Pointer(position))
@@ -11702,8 +11848,45 @@ mod tests {
         ));
         assert!(matches!(
             steps[2],
-            (at, DriveStep::Mouse(ElementState::Released)) if at == Duration::from_millis(150)
+            (at, DriveStep::PointerWindow(2, position))
+                if at == Duration::from_millis(150)
+                    && position == PhysicalPosition::new(80.0, 40.0)
         ));
+        assert!(matches!(
+            steps[3],
+            (at, DriveStep::Mouse(ElementState::Released)) if at == Duration::from_millis(210)
+        ));
+    }
+
+    #[test]
+    fn drive_scripts_parse_assertions_and_exit() {
+        let steps = parse_drive_script(
+            "10 assert windows 2\n20 assert tabs 3\n30 assert panes 4\n40 assert window-tabs 1 2\n50 assert window-panes 0 3\n60 assert tabs nope\n70 exit\n",
+        );
+        assert_eq!(steps.len(), 6);
+        assert!(matches!(
+            steps[0],
+            (at, DriveStep::Assert(DriveMetric::Windows, 2)) if at == Duration::from_millis(10)
+        ));
+        assert!(matches!(
+            steps[1],
+            (at, DriveStep::Assert(DriveMetric::Tabs, 3)) if at == Duration::from_millis(30)
+        ));
+        assert!(matches!(
+            steps[2],
+            (at, DriveStep::Assert(DriveMetric::Panes, 4)) if at == Duration::from_millis(60)
+        ));
+        assert!(matches!(
+            steps[3],
+            (at, DriveStep::Assert(DriveMetric::WindowTabs(1), 2))
+                if at == Duration::from_millis(100)
+        ));
+        assert!(matches!(
+            steps[4],
+            (at, DriveStep::Assert(DriveMetric::WindowPanes(0), 3))
+                if at == Duration::from_millis(150)
+        ));
+        assert!(matches!(steps[5], (at, DriveStep::Exit) if at == Duration::from_millis(280)));
     }
 
     #[test]
