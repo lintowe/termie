@@ -67,6 +67,18 @@ fn platform_window_attrs(attrs: WindowAttributes) -> WindowAttributes {
     attrs
 }
 
+fn satellite_window_attrs(icon: Option<winit::window::Icon>) -> WindowAttributes {
+    platform_window_attrs(
+        Window::default_attributes()
+            .with_title("termie")
+            .with_window_icon(icon)
+            .with_decorations(false)
+            .with_visible(false)
+            .with_inner_size(LogicalSize::new(760.0, 480.0))
+            .with_min_inner_size(LogicalSize::new(560.0, 380.0)),
+    )
+}
+
 enum UserEvent {
     Pty { id: usize, bytes: Vec<u8> },
     Exited { id: usize },
@@ -229,8 +241,6 @@ struct PaneDrag {
     left_window: bool,
 }
 
-/// a torn-off pane living in its own OS-decorated window. its pty reader still
-/// routes output by pane id, so the UserEvent handlers also search here
 /// an active text selection in one pane, anchored to (absolute line id, col)
 /// in the grid's prompt-mark space — the highlight and the copied text stay on
 /// the content the user swept even as output scrolls or the view moves
@@ -6678,27 +6688,15 @@ impl App {
         self.satellites.retain(|window| !window.tabs.is_empty());
     }
 
-    fn open_tab_window(
-        &mut self,
+    fn create_satellite_window(
+        &self,
         event_loop: &ActiveEventLoop,
-        tab: Tab,
         point: Option<PhysicalPosition<i32>>,
-    ) -> Option<Tab> {
-        let (irgba, iw, ih) = win::app_icon();
-        let icon = winit::window::Icon::from_rgba(irgba, iw, ih).ok();
-        let attrs = platform_window_attrs(
-            Window::default_attributes()
-                .with_title("termie")
-                .with_window_icon(icon)
-                .with_decorations(false)
-                .with_visible(false)
-                .with_inner_size(LogicalSize::new(760.0, 480.0))
-                .with_min_inner_size(LogicalSize::new(560.0, 380.0)),
-        );
-        let window = match event_loop.create_window(attrs) {
-            Ok(window) => Arc::new(window),
-            Err(_) => return Some(tab),
-        };
+    ) -> Result<PaneWindow> {
+        let (rgba, width, height) = win::app_icon();
+        let icon = winit::window::Icon::from_rgba(rgba, width, height).ok();
+        let attrs = satellite_window_attrs(icon);
+        let window = Arc::new(event_loop.create_window(attrs)?);
         if let Some(point) = point {
             window.set_outer_position(PhysicalPosition::new(point.x - 160, point.y - 18));
         }
@@ -6717,24 +6715,34 @@ impl App {
         if self.persisted.acrylic {
             window.set_blur(true);
         }
-        let mut renderer = match Renderer::new(
+        let mut renderer = Renderer::new(
             window.clone(),
             event_loop.owned_display_handle(),
             CONTENT_PT,
             CHROME_PT,
             self.config.backend,
-        ) {
-            Ok(renderer) => renderer,
-            Err(_) => return Some(tab),
-        };
+        )?;
         self.configure_renderer(&mut renderer);
-        let mut pw = pane_window(Some(window.clone()), Some(renderer), vec![tab]);
+        let mut pw = pane_window(Some(window.clone()), Some(renderer), Vec::new());
         pw.a11y = Some(accesskit_winit::Adapter::with_event_loop_proxy(
             event_loop,
             &window,
             self.proxy.clone(),
         ));
-        window.set_visible(true);
+        Ok(pw)
+    }
+
+    fn open_tab_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        tab: Tab,
+        point: Option<PhysicalPosition<i32>>,
+    ) -> Option<Tab> {
+        let mut pw = match self.create_satellite_window(event_loop, point) {
+            Ok(pw) => pw,
+            Err(_) => return Some(tab),
+        };
+        pw.tabs.push(tab);
         self.satellites.push(pw);
         let slot = self.satellites.len() - 1;
         self.with_window(slot, |app| {
@@ -6745,6 +6753,9 @@ impl App {
             app.sync_tabs();
             app.paint();
         });
+        if let Some(window) = self.satellites[slot].window.as_ref() {
+            window.set_visible(true);
+        }
         None
     }
 
@@ -8045,59 +8056,22 @@ impl App {
         let Some(pane) = popped else {
             return;
         };
-        let attrs = platform_window_attrs(Window::default_attributes()
-            .with_title("termie — pane")
-            .with_visible(false)
-            .with_inner_size(LogicalSize::new(760.0, 480.0))
-            .with_min_inner_size(LogicalSize::new(560.0, 380.0)));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
+        let mut pw = match self.create_satellite_window(event_loop, None) {
+            Ok(pw) => pw,
             Err(_) => {
                 // dock as a new tab (find-follow is inside dock_loose_pane)
                 self.dock_loose_pane(pane);
                 return;
             }
         };
-        constrain_window_to_monitor(&window);
-        // without this a torn-off window silently drops CJK input: the OS IME
-        // never engages, so no composition or commit ever reaches the pane
-        window.set_ime_allowed(true);
-        #[cfg(not(windows))]
-        if self.persisted.acrylic {
-            window.set_blur(true);
-        }
-        let mut renderer = match render::Renderer::new(
-            window.clone(),
-            event_loop.owned_display_handle(),
-            CONTENT_PT,
-            CHROME_PT,
-            self.config.backend,
-        ) {
-            Ok(renderer) => renderer,
-            Err(_) => {
-                self.dock_loose_pane(pane);
-                return;
-            }
-        };
-        self.configure_renderer(&mut renderer);
-        let mut pw = pane_window(
-            Some(window.clone()),
-            Some(renderer),
-            vec![Tab {
-                focused: pane.id,
-                root: Some(Node::Leaf(pane)),
-                zoom: None,
-                title: None,
-                attention: false,
-                color: None,
-            }],
-        );
-        pw.a11y = Some(accesskit_winit::Adapter::with_event_loop_proxy(
-            event_loop,
-            &window,
-            self.proxy.clone(),
-        ));
-        window.set_visible(true);
+        pw.tabs.push(Tab {
+            focused: pane.id,
+            root: Some(Node::Leaf(pane)),
+            zoom: None,
+            title: None,
+            attention: false,
+            color: None,
+        });
         self.satellites.push(pw);
         // relayout + paint the new satellite via the swap-into-pw technique, then
         // relayout + repaint the main window (which just lost a pane)
@@ -8111,6 +8085,9 @@ impl App {
             app.relayout_all();
             app.paint();
         });
+        if let Some(window) = self.satellites[idx].window.as_ref() {
+            window.set_visible(true);
+        }
         self.relayout_all();
         self.sync_tabs();
         // surviving pane is now focused; find must leave the torn-off grid
@@ -10889,6 +10866,17 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn satellite_windows_start_hidden_with_custom_chrome() {
+        let attrs = satellite_window_attrs(None);
+        assert_eq!(attrs.title, "termie");
+        assert!(!attrs.decorations);
+        assert!(!attrs.visible);
+        assert!(attrs.window_icon.is_none());
+        assert!(attrs.inner_size.is_some());
+        assert!(attrs.min_inner_size.is_some());
+    }
 
     #[test]
     fn font_weight_labels_and_numbers_parse() {
