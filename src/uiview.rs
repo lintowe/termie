@@ -56,6 +56,10 @@ pub fn maybe_run() -> bool {
         "tab-drop" => {
             r.set_tab_drop(Some(1));
         }
+        "tab-drag" => {
+            r.set_tab_drop(Some(1));
+            r.set_drag_preview(Some((520.0, 110.0, "backend".into(), false)));
+        }
         "pane-tab-drop" => {
             r.set_pane_mode(true);
             r.set_tab_drop(Some(1));
@@ -169,6 +173,7 @@ pub fn maybe_run() -> bool {
     if scene == "pane-drop" {
         r.set_pane_mode(true);
         r.set_pane_drop(Some((rects[1], PaneDropSide::Left)));
+        r.set_drag_preview(Some((w as f32 * 0.7, h as f32 * 0.45, "backend".into(), true)));
     }
 
     let samples: [&[u8]; 2] = [

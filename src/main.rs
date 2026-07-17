@@ -223,7 +223,7 @@ fn tab_from_pane(pane: Pane) -> Tab {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TabDrag {
     source: WindowId,
     index: usize,
@@ -232,6 +232,7 @@ struct TabDrag {
     target: Option<(WindowId, usize)>,
     left_strip: bool,
     left_window: bool,
+    label: String,
 }
 
 impl TabDrag {
@@ -264,7 +265,7 @@ enum PaneDropDestination {
     Tab(WindowId, usize),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PaneDrag {
     source_window: WindowId,
     source_tab: usize,
@@ -274,6 +275,7 @@ struct PaneDrag {
     target: Option<PaneDropDestination>,
     moved: bool,
     left_window: bool,
+    label: String,
 }
 
 impl PaneDrag {
@@ -857,13 +859,16 @@ fn tab_label(tab: &Tab) -> String {
         return title.to_string();
     }
     let pane = tab.root.as_ref().and_then(|r| find_pane(r, tab.focused));
-    if let Some(p) = pane {
-        let t = p.term.title.trim();
-        if !t.is_empty() && !boring_title(t) {
-            return t.chars().take(64).collect();
-        }
+    pane.map(pane_label).unwrap_or_else(|| FALLBACK_LABEL.to_string())
+}
+
+fn pane_label(pane: &Pane) -> String {
+    let title = pane.term.title.trim();
+    if !title.is_empty() && !boring_title(title) {
+        title.chars().take(64).collect()
+    } else {
+        cwd_label(pane.term.cwd.as_deref())
     }
-    cwd_label(pane.and_then(|p| p.term.cwd.as_deref()))
 }
 
 /// serialize a pane's badge state for the plugin bus (read_output-gated)
@@ -4742,6 +4747,26 @@ impl App {
         }
     }
 
+    fn show_drag_preview(&mut self, preview: Option<(WindowId, f32, f32, String, bool)>) {
+        let apply = |pw: &mut PaneWindow| {
+            let own = pw.window.as_ref().map(|window| window.id());
+            let own_preview = preview
+                .as_ref()
+                .filter(|(window, ..)| own == Some(*window))
+                .map(|(_, x, y, label, pane)| (*x, *y, label.clone(), *pane));
+            if let Some(renderer) = pw.renderer.as_mut() {
+                renderer.set_drag_preview(own_preview);
+            }
+            if let Some(window) = pw.window.as_ref() {
+                window.request_redraw();
+            }
+        };
+        apply(&mut self.pw);
+        for pw in &mut self.satellites {
+            apply(pw);
+        }
+    }
+
     fn reset_drag_cursors(&mut self) {
         let reset = |pw: &mut PaneWindow| {
             pw.cursor_icon = CursorIcon::Default;
@@ -6965,6 +6990,7 @@ impl App {
             return;
         };
         self.show_tab_drop(None);
+        self.show_drag_preview(None);
         self.reset_drag_cursors();
         if !drag.left_strip {
             return;
@@ -7115,6 +7141,7 @@ impl App {
         };
         self.show_pane_drop(None);
         self.show_tab_drop(None);
+        self.show_drag_preview(None);
         self.reset_drag_cursors();
         if !drag.moved {
             return;
@@ -8736,10 +8763,12 @@ impl App {
         let clear_panes = self.pane_drag.as_mut().is_some_and(|drag| drag.window_left(current));
         if clear_tabs {
             self.show_tab_drop(None);
+            self.show_drag_preview(None);
         }
         if clear_panes {
             self.show_pane_drop(None);
             self.show_tab_drop(None);
+            self.show_drag_preview(None);
         }
     }
 
@@ -8807,7 +8836,7 @@ impl App {
         // drag-reordering a tab: the held tab follows the pointer along the
         // strip, swapping places live as it crosses its neighbors (equal tab
         // widths keep the pointer inside the moved tab, so this can't oscillate)
-        if let Some(mut drag) = self.tab_drag {
+        if let Some(mut drag) = self.tab_drag.take() {
             let current = self.pw.window.as_ref().map(|w| w.id());
             let inside = self.pw.window.as_ref().is_some_and(|window| {
                 let size = window.inner_size();
@@ -8858,11 +8887,14 @@ impl App {
                 drag.left_strip = true;
             }
             self.show_tab_drop(drag.target);
+            if let Some(current) = current {
+                self.show_drag_preview(Some((current, px, py, drag.label.clone(), false)));
+            }
             self.set_pointer(CursorIcon::Grabbing);
             self.tab_drag = Some(drag);
             return;
         }
-        if let Some(mut drag) = self.pane_drag {
+        if let Some(mut drag) = self.pane_drag.take() {
             let current = self.pw.window.as_ref().map(|window| window.id());
             let inside = self.pw.window.as_ref().is_some_and(|window| {
                 let size = window.inner_size();
@@ -8912,6 +8944,9 @@ impl App {
             });
             self.show_pane_drop(pane_target);
             self.show_tab_drop(tab_target);
+            if let Some(current) = current {
+                self.show_drag_preview(Some((current, px, py, drag.label.clone(), true)));
+            }
             self.set_pointer(CursorIcon::Grabbing);
             self.pane_drag = Some(drag);
             return;
@@ -9325,6 +9360,14 @@ impl App {
                             if let Some(p) = found {
                                 self.drag_divider = Some(p);
                             } else if let Some(id) = self.pane_at(cx, cy) {
+                                let label = self
+                                    .pw
+                                    .tabs
+                                    .get(self.pw.active_tab)
+                                    .and_then(|tab| tab.root.as_ref())
+                                    .and_then(|root| find_pane(root, id))
+                                    .map(pane_label)
+                                    .unwrap_or_else(|| FALLBACK_LABEL.to_string());
                                 if let Some(source_window) = self.pw.window.as_ref().map(|window| window.id()) {
                                     self.pane_drag = Some(PaneDrag {
                                         source_window,
@@ -9335,6 +9378,7 @@ impl App {
                                         target: None,
                                         moved: false,
                                         left_window: false,
+                                        label,
                                     });
                                 }
                                 self.focus_pane_at(cx, cy);
@@ -9409,6 +9453,7 @@ impl App {
                             // a tab activates on press (like every tab strip) and
                             // can then be dragged along the strip to reorder
                             if let Hot::Tab(i) = h {
+                                let label = self.pw.tabs.get(i).map(tab_label).unwrap_or_default();
                                 self.switch_tab(i);
                                 if let Some(window) = self.pw.window.as_ref() {
                                     let cursor = self.pw.cursor;
@@ -9425,6 +9470,7 @@ impl App {
                                         target: None,
                                         left_strip: false,
                                         left_window: false,
+                                        label,
                                     });
                                 }
                             }
@@ -9668,6 +9714,7 @@ impl App {
         {
             self.show_tab_drop(None);
             self.show_pane_drop(None);
+            self.show_drag_preview(None);
             self.reset_drag_cursors();
             self.pressed = None;
             return true;
@@ -11143,6 +11190,7 @@ mod tests {
             target: Some((target, 1)),
             left_strip: true,
             left_window: true,
+            label: "source".into(),
         };
 
         assert!(drag.window_left(target));
@@ -11169,6 +11217,7 @@ mod tests {
             })),
             moved: true,
             left_window: true,
+            label: "source".into(),
         };
 
         assert!(drag.window_left(target));
@@ -11199,6 +11248,7 @@ mod tests {
             target: Some(PaneDropDestination::Tab(target, 2)),
             moved: true,
             left_window: true,
+            label: "source".into(),
         };
 
         assert!(drag.window_left(target));

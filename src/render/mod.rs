@@ -670,6 +670,8 @@ pub struct Renderer {
     pane_mode: bool,
     pane_drop: Option<((f32, f32, f32, f32), PaneDropSide)>,
     tab_drop: Option<usize>,
+    /// pointer position, source label, and whether the payload is a pane
+    drag_preview: Option<(f32, f32, String, bool)>,
     mark_mode: bool,
     /// this process holds an admin token: a persistent shield chip on the
     /// status bar so an elevated window is never mistaken for a normal one
@@ -1386,6 +1388,7 @@ impl Renderer {
             pane_mode: false,
             pane_drop: None,
             tab_drop: None,
+            drag_preview: None,
             mark_mode: false,
             elevated: false,
             tabs: Vec::new(),
@@ -1662,6 +1665,10 @@ impl Renderer {
 
     pub fn set_tab_drop(&mut self, index: Option<usize>) {
         self.tab_drop = index;
+    }
+
+    pub fn set_drag_preview(&mut self, preview: Option<(f32, f32, String, bool)>) {
+        self.drag_preview = preview;
     }
 
     pub fn set_elevated(&mut self, on: bool) {
@@ -4106,6 +4113,76 @@ impl Renderer {
                     Self::push_rect(&mut out, 0.0, ay, w, hair, RULE_2, 0.6 * a);
                 }
             }
+        }
+
+        if let Some((pointer_x, pointer_y, label, pane)) = self.drag_preview.clone() {
+            let tag = if pane { "PANE" } else { "TAB" };
+            let pad = (8.0 * self.scale).round();
+            let gap = (10.0 * self.scale).round();
+            let rail = (3.0 * self.scale).round().max(hair * 2.0);
+            let tag_w = self.text_w(FontId::Chrome, tag, wide);
+            let room = (w - pad * 4.0 - rail - tag_w - gap).max(cw_c * 4.0);
+            let max_chars = (room / cw_c).floor().max(4.0) as usize;
+            let mut shown: String = label.chars().take(max_chars).collect();
+            if label.chars().count() > max_chars {
+                shown.pop();
+                shown.push('\u{2026}');
+            }
+            if shown.is_empty() {
+                shown.push_str("untitled");
+            }
+            let label_w = self.text_w(FontId::Chrome, &shown, track);
+            let box_w = rail + pad * 2.0 + tag_w + gap + label_w;
+            let box_h = (chrome_h + 12.0 * self.scale).round();
+            let offset = (14.0 * self.scale).round();
+            let box_x = if pointer_x + offset + box_w <= w - pad {
+                pointer_x + offset
+            } else {
+                pointer_x - offset - box_w
+            }
+            .clamp(pad, (w - box_w - pad).max(pad));
+            let box_y = if pointer_y + offset + box_h <= h - pad {
+                pointer_y + offset
+            } else {
+                pointer_y - offset - box_h
+            }
+            .clamp(pad, (h - box_h - pad).max(pad));
+            Self::push_rect(
+                &mut out,
+                box_x + hair * 3.0,
+                box_y + hair * 3.0,
+                box_w,
+                box_h,
+                INK_0,
+                0.5,
+            );
+            Self::push_rect(&mut out, box_x, box_y, box_w, box_h, INK_3, 0.98);
+            Self::stroke_rect_a(&mut out, (box_x, box_y, box_w, box_h), hair, RULE_2, 1.0);
+            Self::push_rect(&mut out, box_x, box_y, rail, box_h, PAPER, 1.0);
+            let text_y = (box_y + (box_h - chrome_h) / 2.0).round();
+            let tag_x = box_x + rail + pad;
+            let _ = Self::draw_text(
+                &mut self.atlas,
+                &mut out,
+                FontId::Chrome,
+                tag_x,
+                text_y,
+                tag,
+                PAPER,
+                1.0,
+                wide,
+            );
+            let _ = Self::draw_text(
+                &mut self.atlas,
+                &mut out,
+                FontId::Chrome,
+                tag_x + tag_w + gap,
+                text_y,
+                &shown,
+                TEXT_2,
+                1.0,
+                track,
+            );
         }
 
         // latency hud (diagnostic) drawn last so it stays on top

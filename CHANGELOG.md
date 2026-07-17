@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Interface
+- **Dragged tabs and panes stay attached to the pointer.** A compact payload chip follows every move with the real tab or pane label and flips around the pointer near window edges. Dock shading and tab insertion marks remain visible beneath it, so the payload and destination read together before release.
 - **Separate launches can combine again.** Starting Termie a second time opens another window in the existing app while preserving its requested directory, shell, command, or scripted layout. Those windows can exchange live tabs and panes because their PTYs share one event loop. Drive runs, elevated shells, and default-terminal handoffs stay isolated.
 - **Torn-out panes keep Termie's own window chrome.** Pane pop-out previously put an OS title bar around Termie's title bar and skipped part of the platform setup. Tab tear-out and pane tear-out now share the same hidden-first window setup, icon, backdrop, renderer settings, IME support, and screen-reader adapter.
 - **Tabs drag between Termie windows.** Pull a tab away from its strip to open it in a new window, or drop it on another window to move the live tab there. Its complete pane tree, running shells, title, color, zoom, and command status move with it.
