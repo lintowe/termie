@@ -229,6 +229,7 @@ fn tab_from_pane(pane: Pane) -> Tab {
 struct TabDrag {
     source: WindowId,
     index: usize,
+    all: bool,
     start: PhysicalPosition<f64>,
     screen: Option<PhysicalPosition<i32>>,
     target: Option<(WindowId, usize)>,
@@ -1586,7 +1587,9 @@ fn pane_drop_side(rect: Rect, x: f32, y: f32) -> PaneDropSide {
 fn pane_tab_drop_index(hit: Hit, tab_count: usize) -> Option<usize> {
     match hit {
         Hit::Button(Hot::Tab(index) | Hot::TabClose(index)) => Some(index),
-        Hit::TitleBar | Hit::Button(Hot::NewTab | Hot::NewTabMenu) => Some(tab_count),
+        Hit::TitleBar | Hit::Button(Hot::WindowTabs | Hot::NewTab | Hot::NewTabMenu) => {
+            Some(tab_count)
+        }
         _ => None,
     }
 }
@@ -4868,13 +4871,16 @@ impl App {
         }
     }
 
-    fn show_drag_preview(&mut self, preview: Option<(WindowId, f32, f32, String, bool)>) {
+    fn show_drag_preview(
+        &mut self,
+        preview: Option<(WindowId, f32, f32, String, &'static str)>,
+    ) {
         let apply = |pw: &mut PaneWindow| {
             let own = pw.window.as_ref().map(|window| window.id());
             let own_preview = preview
                 .as_ref()
                 .filter(|(window, ..)| own == Some(*window))
-                .map(|(_, x, y, label, pane)| (*x, *y, label.clone(), *pane));
+                .map(|(_, x, y, label, tag)| (*x, *y, label.clone(), *tag));
             if let Some(renderer) = pw.renderer.as_mut() {
                 renderer.set_drag_preview(own_preview);
             }
@@ -6902,6 +6908,47 @@ impl App {
         None
     }
 
+    fn take_all_tabs_from_window(&mut self, source: WindowId) -> Option<(Vec<Tab>, usize)> {
+        let pw = self.pane_window_for_mut(source)?;
+        if pw.tabs.is_empty() {
+            return None;
+        }
+        let active = pw.active_tab.min(pw.tabs.len() - 1);
+        let tabs = std::mem::take(&mut pw.tabs);
+        pw.active_tab = 0;
+        Some((tabs, active))
+    }
+
+    fn insert_tabs_here(&mut self, tabs: Vec<Tab>, index: usize, active: usize) {
+        let before = self.focus_identity();
+        let index = index.min(self.pw.tabs.len());
+        let active = index + active.min(tabs.len() - 1);
+        self.pw.tabs.splice(index..index, tabs);
+        self.pw.active_tab = active;
+        self.relayout_all();
+        self.sync_tabs();
+        self.after_focus_context_change(before);
+        self.redraw();
+    }
+
+    fn insert_tabs_into_window(
+        &mut self,
+        target: WindowId,
+        tabs: Vec<Tab>,
+        index: usize,
+        active: usize,
+    ) {
+        if self.pw.window.as_ref().map(|window| window.id()) == Some(target) {
+            self.insert_tabs_here(tabs, index, active);
+            return;
+        }
+        let slot = self.satellite_for(target).expect("window merge target remains open");
+        let mut tabs = Some(tabs);
+        self.with_window(slot, |app| {
+            app.insert_tabs_here(tabs.take().expect("tab set transferred once"), index, active);
+        });
+    }
+
     fn window_at_screen(&self, point: PhysicalPosition<i32>) -> Option<(WindowId, usize)> {
         let hit = |pw: &PaneWindow| {
             let window = pw.window.as_ref()?;
@@ -6946,7 +6993,6 @@ impl App {
             .find(|pw| pw.window.as_ref().map(|window| window.id()) == Some(id))
     }
 
-    #[cfg(target_os = "linux")]
     fn pane_window_for_mut(&mut self, id: WindowId) -> Option<&mut PaneWindow> {
         self.satellites
             .iter_mut()
@@ -7252,6 +7298,18 @@ impl App {
         if let Some((target, _)) = target
             && target == drag.source
         {
+            return;
+        }
+        if drag.all {
+            let Some((target, index)) = target else {
+                return;
+            };
+            let Some((tabs, active)) = self.take_all_tabs_from_window(drag.source) else {
+                return;
+            };
+            self.insert_tabs_into_window(target, tabs, index, active);
+            self.cleanup_empty_windows();
+            self.focus_window(target);
             return;
         }
         if target.is_none()
@@ -7604,7 +7662,13 @@ impl App {
             hit,
             Some(
                 Hit::TitleBar
-                    | Hit::Button(Hot::Tab(_) | Hot::TabClose(_) | Hot::NewTab | Hot::NewTabMenu)
+                    | Hit::Button(
+                        Hot::WindowTabs
+                            | Hot::Tab(_)
+                            | Hot::TabClose(_)
+                            | Hot::NewTab
+                            | Hot::NewTabMenu,
+                    )
             )
         ) {
             let dir = if path.is_dir() { Some(path) } else { path.parent() };
@@ -7725,6 +7789,7 @@ impl App {
             Hot::SplitV => self.split_focused(Dir::Vertical),
             Hot::SplitH => self.split_focused(Dir::Horizontal),
             Hot::PaneMode => self.set_pane_mode(!self.pw.pane_mode),
+            Hot::WindowTabs => {},
             Hot::NewTab => self.new_tab(),
             Hot::NewTabMenu => self.open_newtab_menu(),
             Hot::Tab(i) => self.switch_tab(i),
@@ -9144,6 +9209,7 @@ impl App {
             if let Some(Hit::Button(Hot::Tab(j) | Hot::TabClose(j))) =
                 self.pw.renderer.as_ref().map(|r| r.hit_test(px, py))
                 && current == Some(drag.source)
+                && !drag.all
                 && j != drag.index
             {
                 self.move_tab(drag.index, j);
@@ -9153,7 +9219,8 @@ impl App {
             }
             self.show_tab_drop(drag.target);
             if let Some(current) = current {
-                self.show_drag_preview(Some((current, px, py, drag.label.clone(), false)));
+                let tag = if drag.all { "WINDOW" } else { "TAB" };
+                self.show_drag_preview(Some((current, px, py, drag.label.clone(), tag)));
             }
             self.set_pointer(CursorIcon::Grabbing);
             self.tab_drag = Some(drag);
@@ -9216,7 +9283,7 @@ impl App {
             self.show_pane_drop(pane_target);
             self.show_tab_drop(tab_target);
             if let Some(current) = current {
-                self.show_drag_preview(Some((current, px, py, drag.label.clone(), true)));
+                self.show_drag_preview(Some((current, px, py, drag.label.clone(), "PANE")));
             }
             self.set_pointer(CursorIcon::Grabbing);
             self.pane_drag = Some(drag);
@@ -9306,6 +9373,13 @@ impl App {
                 match dir {
                     Some(Dir::Vertical) => CursorIcon::EwResize,
                     Some(Dir::Horizontal) => CursorIcon::NsResize,
+                    None
+                        if self.pw.renderer.as_ref().is_some_and(|renderer| {
+                            matches!(renderer.hit_test(px, py), Hit::Button(Hot::WindowTabs))
+                        }) =>
+                    {
+                        CursorIcon::Grab
+                    }
                     None if self.pw.pane_mode && self.pane_at(px, py).is_some() => CursorIcon::Grab,
                     None => CursorIcon::Default,
                 }
@@ -9725,29 +9799,46 @@ impl App {
                             self.pressed = Some(h);
                             // a tab activates on press (like every tab strip) and
                             // can then be dragged along the strip to reorder
-                            if let Hot::Tab(i) = h {
-                                let label = self.pw.tabs.get(i).map(tab_label).unwrap_or_default();
-                                self.switch_tab(i);
-                                if let Some(window) = self.pw.window.as_ref() {
-                                    let cursor = self.pw.cursor;
-                                    self.tab_drag = Some(TabDrag {
-                                        source: window.id(),
-                                        index: i,
-                                        start: cursor,
-                                        screen: window.inner_position().ok().map(|origin| {
-                                            PhysicalPosition::new(
-                                                origin.x + cursor.x.round() as i32,
-                                                origin.y + cursor.y.round() as i32,
-                                            )
-                                        }),
-                                        target: None,
-                                        left_strip: false,
-                                        left_window: false,
-                                        label,
-                                    });
-                                    #[cfg(target_os = "linux")]
-                                    self.begin_kwin_drag_probe();
+                            let drag = match h {
+                                Hot::Tab(i) => {
+                                    let label = self
+                                        .pw
+                                        .tabs
+                                        .get(i)
+                                        .map(tab_label)
+                                        .unwrap_or_default();
+                                    self.switch_tab(i);
+                                    Some((i, false, label))
                                 }
+                                Hot::WindowTabs if !self.pw.tabs.is_empty() => {
+                                    let count = self.pw.tabs.len();
+                                    let noun = if count == 1 { "tab" } else { "tabs" };
+                                    Some((self.pw.active_tab, true, format!("{count} live {noun}")))
+                                }
+                                _ => None,
+                            };
+                            if let Some((index, all, label)) = drag
+                                && let Some(window) = self.pw.window.as_ref()
+                            {
+                                let cursor = self.pw.cursor;
+                                self.tab_drag = Some(TabDrag {
+                                    source: window.id(),
+                                    index,
+                                    all,
+                                    start: cursor,
+                                    screen: window.inner_position().ok().map(|origin| {
+                                        PhysicalPosition::new(
+                                            origin.x + cursor.x.round() as i32,
+                                            origin.y + cursor.y.round() as i32,
+                                        )
+                                    }),
+                                    target: None,
+                                    left_strip: false,
+                                    left_window: false,
+                                    label,
+                                });
+                                #[cfg(target_os = "linux")]
+                                self.begin_kwin_drag_probe();
                             }
                         }
                         Some(Hit::Content) => {
@@ -11484,6 +11575,7 @@ mod tests {
         let mut drag = TabDrag {
             source,
             index: 0,
+            all: false,
             start: PhysicalPosition::new(20.0, 12.0),
             screen: Some(PhysicalPosition::new(800, 400)),
             target: Some((target, 1)),
@@ -11530,6 +11622,7 @@ mod tests {
         assert_eq!(pane_tab_drop_index(Hit::Button(Hot::TabClose(2)), 3), Some(2));
         assert_eq!(pane_tab_drop_index(Hit::TitleBar, 3), Some(3));
         assert_eq!(pane_tab_drop_index(Hit::Button(Hot::NewTab), 3), Some(3));
+        assert_eq!(pane_tab_drop_index(Hit::Button(Hot::WindowTabs), 3), Some(3));
         assert_eq!(pane_tab_drop_index(Hit::Button(Hot::Close), 3), None);
         assert_eq!(pane_tab_drop_index(Hit::Content, 3), None);
     }

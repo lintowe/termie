@@ -81,6 +81,7 @@ fn build_mips(base: &[u8], dim: u32) -> Vec<(u32, Vec<u8>)> {
 /// every hoverable/clickable chrome target
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hot {
+    WindowTabs,
     Minimize,
     Maximize,
     Close,
@@ -670,8 +671,8 @@ pub struct Renderer {
     pane_mode: bool,
     pane_drop: Option<((f32, f32, f32, f32), PaneDropSide)>,
     tab_drop: Option<usize>,
-    /// pointer position, source label, and whether the payload is a pane
-    drag_preview: Option<(f32, f32, String, bool)>,
+    /// pointer position, source label, and payload kind
+    drag_preview: Option<(f32, f32, String, &'static str)>,
     mark_mode: bool,
     /// this process holds an admin token: a persistent shield chip on the
     /// status bar so an elevated window is never mistaken for a normal one
@@ -1667,7 +1668,7 @@ impl Renderer {
         self.tab_drop = index;
     }
 
-    pub fn set_drag_preview(&mut self, preview: Option<(f32, f32, String, bool)>) {
+    pub fn set_drag_preview(&mut self, preview: Option<(f32, f32, String, &'static str)>) {
         self.drag_preview = preview;
     }
 
@@ -2173,6 +2174,11 @@ impl Renderer {
             + (18.0 * s)
     }
 
+    fn window_tabs_rect(&self) -> Rect {
+        let badge = (self.title_bar_h * 0.6).round();
+        (0.0, 0.0, self.pad + badge + 6.0 * self.scale, self.title_bar_h)
+    }
+
     fn tab_layout(&self) -> TabLayout {
         let s = self.scale;
         let h = self.title_bar_h;
@@ -2492,6 +2498,9 @@ impl Renderer {
                 }
             }
             let tl = self.tab_layout();
+            if in_rect(x, y, self.window_tabs_rect()) {
+                return Hit::Button(Hot::WindowTabs);
+            }
             if in_rect(x, y, tl.newtab) {
                 return Hit::Button(Hot::NewTab);
             }
@@ -3686,6 +3695,7 @@ impl Renderer {
         let chrome_h = self.atlas.metrics(FontId::Chrome).cell_h;
         let cw_c = self.atlas.metrics(FontId::Chrome).cell_w;
         let text_top = ((self.title_bar_h - chrome_h) / 2.0).round();
+        let he = self.hover_ease();
 
         // ---- title bar (flat opaque instrument) ----
         // fill the bar with the content background, not a darker ink, so the bar
@@ -3697,6 +3707,11 @@ impl Renderer {
         // reads as a machined edge between chrome and content (instrument depth)
         Self::push_rect(&mut out, 0.0, self.title_bar_h - hair * 2.0, w, hair, RULE_2, 1.0);
         Self::push_rect(&mut out, 0.0, self.title_bar_h - hair, w, hair, RULE, 1.0);
+
+        if self.hovered == Some(Hot::WindowTabs) {
+            let (x, _, width, _) = self.window_tabs_rect();
+            Self::push_rect(&mut out, x, hair, width, self.title_bar_h - hair * 2.0, INK_3, he);
+        }
 
         // app-icon badge (the ">_<" mark) + wordmark
         let badge = (self.title_bar_h * 0.6).round();
@@ -3731,8 +3746,6 @@ impl Renderer {
         let newtab_hover = self.hovered == Some(Hot::NewTab);
         let newtab_menu_rect = tl.newtab_menu;
         let newtab_menu_hover = self.hovered == Some(Hot::NewTabMenu);
-        let he = self.hover_ease();
-
         for (_, rect, close, label, active, hov, close_hov, attn, tint) in &tab_items {
             let (tx, _ty, tw, _th) = *rect;
             if *active {
@@ -4171,8 +4184,7 @@ impl Renderer {
             }
         }
 
-        if let Some((pointer_x, pointer_y, label, pane)) = self.drag_preview.clone() {
-            let tag = if pane { "PANE" } else { "TAB" };
+        if let Some((pointer_x, pointer_y, label, tag)) = self.drag_preview.clone() {
             let pad = (8.0 * self.scale).round();
             let gap = (10.0 * self.scale).round();
             let rail = (3.0 * self.scale).round().max(hair * 2.0);
@@ -6480,6 +6492,10 @@ mod hit_tests {
         // opens the profile menu, so the two must resolve to different hits
         assert!(matches!(r.hit_test(nx + nw / 2.0, my), Hit::Button(Hot::NewTab)));
         assert!(matches!(r.hit_test(nx + nw + 2.0, my), Hit::Button(Hot::NewTabMenu)));
+        assert!(matches!(
+            r.hit_test(r.window_tabs_rect().2 / 2.0, my),
+            Hit::Button(Hot::WindowTabs)
+        ));
     }
 
     #[test]
