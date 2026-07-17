@@ -9501,6 +9501,7 @@ impl App {
             if let Some(current) = current
                 && current != drag.source
             {
+                drag.left_strip = true;
                 let index = self
                     .pw
                     .renderer
