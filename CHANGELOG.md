@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Interface
+- **Tabs drag between Termie windows.** Pull a tab away from its strip to open it in a new window, or drop it on another window to move the live tab there. Its complete pane tree, running shells, title, color, zoom, and command status move with it.
+- **New windows belong to the running app.** `Ctrl+Shift+N` now creates a first-class in-process window in the focused shell and directory. Those windows can exchange tabs and close independently while one event loop keeps every PTY alive.
+
 ### Platform
 - **Linux panes fail independently under memory pressure without depending on systemd for startup.** Each shell uses its own transient scope when the user manager answers a two-second probe. A stalled or unavailable manager falls back to a direct PTY spawn, so new tabs and splits still open.
 - **The Quake drop-down works on Linux.** `quake_key=ctrl+grave` registers through the cross-desktop GlobalShortcuts portal and keeps its D-Bus session alive for the process. X11 uses its native focus and placement path; KDE Wayland moves the window to the active work area, raises it, and gives it focus through KWin because the Wayland window API cannot position or activate an existing surface.

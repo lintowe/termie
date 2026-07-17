@@ -197,6 +197,16 @@ struct Tab {
     color: Option<u8>,
 }
 
+#[derive(Clone, Copy)]
+struct TabDrag {
+    source: WindowId,
+    index: usize,
+    start: PhysicalPosition<f64>,
+    screen: Option<PhysicalPosition<i32>>,
+    target: Option<(WindowId, usize)>,
+    left_strip: bool,
+}
+
 /// a torn-off pane living in its own OS-decorated window. its pty reader still
 /// routes output by pane id, so the UserEvent handlers also search here
 /// an active text selection in one pane, anchored to (absolute line id, col)
@@ -1165,21 +1175,6 @@ fn jumplist_entries() -> Vec<(String, String)> {
         }
     }
     v
-}
-
-/// argv for a one-pane child window; separate arguments keep custom profile
-/// names and directories with spaces out of Windows command-line quoting
-fn window_launch_args(shell: Option<ShellKind>, cwd: Option<String>) -> Vec<String> {
-    let mut args = Vec::new();
-    if let Some(shell) = shell {
-        args.push("--shell".to_string());
-        args.push(shell.label().to_string());
-    }
-    if let Some(cwd) = cwd {
-        args.push("--cwd".to_string());
-        args.push(cwd);
-    }
-    args
 }
 
 /// keybinding-only action labels — the ones not in the command palette. several
@@ -3394,6 +3389,30 @@ struct PaneWindow {
     rename: Option<RenameState>,
 }
 
+fn pane_window(window: Option<Arc<Window>>, renderer: Option<Renderer>, tabs: Vec<Tab>) -> PaneWindow {
+    PaneWindow {
+        window,
+        renderer,
+        tabs,
+        active_tab: 0,
+        layout_cache: Vec::new(),
+        maximized: false,
+        pane_mode: false,
+        settings_open: false,
+        on_top: false,
+        focused: true,
+        ime_composing: false,
+        ime_preedit: String::new(),
+        ime_preedit_caret: None,
+        pane_menu: None,
+        git: None,
+        last_git_cwd: None,
+        cursor: PhysicalPosition::new(0.0, 0.0),
+        confirm: None,
+        rename: None,
+    }
+}
+
 struct App {
     proxy: EventLoopProxy<UserEvent>,
     /// this process's parsed command line (always-new-window: one per process)
@@ -3451,9 +3470,8 @@ struct App {
     /// the plugins marketplace overlay, when open
     market: Option<MarketState>,
     pressed: Option<Hot>,
-    /// a tab being drag-reordered along the strip: its current index, updated
-    /// live as it swaps past neighbors; cleared on release or focus loss
-    tab_drag: Option<usize>,
+    /// a tab drag owned by the app so it can cross OS-window boundaries
+    tab_drag: Option<TabDrag>,
     /// recently closed tabs' launch specs, newest last; Ctrl+Shift+T pops one
     closed_tabs: Vec<ClosedTab>,
     /// hold find-follow during a temporary active_tab switch (background pane
@@ -3605,27 +3623,7 @@ impl App {
             // captured now, before any window of ours exists, so it still names the
             // explorer window we were launched from
             launch_fg: win::foreground_window(),
-            pw: PaneWindow {
-                window: None,
-                renderer: None,
-                tabs: Vec::new(),
-                active_tab: 0,
-                layout_cache: Vec::new(),
-                maximized: false,
-                pane_mode: false,
-                settings_open: false,
-                on_top: false,
-                focused: true,
-                ime_composing: false,
-                ime_preedit: String::new(),
-                ime_preedit_caret: None,
-                pane_menu: None,
-                git: None,
-                last_git_cwd: None,
-                cursor: PhysicalPosition::new(0.0, 0.0),
-                confirm: None,
-                rename: None,
-            },
+            pw: pane_window(None, None, Vec::new()),
             satellites: Vec::new(),
             cur_sat: None,
             next_id: 0,
@@ -3722,6 +3720,35 @@ impl App {
             theme_watch_spawned: false,
             drive: None,
         }
+    }
+
+    fn configure_renderer(&self, renderer: &mut Renderer) {
+        let settings = &self.persisted;
+        renderer.set_theme(self.resolved_theme());
+        renderer.set_elevated(self.elevated());
+        renderer.set_color_overrides(load_color_overrides());
+        renderer.set_cursor_style(settings.cursor);
+        renderer.set_cursor_blink(settings.cursor_blink);
+        renderer.set_bold_as_bright(settings.bold_as_bright);
+        renderer.set_line_height(settings.line_height);
+        renderer.set_pane_pad_px(settings.padding);
+        renderer.set_opacity_pct(settings.opacity);
+        if let Some(font) = settings.font.as_deref() {
+            renderer.set_font_by_name(font);
+        }
+        renderer.set_font_weight(settings.font_weight);
+        renderer.set_min_contrast(settings.min_contrast);
+        renderer.set_ligatures(settings.ligatures);
+        if let Some(path) = settings.background_image.as_deref() {
+            match std::fs::read(path).ok().and_then(|bytes| image::decode_png(&bytes)) {
+                Some(image) => {
+                    let image = image::downscale_rgba(&image.rgba, image.width, image.height, 1024);
+                    renderer.set_background_image(Some(image), settings.background_image_opacity);
+                }
+                None => log::warn!("background_image: couldn't load {path} (png only)"),
+            }
+        }
+        renderer.set_content_pt(settings.font_size);
     }
 
     fn boot(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
@@ -3839,13 +3866,14 @@ impl App {
             self.spawn_pool_shell(80, 24);
         }
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             window.clone(),
             event_loop.owned_display_handle(),
             CONTENT_PT,
             CHROME_PT,
             self.config.backend,
         )?;
+        self.configure_renderer(&mut renderer);
         timing("renderer ready (gpu init)");
         window.set_ime_allowed(true);
         self.a11y = Some(accesskit_winit::Adapter::with_event_loop_proxy(
@@ -3855,41 +3883,6 @@ impl App {
         ));
         self.pw.window = Some(window.clone());
         self.pw.renderer = Some(renderer);
-
-        // apply persisted renderer-owned settings before sizing the first pane
-        let boot_theme = self.resolved_theme();
-        {
-            let p = &self.persisted;
-            if let Some(r) = self.pw.renderer.as_mut() {
-                r.set_theme(boot_theme);
-                r.set_elevated(win::is_elevated() || self.cli.admin_shell);
-                r.set_color_overrides(load_color_overrides());
-                r.set_cursor_style(p.cursor);
-                r.set_cursor_blink(p.cursor_blink);
-                r.set_bold_as_bright(p.bold_as_bright);
-                r.set_line_height(p.line_height);
-                r.set_pane_pad_px(p.padding);
-                r.set_opacity_pct(p.opacity);
-                if let Some(f) = p.font.as_deref() {
-                    r.set_font_by_name(f);
-                }
-                r.set_font_weight(p.font_weight);
-                r.set_min_contrast(p.min_contrast);
-                r.set_ligatures(p.ligatures);
-                if let Some(path) = p.background_image.as_deref() {
-                    match std::fs::read(path).ok().and_then(|d| image::decode_png(&d)) {
-                        Some(img) => {
-                            // bound the atlas cost: a wallpaper-sized png box-filters
-                            // down to a wash-sized texture nobody reads text off of
-                            let scaled = image::downscale_rgba(&img.rgba, img.width, img.height, 1024);
-                            r.set_background_image(Some(scaled), p.background_image_opacity);
-                        }
-                        None => log::warn!("background_image: couldn't load {path} (png only)"),
-                    }
-                }
-                r.set_content_pt(p.font_size);
-            }
-        }
 
         self.pw.active_tab = 0;
         // register the global quake hotkey once (opt-in via the quake_key setting)
@@ -5783,11 +5776,30 @@ impl App {
                 self.new_tab_cwd(cwd, Some(s));
             }
             PaletteAction::NewWindow => {
-                let args = window_launch_args(self.focused_shell(), self.focused_cwd());
-                let launched = std::env::current_exe()
-                    .and_then(|exe| std::process::Command::new(exe).args(args).spawn())
-                    .is_ok();
-                if !launched {
+                let cwd = self.focused_cwd();
+                let shell = self.focused_shell();
+                let (cols, rows) = self.content_pane_size();
+                let pane = self.spawn_pane(cols, rows, cwd, shell, None);
+                let point = self.pw.window.as_ref().and_then(|window| {
+                    window
+                        .inner_position()
+                        .ok()
+                        .map(|origin| PhysicalPosition::new(origin.x + 48, origin.y + 48))
+                });
+                if let Ok(pane) = pane {
+                    let tab = Tab {
+                        focused: pane.id,
+                        root: Some(Node::Leaf(pane)),
+                        zoom: None,
+                        title: None,
+                        attention: false,
+                        color: None,
+                    };
+                    if let Some(tab) = self.open_tab_window(event_loop, tab, point) {
+                        self.insert_tab_here(tab, self.pw.tabs.len());
+                        self.show_notice("couldn't open a new window");
+                    }
+                } else {
                     self.show_notice("couldn't open a new window");
                 }
                 self.redraw();
@@ -6415,6 +6427,179 @@ impl App {
         self.pw.active_tab = active_after_move(self.pw.active_tab, from, to);
         self.sync_tabs();
         self.redraw();
+    }
+
+    fn remove_tab_for_transfer(&mut self, index: usize, allow_empty: bool) -> Option<Tab> {
+        if index >= self.pw.tabs.len() || (!allow_empty && self.pw.tabs.len() == 1) {
+            return None;
+        }
+        let before = self.focus_identity();
+        let tab = self.pw.tabs.remove(index);
+        if self.pw.tabs.is_empty() {
+            self.pw.active_tab = 0;
+        } else {
+            self.pw.active_tab = if index < self.pw.active_tab {
+                self.pw.active_tab - 1
+            } else {
+                self.pw.active_tab.min(self.pw.tabs.len() - 1)
+            };
+            self.relayout_all();
+            self.sync_tabs();
+            self.after_focus_context_change(before);
+        }
+        Some(tab)
+    }
+
+    fn take_tab_from_window(&mut self, source: WindowId, index: usize) -> Option<Tab> {
+        let main = self.main_pw().window.as_ref().map(|w| w.id());
+        let allow_empty = main != Some(source);
+        if self.pw.window.as_ref().map(|w| w.id()) == Some(source) {
+            return self.remove_tab_for_transfer(index, allow_empty);
+        }
+        let slot = self.satellite_for(source)?;
+        let mut tab = None;
+        self.with_window(slot, |app| {
+            tab = app.remove_tab_for_transfer(index, allow_empty);
+        });
+        tab
+    }
+
+    fn insert_tab_here(&mut self, tab: Tab, index: usize) {
+        let before = self.focus_identity();
+        let index = index.min(self.pw.tabs.len());
+        self.pw.tabs.insert(index, tab);
+        self.pw.active_tab = index;
+        self.relayout_all();
+        self.sync_tabs();
+        self.after_focus_context_change(before);
+        self.redraw();
+    }
+
+    fn insert_tab_into_window(&mut self, target: WindowId, tab: Tab, index: usize) {
+        if self.pw.window.as_ref().map(|w| w.id()) == Some(target) {
+            self.insert_tab_here(tab, index);
+            return;
+        }
+        if let Some(slot) = self.satellite_for(target) {
+            let mut tab = Some(tab);
+            self.with_window(slot, |app| {
+                app.insert_tab_here(tab.take().expect("tab transferred once"), index);
+            });
+        }
+    }
+
+    fn window_at_screen(&self, point: PhysicalPosition<i32>) -> Option<(WindowId, usize)> {
+        let hit = |pw: &PaneWindow| {
+            let window = pw.window.as_ref()?;
+            let origin = window.inner_position().ok()?;
+            let size = window.inner_size();
+            let x = point.x - origin.x;
+            let y = point.y - origin.y;
+            if x < 0 || y < 0 || x >= size.width as i32 || y >= size.height as i32 {
+                return None;
+            }
+            let index = pw
+                .renderer
+                .as_ref()
+                .and_then(|r| match r.hit_test(x as f32, y as f32) {
+                    Hit::Button(Hot::Tab(i) | Hot::TabClose(i)) => Some(i),
+                    _ => None,
+                })
+                .unwrap_or(pw.tabs.len());
+            Some((window.id(), index))
+        };
+        self.satellites.iter().find_map(hit).or_else(|| hit(&self.pw))
+    }
+
+    fn open_tab_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        tab: Tab,
+        point: Option<PhysicalPosition<i32>>,
+    ) -> Option<Tab> {
+        let (irgba, iw, ih) = win::app_icon();
+        let icon = winit::window::Icon::from_rgba(irgba, iw, ih).ok();
+        let attrs = platform_window_attrs(
+            Window::default_attributes()
+                .with_title("termie")
+                .with_window_icon(icon)
+                .with_decorations(false)
+                .with_inner_size(LogicalSize::new(760.0, 480.0))
+                .with_min_inner_size(LogicalSize::new(560.0, 380.0)),
+        );
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(_) => return Some(tab),
+        };
+        if let Some(point) = point {
+            window.set_outer_position(PhysicalPosition::new(point.x - 160, point.y - 18));
+        }
+        constrain_window_to_monitor(&window);
+        window.set_ime_allowed(true);
+        #[cfg(windows)]
+        if let Ok(handle) = window.window_handle()
+            && let RawWindowHandle::Win32(handle) = handle.as_raw()
+        {
+            win::apply_window_effects(handle.hwnd.get());
+            if self.persisted.acrylic {
+                win::apply_backdrop(handle.hwnd.get(), true);
+            }
+        }
+        #[cfg(not(windows))]
+        if self.persisted.acrylic {
+            window.set_blur(true);
+        }
+        let mut renderer = match Renderer::new(
+            window.clone(),
+            event_loop.owned_display_handle(),
+            CONTENT_PT,
+            CHROME_PT,
+            self.config.backend,
+        ) {
+            Ok(renderer) => renderer,
+            Err(_) => return Some(tab),
+        };
+        self.configure_renderer(&mut renderer);
+        self.satellites.push(pane_window(Some(window), Some(renderer), vec![tab]));
+        let slot = self.satellites.len() - 1;
+        self.with_window(slot, |app| {
+            if let Some(renderer) = app.pw.renderer.as_mut() {
+                renderer.begin_reveal();
+            }
+            app.relayout_all();
+            app.sync_tabs();
+            app.paint();
+        });
+        None
+    }
+
+    fn finish_tab_drag(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(drag) = self.tab_drag.take() else {
+            return;
+        };
+        if !drag.left_strip {
+            return;
+        }
+        let target = drag
+            .target
+            .or_else(|| drag.screen.and_then(|point| self.window_at_screen(point)));
+        if let Some((target, _)) = target
+            && target == drag.source
+        {
+            return;
+        }
+        let Some(tab) = self.take_tab_from_window(drag.source, drag.index) else {
+            return;
+        };
+        if let Some((target, index)) = target {
+            self.insert_tab_into_window(target, tab, index);
+        } else if let Some(tab) = self.open_tab_window(event_loop, tab, drag.screen) {
+            self.insert_tab_into_window(drag.source, tab, drag.index);
+            self.show_notice("couldn't open a new window");
+        }
+        if self.cur_sat.is_none() {
+            self.satellites.retain(|window| !window.tabs.is_empty());
+        }
     }
 
     fn shift_active_tab(&mut self, delta: i32) {
@@ -7514,27 +7699,24 @@ impl App {
         if self.persisted.acrylic {
             window.set_blur(true);
         }
-        let renderer = match render::Renderer::new(
+        let mut renderer = match render::Renderer::new(
             window.clone(),
             event_loop.owned_display_handle(),
             CONTENT_PT,
             CHROME_PT,
             self.config.backend,
         ) {
-            Ok(mut r) => {
-                r.set_theme(self.resolved_theme());
-                r.set_elevated(self.elevated());
-                r
-            }
+            Ok(renderer) => renderer,
             Err(_) => {
                 self.dock_loose_pane(pane);
                 return;
             }
         };
-        self.satellites.push(PaneWindow {
-            window: Some(window),
-            renderer: Some(renderer),
-            tabs: vec![Tab {
+        self.configure_renderer(&mut renderer);
+        self.satellites.push(pane_window(
+            Some(window),
+            Some(renderer),
+            vec![Tab {
                 focused: pane.id,
                 root: Some(Node::Leaf(pane)),
                 zoom: None,
@@ -7542,23 +7724,7 @@ impl App {
                 attention: false,
                 color: None,
             }],
-            active_tab: 0,
-            layout_cache: Vec::new(),
-            maximized: false,
-            pane_mode: false,
-            settings_open: false,
-            on_top: false,
-            focused: true,
-            ime_composing: false,
-            ime_preedit: String::new(),
-            ime_preedit_caret: None,
-            pane_menu: None,
-            git: None,
-            last_git_cwd: None,
-            cursor: PhysicalPosition::new(0.0, 0.0),
-            confirm: None,
-            rename: None,
-        });
+        ));
         // relayout + paint the new satellite via the swap-into-pw technique, then
         // relayout + repaint the main window (which just lost a pane)
         let idx = self.satellites.len() - 1;
@@ -7744,9 +7910,6 @@ impl App {
                     self.pw.ime_preedit.clear();
                     self.pw.ime_preedit_caret = None;
                     self.release_held_input();
-                    // a tab drag can't survive losing focus (the release lands
-                    // in another window)
-                    self.tab_drag = None;
                 }
                 // coming back acknowledges the active tab's bell dot
                 if f && self.pw.tabs.get(self.pw.active_tab).is_some_and(|t| t.attention) {
@@ -7783,6 +7946,7 @@ impl App {
         if self.satellites.get(idx).is_some_and(|s| s.tabs.is_empty()) {
             self.satellites.remove(idx);
         }
+        self.satellites.retain(|window| !window.tabs.is_empty());
     }
 
     /// re-attach a loose pane as a new tab (used if a satellite window won't open)
@@ -8015,14 +8179,44 @@ impl App {
         // drag-reordering a tab: the held tab follows the pointer along the
         // strip, swapping places live as it crosses its neighbors (equal tab
         // widths keep the pointer inside the moved tab, so this can't oscillate)
-        if let Some(i) = self.tab_drag {
+        if let Some(mut drag) = self.tab_drag {
+            let current = self.pw.window.as_ref().map(|w| w.id());
+            if let Some(window) = self.pw.window.as_ref() {
+                drag.screen = window.inner_position().ok().map(|origin| {
+                    PhysicalPosition::new(
+                        origin.x + position.x.round() as i32,
+                        origin.y + position.y.round() as i32,
+                    )
+                });
+            }
+            let travelled = (position.x - drag.start.x).abs() + (position.y - drag.start.y).abs();
+            if let Some(current) = current
+                && current != drag.source
+            {
+                let index = self
+                    .pw
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| match r.hit_test(px, py) {
+                        Hit::Button(Hot::Tab(i) | Hot::TabClose(i)) => Some(i),
+                        _ => None,
+                    })
+                    .unwrap_or(self.pw.tabs.len());
+                drag.target = Some((current, index));
+            } else if current == Some(drag.source) {
+                drag.target = None;
+            }
             if let Some(Hit::Button(Hot::Tab(j) | Hot::TabClose(j))) =
                 self.pw.renderer.as_ref().map(|r| r.hit_test(px, py))
-                && j != i
+                && current == Some(drag.source)
+                && j != drag.index
             {
-                self.move_tab(i, j);
-                self.tab_drag = Some(j);
+                self.move_tab(drag.index, j);
+                drag.index = j;
+            } else if travelled > 12.0 {
+                drag.left_strip = true;
             }
+            self.tab_drag = Some(drag);
             return;
         }
         // mouse-tracking motion (1002 drag / 1003 any-motion)
@@ -8263,6 +8457,11 @@ impl App {
             }
             MouseButton::Left => {
                 let (cx, cy) = (self.pw.cursor.x as f32, self.pw.cursor.y as f32);
+                if state == ElementState::Released && self.tab_drag.is_some() {
+                    self.finish_tab_drag(event_loop);
+                    self.pressed = None;
+                    return;
+                }
                 // the marketplace is a full-page overlay: handle its clicks and
                 // consume the press so nothing falls through to the panes
                 if self.market.is_some() {
@@ -8508,7 +8707,22 @@ impl App {
                             // can then be dragged along the strip to reorder
                             if let Hot::Tab(i) = h {
                                 self.switch_tab(i);
-                                self.tab_drag = Some(i);
+                                if let Some(window) = self.pw.window.as_ref() {
+                                    let cursor = self.pw.cursor;
+                                    self.tab_drag = Some(TabDrag {
+                                        source: window.id(),
+                                        index: i,
+                                        start: cursor,
+                                        screen: window.inner_position().ok().map(|origin| {
+                                            PhysicalPosition::new(
+                                                origin.x + cursor.x.round() as i32,
+                                                origin.y + cursor.y.round() as i32,
+                                            )
+                                        }),
+                                        target: None,
+                                        left_strip: false,
+                                    });
+                                }
                             }
                         }
                         Some(Hit::Content) => {
@@ -8631,7 +8845,6 @@ impl App {
                     ElementState::Released => {
                         self.selecting = false;
                         self.sel_autoscroll = None;
-                        self.tab_drag = None;
                         // a plain click (no drag) clears the selection; a real drag
                         // auto-copies when copy-on-select is enabled
                         if let Some(sel) = self.selection {
@@ -9655,9 +9868,6 @@ impl ApplicationHandler<UserEvent> for App {
                     self.pw.ime_preedit.clear();
                     self.pw.ime_preedit_caret = None;
                     self.release_held_input();
-                    // a tab drag can't survive losing focus (the release lands
-                    // in another window)
-                    self.tab_drag = None;
                 }
                 // coming back acknowledges the active tab's bell dot
                 if f && self.pw.tabs.get(self.pw.active_tab).is_some_and(|t| t.attention) {
@@ -10801,17 +11011,6 @@ mod tests {
             .filter(|(_, a)| matches!(a, PaletteAction::SetTabColor(_)))
             .count();
         assert_eq!(n, render::TAB_COLOR_ITEMS.len());
-    }
-
-    #[test]
-    fn new_window_carries_shell_and_cwd_as_separate_args() {
-        assert_eq!(
-            window_launch_args(
-                Some(ShellKind::Custom("git bash")),
-                Some(r"C:\work tree\termie".to_string())
-            ),
-            ["--shell", "git bash", "--cwd", r"C:\work tree\termie"]
-        );
     }
 
     #[test]
