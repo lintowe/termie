@@ -209,6 +209,17 @@ struct Tab {
     color: Option<u8>,
 }
 
+fn tab_from_pane(pane: Pane) -> Tab {
+    Tab {
+        focused: pane.id,
+        root: Some(Node::Leaf(pane)),
+        zoom: None,
+        title: None,
+        attention: false,
+        color: None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TabDrag {
     source: WindowId,
@@ -218,6 +229,21 @@ struct TabDrag {
     target: Option<(WindowId, usize)>,
     left_strip: bool,
     left_window: bool,
+}
+
+impl TabDrag {
+    fn window_left(&mut self, window: WindowId) -> bool {
+        let left_source = self.source == window;
+        let left_target = self.target.is_some_and(|(target, _)| target == window);
+        if left_source {
+            self.left_strip = true;
+            self.left_window = true;
+        }
+        if left_source || left_target {
+            self.target = None;
+        }
+        left_source || left_target
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -230,15 +256,39 @@ struct PaneDropTarget {
 }
 
 #[derive(Clone, Copy)]
+enum PaneDropDestination {
+    Dock(PaneDropTarget),
+    Tab(WindowId, usize),
+}
+
+#[derive(Clone, Copy)]
 struct PaneDrag {
     source_window: WindowId,
     source_tab: usize,
     pane: usize,
     start: PhysicalPosition<f64>,
     screen: Option<PhysicalPosition<i32>>,
-    target: Option<PaneDropTarget>,
+    target: Option<PaneDropDestination>,
     moved: bool,
     left_window: bool,
+}
+
+impl PaneDrag {
+    fn window_left(&mut self, window: WindowId) -> bool {
+        let left_source = self.source_window == window;
+        let left_target = self.target.is_some_and(|target| match target {
+            PaneDropDestination::Dock(target) => target.window == window,
+            PaneDropDestination::Tab(target, _) => target == window,
+        });
+        if left_source {
+            self.moved = true;
+            self.left_window = true;
+        }
+        if left_source || left_target {
+            self.target = None;
+        }
+        left_source || left_target
+    }
 }
 
 /// an active text selection in one pane, anchored to (absolute line id, col)
@@ -1502,6 +1552,14 @@ fn pane_drop_side(rect: Rect, x: f32, y: f32) -> PaneDropSide {
         PaneDropSide::Top
     } else {
         PaneDropSide::Bottom
+    }
+}
+
+fn pane_tab_drop_index(hit: Hit, tab_count: usize) -> Option<usize> {
+    match hit {
+        Hit::Button(Hot::Tab(index) | Hot::TabClose(index)) => Some(index),
+        Hit::TitleBar | Hit::Button(Hot::NewTab | Hot::NewTabMenu) => Some(tab_count),
+        _ => None,
     }
 }
 
@@ -4556,7 +4614,14 @@ impl App {
         })
     }
 
-    fn pane_drop_at_screen(&self, point: PhysicalPosition<i32>) -> Option<PaneDropTarget> {
+    fn pane_tab_drop_at(pw: &PaneWindow, x: f32, y: f32) -> Option<(WindowId, usize)> {
+        let window = pw.window.as_ref()?.id();
+        let hit = pw.renderer.as_ref()?.hit_test(x, y);
+        let index = pane_tab_drop_index(hit, pw.tabs.len())?;
+        Some((window, index))
+    }
+
+    fn pane_drop_at_screen(&self, point: PhysicalPosition<i32>) -> Option<PaneDropDestination> {
         let hit = |pw: &PaneWindow| {
             let window = pw.window.as_ref()?;
             let origin = window.inner_position().ok()?;
@@ -4567,6 +4632,11 @@ impl App {
                 return None;
             }
             Self::pane_drop_at(pw, x as f32, y as f32)
+                .map(PaneDropDestination::Dock)
+                .or_else(|| {
+                    Self::pane_tab_drop_at(pw, x as f32, y as f32)
+                        .map(|(window, index)| PaneDropDestination::Tab(window, index))
+                })
         };
         self.satellites.iter().find_map(hit).or_else(|| hit(&self.pw))
     }
@@ -5918,14 +5988,7 @@ impl App {
                         .map(|origin| PhysicalPosition::new(origin.x + 48, origin.y + 48))
                 });
                 if let Ok(pane) = pane {
-                    let tab = Tab {
-                        focused: pane.id,
-                        root: Some(Node::Leaf(pane)),
-                        zoom: None,
-                        title: None,
-                        attention: false,
-                        color: None,
-                    };
+                    let tab = tab_from_pane(pane);
                     if let Some(tab) = self.open_tab_window(event_loop, tab, point) {
                         self.insert_tab_here(tab, self.pw.tabs.len());
                         self.show_notice("couldn't open a new window");
@@ -6606,17 +6669,19 @@ impl App {
         self.redraw();
     }
 
-    fn insert_tab_into_window(&mut self, target: WindowId, tab: Tab, index: usize) {
+    fn insert_tab_into_window(&mut self, target: WindowId, tab: Tab, index: usize) -> Option<Tab> {
         if self.pw.window.as_ref().map(|w| w.id()) == Some(target) {
             self.insert_tab_here(tab, index);
-            return;
+            return None;
         }
-        if let Some(slot) = self.satellite_for(target) {
-            let mut tab = Some(tab);
-            self.with_window(slot, |app| {
-                app.insert_tab_here(tab.take().expect("tab transferred once"), index);
-            });
-        }
+        let Some(slot) = self.satellite_for(target) else {
+            return Some(tab);
+        };
+        let mut tab = Some(tab);
+        self.with_window(slot, |app| {
+            app.insert_tab_here(tab.take().expect("tab transferred once"), index);
+        });
+        None
     }
 
     fn window_at_screen(&self, point: PhysicalPosition<i32>) -> Option<(WindowId, usize)> {
@@ -6776,7 +6841,8 @@ impl App {
                 } else {
                     drag.screen.and_then(|point| self.window_at_screen(point))
                 }
-            });
+            })
+            .filter(|(window, _)| self.pane_window_for(*window).is_some());
         if let Some((target, _)) = target
             && target == drag.source
         {
@@ -6794,9 +6860,12 @@ impl App {
             return;
         };
         if let Some((target, index)) = target {
-            self.insert_tab_into_window(target, tab, index);
+            if let Some(tab) = self.insert_tab_into_window(target, tab, index) {
+                let _ = self.insert_tab_into_window(drag.source, tab, drag.index);
+                self.show_notice("the destination window closed during the drag");
+            }
         } else if let Some(tab) = self.open_tab_window(event_loop, tab, drag.screen) {
-            self.insert_tab_into_window(drag.source, tab, drag.index);
+            let _ = self.insert_tab_into_window(drag.source, tab, drag.index);
             self.show_notice("couldn't open a new window");
         }
         self.cleanup_empty_windows();
@@ -6909,6 +6978,7 @@ impl App {
             return;
         };
         self.show_pane_drop(None);
+        self.show_tab_drop(None);
         self.reset_drag_cursors();
         if !drag.moved {
             return;
@@ -6921,11 +6991,26 @@ impl App {
                 } else {
                     drag.screen.and_then(|point| self.pane_drop_at_screen(point))
                 }
+            })
+            .filter(|target| match target {
+                PaneDropDestination::Dock(target) => self.pane_window_for(target.window).is_some(),
+                PaneDropDestination::Tab(window, _) => self.pane_window_for(*window).is_some(),
             });
-        if let Some(target) = target
+        if let Some(PaneDropDestination::Dock(target)) = target
             && target.window == drag.source_window
             && target.tab == drag.source_tab
             && target.pane == drag.pane
+        {
+            return;
+        }
+        if let Some(PaneDropDestination::Tab(window, _)) = target
+            && window == drag.source_window
+            && self
+                .pane_window_for(window)
+                .and_then(|pw| pw.tabs.get(drag.source_tab))
+                .and_then(|tab| tab.root.as_ref())
+                .map(pane_count)
+                == Some(1)
         {
             return;
         }
@@ -6946,28 +7031,32 @@ impl App {
             return;
         };
         if let Some(target) = target {
-            if let Some(pane) = self.insert_pane_into_window(target, pane) {
-                let fallback = Tab {
-                    focused: pane.id,
-                    root: Some(Node::Leaf(pane)),
-                    zoom: None,
-                    title: None,
-                    attention: false,
-                    color: None,
-                };
-                self.insert_tab_into_window(drag.source_window, fallback, drag.source_tab);
+            match target {
+                PaneDropDestination::Dock(target) => {
+                    if let Some(pane) = self.insert_pane_into_window(target, pane) {
+                        let fallback = tab_from_pane(pane);
+                        let _ = self.insert_tab_into_window(
+                            drag.source_window,
+                            fallback,
+                            drag.source_tab,
+                        );
+                    }
+                }
+                PaneDropDestination::Tab(window, index) => {
+                    let tab = tab_from_pane(pane);
+                    if let Some(tab) = self.insert_tab_into_window(window, tab, index) {
+                        let _ = self.insert_tab_into_window(
+                            drag.source_window,
+                            tab,
+                            drag.source_tab,
+                        );
+                    }
+                }
             }
         } else {
-            let tab = Tab {
-                focused: pane.id,
-                root: Some(Node::Leaf(pane)),
-                zoom: None,
-                title: None,
-                attention: false,
-                color: None,
-            };
+            let tab = tab_from_pane(pane);
             if let Some(tab) = self.open_tab_window(event_loop, tab, drag.screen) {
-                self.insert_tab_into_window(drag.source_window, tab, drag.source_tab);
+                let _ = self.insert_tab_into_window(drag.source_window, tab, drag.source_tab);
                 self.show_notice("couldn't open a new window");
             }
         }
@@ -7656,6 +7745,7 @@ impl App {
             self.drag_divider = None;
             self.pane_drag = None;
             self.show_pane_drop(None);
+            self.show_tab_drop(None);
         }
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_pane_mode(on);
@@ -8064,14 +8154,7 @@ impl App {
                 return;
             }
         };
-        pw.tabs.push(Tab {
-            focused: pane.id,
-            root: Some(Node::Leaf(pane)),
-            zoom: None,
-            title: None,
-            attention: false,
-            color: None,
-        });
+        pw.tabs.push(tab_from_pane(pane));
         self.satellites.push(pw);
         // relayout + paint the new satellite via the swap-into-pw technique, then
         // relayout + repaint the main window (which just lost a pane)
@@ -8491,29 +8574,14 @@ impl App {
         let Some(current) = self.pw.window.as_ref().map(|window| window.id()) else {
             return;
         };
-        let mut clear_tabs = false;
-        if let Some(drag) = self.tab_drag.as_mut()
-            && drag.source == current
-        {
-            drag.left_strip = true;
-            drag.left_window = true;
-            drag.target = None;
-            clear_tabs = true;
-        }
-        let mut clear_panes = false;
-        if let Some(drag) = self.pane_drag.as_mut()
-            && drag.source_window == current
-        {
-            drag.moved = true;
-            drag.left_window = true;
-            drag.target = None;
-            clear_panes = true;
-        }
+        let clear_tabs = self.tab_drag.as_mut().is_some_and(|drag| drag.window_left(current));
+        let clear_panes = self.pane_drag.as_mut().is_some_and(|drag| drag.window_left(current));
         if clear_tabs {
             self.show_tab_drop(None);
         }
         if clear_panes {
             self.show_pane_drop(None);
+            self.show_tab_drop(None);
         }
     }
 
@@ -8661,17 +8729,31 @@ impl App {
                     )
                 });
             }
-            let local = Self::pane_drop_at(&self.pw, px, py);
-            drag.target = local;
+            drag.target = Self::pane_drop_at(&self.pw, px, py)
+                .map(PaneDropDestination::Dock)
+                .or_else(|| {
+                    Self::pane_tab_drop_at(&self.pw, px, py)
+                        .map(|(window, index)| PaneDropDestination::Tab(window, index))
+                });
             if drag.target.is_none() {
                 drag.target = drag.screen.and_then(|point| self.pane_drop_at_screen(point));
             }
-            let visual_target = drag.target.filter(|target| {
-                target.window != drag.source_window
-                    || target.tab != drag.source_tab
-                    || target.pane != drag.pane
+            let pane_target = drag.target.and_then(|target| match target {
+                PaneDropDestination::Dock(target)
+                    if target.window != drag.source_window
+                        || target.tab != drag.source_tab
+                        || target.pane != drag.pane =>
+                {
+                    Some(target)
+                }
+                _ => None,
             });
-            self.show_pane_drop(visual_target);
+            let tab_target = drag.target.and_then(|target| match target {
+                PaneDropDestination::Tab(window, index) => Some((window, index)),
+                _ => None,
+            });
+            self.show_pane_drop(pane_target);
+            self.show_tab_drop(tab_target);
             self.set_pointer(CursorIcon::Grabbing);
             self.pane_drag = Some(drag);
             return;
@@ -10866,6 +10948,80 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaving_a_tab_drop_window_clears_the_cached_target() {
+        let source = WindowId::from(1);
+        let target = WindowId::from(2);
+        let mut drag = TabDrag {
+            source,
+            index: 0,
+            start: PhysicalPosition::new(20.0, 12.0),
+            screen: Some(PhysicalPosition::new(800, 400)),
+            target: Some((target, 1)),
+            left_strip: true,
+            left_window: true,
+        };
+
+        assert!(drag.window_left(target));
+        assert!(drag.target.is_none());
+        assert!(drag.left_window);
+    }
+
+    #[test]
+    fn leaving_a_pane_drop_window_clears_the_cached_target() {
+        let source = WindowId::from(1);
+        let target = WindowId::from(2);
+        let mut drag = PaneDrag {
+            source_window: source,
+            source_tab: 0,
+            pane: 7,
+            start: PhysicalPosition::new(20.0, 80.0),
+            screen: Some(PhysicalPosition::new(800, 400)),
+            target: Some(PaneDropDestination::Dock(PaneDropTarget {
+                window: target,
+                tab: 0,
+                pane: 9,
+                side: PaneDropSide::Right,
+                rect: (100.0, 60.0, 300.0, 240.0),
+            })),
+            moved: true,
+            left_window: true,
+        };
+
+        assert!(drag.window_left(target));
+        assert!(drag.target.is_none());
+        assert!(drag.left_window);
+    }
+
+    #[test]
+    fn pane_drag_accepts_tabs_and_open_tab_strip_space() {
+        assert_eq!(pane_tab_drop_index(Hit::Button(Hot::Tab(1)), 3), Some(1));
+        assert_eq!(pane_tab_drop_index(Hit::Button(Hot::TabClose(2)), 3), Some(2));
+        assert_eq!(pane_tab_drop_index(Hit::TitleBar, 3), Some(3));
+        assert_eq!(pane_tab_drop_index(Hit::Button(Hot::NewTab), 3), Some(3));
+        assert_eq!(pane_tab_drop_index(Hit::Button(Hot::Close), 3), None);
+        assert_eq!(pane_tab_drop_index(Hit::Content, 3), None);
+    }
+
+    #[test]
+    fn leaving_a_pane_tab_target_clears_the_insertion_marker() {
+        let source = WindowId::from(1);
+        let target = WindowId::from(2);
+        let mut drag = PaneDrag {
+            source_window: source,
+            source_tab: 0,
+            pane: 7,
+            start: PhysicalPosition::new(20.0, 80.0),
+            screen: Some(PhysicalPosition::new(800, 400)),
+            target: Some(PaneDropDestination::Tab(target, 2)),
+            moved: true,
+            left_window: true,
+        };
+
+        assert!(drag.window_left(target));
+        assert!(drag.target.is_none());
+    }
 
     #[test]
     fn satellite_windows_start_hidden_with_custom_chrome() {

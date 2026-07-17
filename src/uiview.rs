@@ -56,6 +56,10 @@ pub fn maybe_run() -> bool {
         "tab-drop" => {
             r.set_tab_drop(Some(1));
         }
+        "pane-tab-drop" => {
+            r.set_pane_mode(true);
+            r.set_tab_drop(Some(1));
+        }
         "menu" => {
             r.set_pane_menu(Some(PaneMenuView {
                 x: 90.0,
