@@ -1995,6 +1995,16 @@ fn resolve_layout_dirs(node: &mut session::NodeSnap, base: Option<&str>) {
     }
 }
 
+fn drag_window_origin(
+    point: PhysicalPosition<i32>,
+    grab: PhysicalPosition<f64>,
+) -> PhysicalPosition<i32> {
+    PhysicalPosition::new(
+        point.x - grab.x.round() as i32,
+        point.y - grab.y.round() as i32,
+    )
+}
+
 /// one scheduled `--drive` step
 #[derive(Clone)]
 enum DriveStep {
@@ -6830,11 +6840,14 @@ impl App {
             .pane_window_for(id)
             .and_then(|pw| pw.window.as_ref());
         if let Some(window) = window {
-            window.set_outer_position(PhysicalPosition::new(
-                point.x - grab.x.round() as i32,
-                point.y - grab.y.round() as i32,
-            ));
+            window.set_outer_position(drag_window_origin(point, grab));
             constrain_window_to_monitor(window);
+        }
+    }
+
+    fn focus_window(&self, id: WindowId) {
+        if let Some(window) = self.pane_window_for(id).and_then(|pw| pw.window.as_ref()) {
+            window.focus_window();
         }
     }
 
@@ -6860,7 +6873,7 @@ impl App {
         let attrs = satellite_window_attrs(icon);
         let window = Arc::new(event_loop.create_window(attrs)?);
         if let Some(point) = point {
-            window.set_outer_position(PhysicalPosition::new(point.x - 160, point.y - 18));
+            window.set_outer_position(point);
         }
         constrain_window_to_monitor(&window);
         window.set_ime_allowed(true);
@@ -6918,6 +6931,7 @@ impl App {
         });
         if let Some(window) = self.satellites[slot].window.as_ref() {
             window.set_visible(true);
+            window.focus_window();
         }
         None
     }
@@ -7025,8 +7039,14 @@ impl App {
             if let Some(tab) = self.insert_tab_into_window(target, tab, index) {
                 let _ = self.insert_tab_into_window(drag.source, tab, drag.index);
                 self.show_notice("the destination window closed during the drag");
+            } else {
+                self.focus_window(target);
             }
-        } else if let Some(tab) = self.open_tab_window(event_loop, tab, drag.screen) {
+        } else if let Some(tab) = self.open_tab_window(
+            event_loop,
+            tab,
+            drag.screen.map(|point| drag_window_origin(point, drag.start)),
+        ) {
             let _ = self.insert_tab_into_window(drag.source, tab, drag.index);
             self.show_notice("couldn't open a new window");
         }
@@ -7203,6 +7223,8 @@ impl App {
                             fallback,
                             drag.source_tab,
                         );
+                    } else {
+                        self.focus_window(target.window);
                     }
                 }
                 PaneDropDestination::Tab(window, index) => {
@@ -7213,12 +7235,18 @@ impl App {
                             tab,
                             drag.source_tab,
                         );
+                    } else {
+                        self.focus_window(window);
                     }
                 }
             }
         } else {
             let tab = tab_from_pane(pane);
-            if let Some(tab) = self.open_tab_window(event_loop, tab, drag.screen) {
+            if let Some(tab) = self.open_tab_window(
+                event_loop,
+                tab,
+                drag.screen.map(|point| drag_window_origin(point, drag.start)),
+            ) {
                 let _ = self.insert_tab_into_window(drag.source_window, tab, drag.source_tab);
                 self.show_notice("couldn't open a new window");
             }
@@ -11818,6 +11846,17 @@ mod tests {
         };
         assert!(matches!(*a, session::NodeSnap::Leaf { cwd: Some(ref cwd), .. } if cwd == &expected));
         assert!(matches!(*b, session::NodeSnap::Leaf { cwd: Some(ref cwd), .. } if cwd == &inherited));
+    }
+
+    #[test]
+    fn torn_out_window_keeps_the_pointer_at_its_grab_point() {
+        assert_eq!(
+            drag_window_origin(
+                PhysicalPosition::new(840, 460),
+                PhysicalPosition::new(238.4, 19.7),
+            ),
+            PhysicalPosition::new(602, 440),
+        );
     }
 
     #[cfg(not(windows))]
