@@ -1,0 +1,14 @@
+200 key ctrl+t
+500 key ctrl+shift+n
+1000 assert windows 2
+0 assert tabs 3
+0 assert window-tabs 0 2
+0 assert window-tabs 1 1
+100 pointer-window 1 20 20
+100 mouse down
+100 pointer-window 0 250 20
+100 mouse up
+500 assert windows 1
+0 assert tabs 3
+0 assert window-tabs 0 3
+100 exit

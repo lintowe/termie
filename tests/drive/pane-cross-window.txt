@@ -1,0 +1,15 @@
+200 key ctrl+shift+e
+500 key ctrl+shift+n
+1000 assert windows 2
+0 assert window-panes 0 2
+0 assert window-panes 1 1
+100 key ctrl+shift+p
+100 pointer-window 0 250 250
+100 mouse down
+100 pointer-window 1 850 250
+100 mouse up
+500 assert windows 2
+0 assert panes 3
+0 assert window-panes 0 1
+0 assert window-panes 1 2
+100 exit

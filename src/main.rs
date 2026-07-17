@@ -12004,6 +12004,24 @@ mod tests {
     }
 
     #[test]
+    fn drive_fixtures_are_complete_scripts() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/drive");
+        let mut paths: Vec<_> = std::fs::read_dir(dir)
+            .expect("drive fixture directory")
+            .map(|entry| entry.expect("drive fixture entry").path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "txt"))
+            .collect();
+        paths.sort();
+        assert_eq!(paths.len(), 5);
+        for path in paths {
+            let text = std::fs::read_to_string(&path).expect("drive fixture text");
+            let steps = parse_drive_script(&text);
+            assert_eq!(steps.len(), text.lines().filter(|line| !line.trim().is_empty()).count());
+            assert!(matches!(steps.last(), Some((_, DriveStep::Exit))), "{} must end with exit", path.display());
+        }
+    }
+
+    #[test]
     fn layout_verbs_build_tabs_and_splits() {
         let args: Vec<String> =
             ["new-tab", "-d", "C:/a", ";", "split-pane", "-H", "--shell", "cmd", ";", "nt", "--shell=wsl"]
