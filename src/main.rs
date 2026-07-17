@@ -2042,6 +2042,7 @@ enum DriveStep {
     Type(String),
     Pointer(PhysicalPosition<f64>),
     PointerWindow(usize, PhysicalPosition<f64>),
+    PointerTab(usize, usize),
     Mouse(ElementState),
     Assert(DriveMetric, usize),
     Exit,
@@ -2110,6 +2111,15 @@ fn parse_drive_script(text: &str) -> Vec<(Duration, DriveStep)> {
                         at,
                         DriveStep::PointerWindow(window, PhysicalPosition::new(x, y)),
                     ));
+                }
+            }
+            "pointer-tab" => {
+                let mut target = arg.split_whitespace();
+                if let (Some(window), Some(tab), None) =
+                    (target.next(), target.next(), target.next())
+                    && let (Ok(window), Ok(tab)) = (window.parse(), tab.parse())
+                {
+                    out.push((at, DriveStep::PointerTab(window, tab)));
                 }
             }
             "mouse" => match arg {
@@ -8795,6 +8805,40 @@ impl App {
                         self.drive_error = Some(error);
                     }
                 }
+                DriveStep::PointerTab(window, tab) => {
+                    let pane_window = if window == 0 {
+                        Some(&self.pw)
+                    } else {
+                        self.satellites.get(window - 1)
+                    };
+                    let position = pane_window
+                        .and_then(|pane_window| pane_window.renderer.as_ref())
+                        .and_then(|renderer| {
+                            renderer
+                                .a11y_chrome_layout()
+                                .tabs
+                                .into_iter()
+                                .find(|(index, _)| *index == tab)
+                        })
+                        .map(|(_, (x, y, width, height))| {
+                            PhysicalPosition::new(
+                                (x + width / 2.0) as f64,
+                                (y + height / 2.0) as f64,
+                            )
+                        });
+                    if let Some(position) = position {
+                        self.drive_window = window;
+                        if window == 0 {
+                            self.inject_pointer(position);
+                        } else {
+                            self.with_window(window - 1, |app| app.inject_pointer(position));
+                        }
+                    } else {
+                        let error = format!("--drive: tab {tab} in window {window} is unavailable");
+                        log::error!("{error}");
+                        self.drive_error = Some(error);
+                    }
+                }
                 DriveStep::Mouse(state) => {
                     if self.drive_window == 0 {
                         self.on_mouse_input(state, MouseButton::Left, event_loop);
@@ -11975,9 +12019,9 @@ mod tests {
     #[test]
     fn drive_scripts_parse_pointer_and_left_mouse_steps() {
         let steps = parse_drive_script(
-            "10 pointer 12.5 -4\n20 mouse down\n30 pointer NaN 2\n40 pointer 1 nope\n50 pointer-window 2 80 40\n60 mouse up\n",
+            "10 pointer 12.5 -4\n20 mouse down\n30 pointer NaN 2\n40 pointer 1 nope\n50 pointer-window 2 80 40\n60 pointer-tab 1 3\n70 mouse up\n",
         );
-        assert_eq!(steps.len(), 4);
+        assert_eq!(steps.len(), 5);
         assert!(matches!(
             steps[0],
             (at, DriveStep::Pointer(position))
@@ -11996,7 +12040,11 @@ mod tests {
         ));
         assert!(matches!(
             steps[3],
-            (at, DriveStep::Mouse(ElementState::Released)) if at == Duration::from_millis(210)
+            (at, DriveStep::PointerTab(1, 3)) if at == Duration::from_millis(210)
+        ));
+        assert!(matches!(
+            steps[4],
+            (at, DriveStep::Mouse(ElementState::Released)) if at == Duration::from_millis(280)
         ));
     }
 
