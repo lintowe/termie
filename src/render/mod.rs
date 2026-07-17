@@ -1028,6 +1028,7 @@ impl Renderer {
         content_pt: f32,
         chrome_pt: f32,
         backend: BackendChoice,
+        _satellite: bool,
     ) -> Result<Renderer> {
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
@@ -1043,6 +1044,11 @@ impl Renderer {
             let mut desc =
                 wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle.clone()));
             desc.backends = backends;
+            #[cfg(target_os = "linux")]
+            if _satellite && std::env::var_os("WGPU_VALIDATION").is_none() {
+                // vvl and nvidia can crash while a second instance destroys its swapchain
+                desc.flags.remove(wgpu::InstanceFlags::VALIDATION);
+            }
             let instance = wgpu::Instance::new(desc);
             let surface = instance.create_surface(window.clone())?;
             let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1127,7 +1133,16 @@ impl Renderer {
         let atlas = atlas_handle.join().expect("atlas build thread panicked");
         crate::timing("  gpu: atlas joined");
         let mut r = Self::from_parts(
-            device, queue, Some(surface), format, config, atlas, scale, content_pt, chrome_pt, transparent,
+            device,
+            queue,
+            Some(surface),
+            format,
+            config,
+            atlas,
+            scale,
+            content_pt,
+            chrome_pt,
+            transparent,
         );
         r.backend_label = backend_label(adapter.get_info().backend);
         r.window = Some(window);
@@ -5278,6 +5293,10 @@ impl Renderer {
         Ok(())
     }
 
+    pub fn shutdown(self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+
     /// dev capture harness: a surfaceless renderer that draws into an offscreen
     /// texture so the full chrome (tab strip, buttons, menus, panes) can be
     /// rendered to a PNG without a window. compiled out of release
@@ -5326,7 +5345,18 @@ impl Renderer {
             view_formats: vec![],
         };
         let atlas = GlyphAtlas::new(content_pt, chrome_pt, scale, None, 1.32);
-        let mut r = Self::from_parts(device, queue, None, format, config, atlas, scale, content_pt, chrome_pt, false);
+        let mut r = Self::from_parts(
+            device,
+            queue,
+            None,
+            format,
+            config,
+            atlas,
+            scale,
+            content_pt,
+            chrome_pt,
+            false,
+        );
 
         // offscreen target (COPY_SRC for readback) + a row-aligned readback buffer
         let target = r.device.create_texture(&wgpu::TextureDescriptor {

@@ -91,7 +91,7 @@ Configuration lives in `%APPDATA%\termie\` on Windows. Linux follows the XDG bas
 
 Mistyped lines are reported to `termie.log` in the state directory.
 
-The command line takes Windows Terminal's layout verbs too: `termie new-tab -d ~/src ; split-pane -H --shell bash` opens a window with that layout (`nt`/`sp` for short; `-V` splits beside and is the default, `-H` below). Scripted windows never overwrite your saved session. For automation and demos, `--drive script.txt` plays a timed key script (`500 key ctrl+shift+m` / `100 type hello`). Windows creates this window without activation. Linux compositors control activation, so a drive window can receive focus there.
+The command line takes Windows Terminal's layout verbs too: `termie new-tab -d ~/src ; split-pane -H --shell bash` opens a window with that layout (`nt`/`sp` for short; `-V` splits beside and is the default, `-H` below). Scripted windows never overwrite your saved session. For automation and demos, `--drive script.txt` plays timed input through the normal handlers: `500 key ctrl+shift+m`, `100 type hello`, `50 pointer 320 140`, and `0 mouse down` / `100 mouse up`. Pointer coordinates are client pixels and may sit outside the window to exercise tab or pane tear-out. Windows creates this window without activation. Linux compositors control activation, so a drive window can receive focus there.
 
 ## build from source
 

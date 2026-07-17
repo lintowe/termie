@@ -1596,6 +1596,15 @@ pub fn clipboard_init(_window: &winit::window::Window) {
     unix_clipboard::init(_window);
 }
 
+/// drop the wayland clipboard while winit's display connection is still alive
+pub fn clipboard_shutdown() {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let clipboard = unix_clipboard::CLIP.with(|clipboard| clipboard.borrow_mut().take());
+        drop(clipboard);
+    }
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn clipboard_set(text: &str) {
     unix_clipboard::CLIP.with(|c| {

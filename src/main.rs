@@ -1959,6 +1959,8 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> CliArgs {
 enum DriveStep {
     Key(ModifiersState, Key),
     Type(String),
+    Pointer(PhysicalPosition<f64>),
+    Mouse(ElementState),
 }
 
 /// a parsed `--drive` script: steps at cumulative offsets from the moment the
@@ -1969,9 +1971,8 @@ struct Drive {
     started: Option<Instant>,
 }
 
-/// parse a drive script: `<delay_ms> key <combo>` or `<delay_ms> type <text>`
-/// per line, delays relative to the previous step; '#' lines are comments.
-/// combos use the keybindings.conf syntax (`ctrl+shift+m`, `enter`, `f7`)
+/// parse a drive script: key, type, pointer, or left-mouse steps with delays
+/// relative to the previous line; '#' lines are comments
 fn parse_drive_script(text: &str) -> Vec<(Duration, DriveStep)> {
     let mut out = Vec::new();
     let mut at = Duration::ZERO;
@@ -1996,6 +1997,20 @@ fn parse_drive_script(text: &str) -> Vec<(Duration, DriveStep)> {
                 }
             }
             "type" => out.push((at, DriveStep::Type(arg.to_string()))),
+            "pointer" => {
+                let mut coords = arg.split_whitespace();
+                if let (Some(x), Some(y), None) = (coords.next(), coords.next(), coords.next())
+                    && let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.parse::<f64>())
+                    && x.is_finite() && y.is_finite()
+                {
+                    out.push((at, DriveStep::Pointer(PhysicalPosition::new(x, y))));
+                }
+            }
+            "mouse" => match arg {
+                "down" => out.push((at, DriveStep::Mouse(ElementState::Pressed))),
+                "up" => out.push((at, DriveStep::Mouse(ElementState::Released))),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -3969,6 +3984,7 @@ impl App {
             CONTENT_PT,
             CHROME_PT,
             self.config.backend,
+            false,
         )?;
         self.configure_renderer(&mut renderer);
         timing("renderer ready (gpu init)");
@@ -4342,6 +4358,21 @@ impl App {
         }
         // shutdown chokepoint (hit on every exit path) — tear down plugins too
         self.kill_plugins();
+    }
+
+    fn release_window_resources(&mut self) {
+        for pw in &mut self.satellites {
+            drop(pw.a11y.take());
+            if let Some(renderer) = pw.renderer.take() {
+                renderer.shutdown();
+            }
+            drop(pw.window.take());
+        }
+        drop(self.pw.a11y.take());
+        if let Some(renderer) = self.pw.renderer.take() {
+            renderer.shutdown();
+        }
+        drop(self.pw.window.take());
     }
 
     /// discover + spawn enabled plugins once, after the window is shown. each
@@ -5202,6 +5233,8 @@ impl App {
         }
         self.flush_session_now();
         self.kill_pool();
+        win::clipboard_shutdown();
+        self.release_window_resources();
         event_loop.exit();
     }
 
@@ -6530,6 +6563,9 @@ impl App {
             // (cur_sat set) just closes that window — satellite_event removes it
             // after the swap-back
             if self.cur_sat.is_none() {
+                self.kill_pool();
+                win::clipboard_shutdown();
+                self.release_window_resources();
                 event_loop.exit();
             }
             return;
@@ -6786,6 +6822,7 @@ impl App {
             CONTENT_PT,
             CHROME_PT,
             self.config.backend,
+            true,
         )?;
         self.configure_renderer(&mut renderer);
         let mut pw = pane_window(Some(window.clone()), Some(renderer), Vec::new());
@@ -8095,6 +8132,24 @@ impl App {
                         let s = ch.to_string();
                         self.inject_key(ModifiersState::empty(), &Key::Character(s.as_str().into()), Some(&s), event_loop);
                     }
+                }
+                DriveStep::Pointer(position) => {
+                    let inside = self.pw.window.as_ref().is_some_and(|window| {
+                        let size = window.inner_size();
+                        position.x >= 0.0
+                            && position.y >= 0.0
+                            && position.x < size.width as f64
+                            && position.y < size.height as f64
+                    });
+                    if inside {
+                        self.on_cursor_entered();
+                    } else {
+                        self.on_cursor_left();
+                    }
+                    self.on_cursor_moved(position);
+                }
+                DriveStep::Mouse(state) => {
+                    self.on_mouse_input(state, MouseButton::Left, event_loop);
                 }
             }
         }
@@ -9847,6 +9902,8 @@ impl ApplicationHandler<UserEvent> for App {
             // show why instead of vanishing — boot failure is almost always gpu
             // init, and a window that silently never appears looks like a hang
             win::show_fatal_error(&format!("{e:#}"));
+            win::clipboard_shutdown();
+            self.release_window_resources();
             event_loop.exit();
         }
     }
@@ -11058,6 +11115,28 @@ mod tests {
         assert!(matches!(&steps[1].1, DriveStep::Type(t) if t == "line 1"));
         assert_eq!(steps[2].0, Duration::from_millis(650));
         assert!(matches!(&steps[2].1, DriveStep::Key(_, Key::Named(NamedKey::Enter))));
+    }
+
+    #[test]
+    fn drive_scripts_parse_pointer_and_left_mouse_steps() {
+        let steps = parse_drive_script(
+            "10 pointer 12.5 -4\n20 mouse down\n30 pointer NaN 2\n40 pointer 1 nope\n50 mouse up\n",
+        );
+        assert_eq!(steps.len(), 3);
+        assert!(matches!(
+            steps[0],
+            (at, DriveStep::Pointer(position))
+                if at == Duration::from_millis(10)
+                    && position == PhysicalPosition::new(12.5, -4.0)
+        ));
+        assert!(matches!(
+            steps[1],
+            (at, DriveStep::Mouse(ElementState::Pressed)) if at == Duration::from_millis(30)
+        ));
+        assert!(matches!(
+            steps[2],
+            (at, DriveStep::Mouse(ElementState::Released)) if at == Duration::from_millis(150)
+        ));
     }
 
     #[test]
