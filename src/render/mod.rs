@@ -3599,6 +3599,38 @@ impl Renderer {
                 }
             }
         }
+        if self.pane_mode {
+            for (_, _, focused, (x, y, pw, ph)) in &pane_info {
+                Self::stroke_rect_a(
+                    &mut out,
+                    (*x, *y, *pw, *ph),
+                    hair * 2.0,
+                    PAPER,
+                    if *focused { 0.85 } else { 0.4 },
+                );
+                let grip_w = (30.0 * self.scale).round().min((*pw - hair * 4.0).max(0.0));
+                let grip_h = (8.0 * self.scale).round();
+                if grip_w >= hair * 8.0 {
+                    let gx = (*x + (*pw - grip_w) / 2.0).round();
+                    Self::push_rect(&mut out, gx, *y, grip_w, grip_h, INK_0, 0.96);
+                    Self::stroke_rect_a(&mut out, (gx, *y, grip_w, grip_h), hair, PAPER, 0.8);
+                    let tick_h = (grip_h - hair * 4.0).max(hair);
+                    let gap = (4.0 * self.scale).round();
+                    let first = (gx + grip_w / 2.0 - gap * 1.5).round();
+                    for i in 0..4 {
+                        Self::push_rect(
+                            &mut out,
+                            first + i as f32 * gap,
+                            *y + hair * 2.0,
+                            hair,
+                            tick_h,
+                            PAPER,
+                            0.9,
+                        );
+                    }
+                }
+            }
+        }
         // bell flash: accent border on any pane that just rang (even single
         // pane), its opacity eased out by the caller so it fades rather than snaps
         for (pv, info) in panes.iter().zip(&pane_info) {

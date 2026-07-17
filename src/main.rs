@@ -7787,7 +7787,11 @@ impl App {
         if let Some(r) = self.pw.renderer.as_mut() {
             r.set_pane_mode(on);
         }
-        self.redraw();
+        if on {
+            self.show_notice("drag a pane to dock it; esc exits");
+        } else {
+            self.redraw();
+        }
     }
 
     /// enter/leave keyboard mark mode: a selection cursor starts on the shell
