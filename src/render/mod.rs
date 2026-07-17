@@ -507,6 +507,14 @@ struct TabLayout {
     newtab_menu: (f32, f32, f32, f32),
 }
 
+pub(crate) struct A11yChromeLayout {
+    pub title_bar: (f32, f32, f32, f32),
+    pub tabs: Vec<(usize, (f32, f32, f32, f32))>,
+    pub new_tab: (f32, f32, f32, f32),
+    pub new_tab_menu: (f32, f32, f32, f32),
+    pub controls: Vec<(Hot, (f32, f32, f32, f32))>,
+}
+
 fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
     x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
 }
@@ -2236,6 +2244,21 @@ impl Renderer {
     /// the new-tab '+' button rect, so the profile menu can anchor under it
     pub fn newtab_rect(&self) -> (f32, f32, f32, f32) {
         self.tab_layout().newtab
+    }
+
+    pub(crate) fn a11y_chrome_layout(&self) -> A11yChromeLayout {
+        let tabs = self.tab_layout();
+        A11yChromeLayout {
+            title_bar: (0.0, 0.0, self.config.width as f32, self.title_bar_h),
+            tabs: tabs.tabs.into_iter().map(|(index, rect, _)| (index, rect)).collect(),
+            new_tab: tabs.newtab,
+            new_tab_menu: tabs.newtab_menu,
+            controls: self
+                .control_rects()
+                .into_iter()
+                .map(|(hot, x0, x1)| (hot, (x0, 0.0, x1 - x0, self.title_bar_h)))
+                .collect(),
+        }
     }
 
     /// single-column geometry for the slide-in settings panel. body baselines

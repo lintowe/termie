@@ -199,6 +199,7 @@ enum Node {
 }
 
 struct Tab {
+    a11y_id: usize,
     focused: usize, // pane id
     root: Option<Node>,
     /// when set, that leaf pane fills the whole content area (tmux-style zoom),
@@ -216,6 +217,7 @@ struct Tab {
 
 fn tab_from_pane(pane: Pane) -> Tab {
     Tab {
+        a11y_id: pane.id,
         focused: pane.id,
         root: Some(Node::Leaf(pane)),
         zoom: None,
@@ -4354,6 +4356,7 @@ impl App {
     fn install_first_tab(&mut self, pane: Pane) {
         let fid = pane.id;
         self.pw.tabs.push(Tab {
+            a11y_id: fid,
             focused: fid,
             root: Some(Node::Leaf(pane)),
             zoom: None,
@@ -5863,7 +5866,7 @@ impl App {
     }
 
     fn build_a11y_update(&self) -> accesskit::TreeUpdate {
-        let bounds = self.pw.window.as_ref().map(|w| {
+        let window_bounds = self.pw.window.as_ref().map(|w| {
             let s = w.inner_size();
             accesskit::Rect::new(0.0, 0.0, s.width as f64, s.height as f64)
         });
@@ -5877,7 +5880,110 @@ impl App {
             })
             .map(|p| a11y::flatten(&p.term))
             .unwrap_or_default();
-        a11y::build_tree(&text, "termie", bounds)
+        let Some(renderer) = self.pw.renderer.as_ref() else {
+            return a11y::build_tree(&text, "termie", window_bounds, None, None, Vec::new(), Vec::new());
+        };
+        let rect = |(x, y, w, h): (f32, f32, f32, f32)| {
+            accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+        };
+        let chrome = renderer.a11y_chrome_layout();
+        let tabs = chrome
+            .tabs
+            .into_iter()
+            .filter_map(|(index, bounds)| {
+                self.pw.tabs.get(index).map(|tab| a11y::TabInfo {
+                    id: tab.a11y_id as u64,
+                    label: tab_label(tab),
+                    selected: index == self.pw.active_tab,
+                    bounds: rect(bounds),
+                })
+            })
+            .collect();
+        let control = |target, label: String, bounds, toggled, has_popup| a11y::ControlInfo {
+            target,
+            label,
+            bounds: rect(bounds),
+            toggled,
+            has_popup,
+        };
+        let mut controls = vec![
+            control(a11y::Target::NewTab, "New tab".to_string(), chrome.new_tab, None, false),
+            control(
+                a11y::Target::NewTabMenu,
+                "New tab profile menu".to_string(),
+                chrome.new_tab_menu,
+                None,
+                true,
+            ),
+        ];
+        controls.extend(chrome.controls.into_iter().filter_map(|(hot, bounds)| {
+            let (target, label, toggled) = match hot {
+                Hot::SplitV => (a11y::Target::SplitVertical, "Split pane vertically", None),
+                Hot::SplitH => (a11y::Target::SplitHorizontal, "Split pane horizontally", None),
+                Hot::PaneMode => (a11y::Target::PaneMode, "Pane mode", Some(self.pw.pane_mode)),
+                Hot::Gear => (a11y::Target::Settings, "Settings", Some(self.pw.settings_open)),
+                Hot::Minimize => (a11y::Target::Minimize, "Minimize window", None),
+                Hot::Maximize => (
+                    a11y::Target::Maximize,
+                    if self.pw.maximized { "Restore window" } else { "Maximize window" },
+                    None,
+                ),
+                Hot::Close => (a11y::Target::Close, "Close window", None),
+                _ => return None,
+            };
+            Some(control(target, label.to_string(), bounds, toggled, false))
+        }));
+        a11y::build_tree(
+            &text,
+            "termie",
+            window_bounds,
+            Some(rect(renderer.content_rect())),
+            Some(rect(chrome.title_bar)),
+            tabs,
+            controls,
+        )
+    }
+
+    fn run_a11y_action(&mut self, request: accesskit::ActionRequest, event_loop: &ActiveEventLoop) {
+        if request.action != accesskit::Action::Click {
+            return;
+        }
+        let Some(target) = a11y::target_for_node(request.target_node) else {
+            return;
+        };
+        let hot = match target {
+            a11y::Target::Tab(id) => {
+                let Some(index) = self.pw.tabs.iter().position(|tab| tab.a11y_id as u64 == id) else {
+                    return;
+                };
+                Hot::Tab(index)
+            }
+            a11y::Target::NewTab => Hot::NewTab,
+            a11y::Target::NewTabMenu => Hot::NewTabMenu,
+            a11y::Target::SplitVertical => Hot::SplitV,
+            a11y::Target::SplitHorizontal => Hot::SplitH,
+            a11y::Target::PaneMode => Hot::PaneMode,
+            a11y::Target::Settings => Hot::Gear,
+            a11y::Target::Minimize => Hot::Minimize,
+            a11y::Target::Maximize => Hot::Maximize,
+            a11y::Target::Close => Hot::Close,
+        };
+        self.button_action(event_loop, hot);
+        self.update_a11y();
+    }
+
+    fn run_window_a11y_action(
+        &mut self,
+        window_id: WindowId,
+        request: accesskit::ActionRequest,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if self.pw.window.as_ref().map(|window| window.id()) == Some(window_id) {
+            self.run_a11y_action(request, event_loop);
+        } else if let Some(index) = self.satellite_for(window_id) {
+            self.with_window(index, |app| app.run_a11y_action(request, event_loop));
+            self.cleanup_empty_windows();
+        }
     }
 
     /// write bytes to the focused pane, or every pane in broadcast mode — the
@@ -5998,6 +6104,7 @@ impl App {
         let pane = self.spawn_handoff_pane(h, cols, rows);
         let fid = pane.id;
         self.pw.tabs.push(Tab {
+            a11y_id: fid,
             focused: fid,
             root: Some(Node::Leaf(pane)),
             zoom: None,
@@ -6047,6 +6154,7 @@ impl App {
             let before = self.focus_identity();
             let fid = pane.id;
             self.pw.tabs.push(Tab {
+                a11y_id: fid,
                 focused: fid,
                 root: Some(Node::Leaf(pane)),
                 zoom: None,
@@ -8269,6 +8377,7 @@ impl App {
                 .or_else(|| leaf_ids.first().copied())
                 .unwrap_or(0);
             self.pw.tabs.push(Tab {
+                a11y_id: focused,
                 focused,
                 root: Some(root),
                 zoom: None,
@@ -9037,6 +9146,7 @@ impl App {
         let before = self.focus_identity();
         let fid = pane.id;
         self.pw.tabs.push(Tab {
+            a11y_id: fid,
             focused: fid,
             root: Some(Node::Leaf(pane)),
             zoom: None,
@@ -11097,8 +11207,9 @@ impl ApplicationHandler<UserEvent> for App {
             },
             UserEvent::Accessibility(e) => match e.window_event {
                 accesskit_winit::WindowEvent::InitialTreeRequested => self.update_window_a11y(e.window_id),
-                // read-only v1: the screen reader can't drive actions
-                accesskit_winit::WindowEvent::ActionRequested(_) => {}
+                accesskit_winit::WindowEvent::ActionRequested(request) => {
+                    self.run_window_a11y_action(e.window_id, request, event_loop);
+                }
                 accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
             },
         }
