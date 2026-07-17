@@ -499,11 +499,18 @@ impl GlyphAtlas {
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         // the glyph's cache key comes from the first run's first glyph
-        let cache_key = self
+        let glyph = self
             .buffer
             .layout_runs()
             .next()
-            .and_then(|run| run.glyphs.first().map(|g| g.physical((0.0, 0.0), 1.0).cache_key))?;
+            .and_then(|run| run.glyphs.first())?;
+        // fontdb can return the requested face's .notdef box as glyph zero
+        // before system fallbacks are loaded; cache it as missing so the lazy
+        // system-font scan can replace it with the real symbol
+        if glyph.glyph_id == 0 {
+            return None;
+        }
+        let cache_key = glyph.physical((0.0, 0.0), 1.0).cache_key;
         let image = self.swash.get_image(&mut self.font_system, cache_key);
         let image = image.as_ref()?;
         let w = image.placement.width;
@@ -1096,6 +1103,37 @@ fn to_alpha(data: &[u8], w: usize, h: usize, content: SwashContent) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_symbol_recovers_after_system_font_scan() {
+        let mut atlas = GlyphAtlas::new(16.0, 13.0, 1.0, None, 1.32);
+        assert!(
+            atlas
+                .get(GlyphKey {
+                    font: FontId::Content,
+                    c: '\u{0378}',
+                    bold: false,
+                    italic: false,
+                })
+                .is_none(),
+            "glyph zero must not render as a tofu bitmap"
+        );
+        let key = GlyphKey {
+            font: FontId::Content,
+            c: '\u{2738}',
+            bold: false,
+            italic: false,
+        };
+        let before = atlas.get(key);
+        atlas.load_system_fonts();
+        atlas.invalidate_missing();
+        let after = atlas.get(key);
+        if before.is_none()
+            && (atlas.has_family("Noto Sans Symbols") || atlas.has_family("Segoe UI Symbol"))
+        {
+            assert!(after.is_some(), "the installed symbol fallback should replace the missing glyph");
+        }
+    }
 
     // on a machine with a color emoji font (Windows ships Segoe UI Emoji) a
     // color glyph must route to the RGBA atlas with non-zero pixels and leave
