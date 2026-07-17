@@ -47,7 +47,7 @@ jobs:
           $env:TERMIE_DRIVE_SURFACELESS = '1'
           Get-ChildItem tests\drive\*.txt | Sort-Object Name | ForEach-Object {
             Write-Host "running $($_.Name)"
-            & target\debug\termie.exe new-tab --shell cmd --drive $_.FullName
+            & target\debug\termie.exe --shell cmd --drive $_.FullName
             if ($LASTEXITCODE -ne 0) {
               throw "$($_.Name) failed with exit code $LASTEXITCODE"
             }
