@@ -54,6 +54,10 @@ const MAX_WARM_FAILS: usize = 10;
 
 type Rect = (f32, f32, f32, f32);
 
+fn wheel_uses_local_scrollback(using_alt: bool, has_scrollback: bool) -> bool {
+    !using_alt || has_scrollback
+}
+
 fn platform_window_attrs(attrs: WindowAttributes) -> WindowAttributes {
     #[cfg(all(unix, not(target_os = "macos")))]
     let attrs = {
@@ -9770,7 +9774,10 @@ impl App {
                             return;
                         }
                         self.wheel_accum -= step;
-                        if !p.term.using_alt {
+                        if wheel_uses_local_scrollback(
+                            p.term.using_alt,
+                            !p.term.grid.scrollback.is_empty(),
+                        ) {
                             p.term.grid.scroll_view(step as isize);
                             self.redraw();
                         } else if p.term.alt_scroll {
@@ -11900,6 +11907,13 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_prefers_an_alternate_screens_existing_scrollback() {
+        assert!(wheel_uses_local_scrollback(false, false));
+        assert!(wheel_uses_local_scrollback(true, true));
+        assert!(!wheel_uses_local_scrollback(true, false));
+    }
 
     #[test]
     fn leaving_a_tab_drop_window_clears_the_cached_target() {
