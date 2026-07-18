@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-07-18
 
 ### Interface
 - **Screen readers can operate the title bar.** The accessibility tree now includes the live tab list, new-tab controls, pane splits, pane mode, settings, minimize, maximize, and close. Tabs keep stable identities while they reorder or move between windows, and every exposed control runs through the same action path as a click.
