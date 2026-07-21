@@ -9,7 +9,7 @@ homepage = "https://github.com/zeo/termie"
 readme = "README.md"
 keywords = ["terminal", "multiplexer", "gpu", "wgpu", "cross-platform"]
 categories = ["command-line-utilities", "gui"]
-rust-version = "1.88"
+rust-version = "1.89"
 
 [dependencies]
 accesskit = "0.24"
