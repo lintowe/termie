@@ -3690,6 +3690,8 @@ struct App {
     pw: PaneWindow,
     /// torn-off windows, each a full PaneWindow (keyed by window id at routing)
     satellites: Vec<PaneWindow>,
+    /// windows removed during input dispatch, kept alive until the callback ends
+    retired_windows: Vec<PaneWindow>,
     /// while a satellite is swapped into self.pw for handling, the index it came
     /// from (and where the main window is parked); None means self.pw is the main
     cur_sat: Option<usize>,
@@ -3896,6 +3898,7 @@ impl App {
             launch_fg: win::foreground_window(),
             pw: pane_window(None, None, Vec::new()),
             satellites: Vec::new(),
+            retired_windows: Vec::new(),
             cur_sat: None,
             next_id: 0,
             mods: ModifiersState::empty(),
@@ -7347,7 +7350,22 @@ impl App {
         {
             std::mem::swap(&mut self.pw, &mut self.satellites[index]);
         }
-        self.satellites.retain(|window| !window.tabs.is_empty());
+        let mut index = 0;
+        while index < self.satellites.len() {
+            if self.satellites[index].tabs.is_empty() {
+                self.retire_satellite(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn retire_satellite(&mut self, index: usize) {
+        let retired = self.satellites.remove(index);
+        if let Some(window) = retired.window.as_ref() {
+            window.set_visible(false);
+        }
+        self.retired_windows.push(retired);
     }
 
     fn create_satellite_window(
@@ -9212,7 +9230,7 @@ impl App {
         // a pane-mode close ('x') that emptied this satellite closes its window
         // (do_close_tab declined to exit the app because cur_sat was set)
         if self.satellites.get(idx).is_some_and(|s| s.tabs.is_empty()) {
-            self.satellites.remove(idx);
+            self.retire_satellite(idx);
         }
         self.cleanup_empty_windows();
     }
@@ -11443,6 +11461,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // resource teardown is unsafe while a cross-window mouse callback is active
+        self.retired_windows.clear();
         // refresh the screen-reader tree (no-op unless an assistive tech is on)
         self.update_all_a11y();
         // top up the warm pool once the window is up (one per tick, no spawn burst)

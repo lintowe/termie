@@ -9,4 +9,11 @@
 0 assert tabs 2
 0 assert window-tabs 0 1
 0 assert window-tabs 1 1
+100 pointer-tab 1 0
+100 mouse down
+100 pointer-tab 0 0
+100 mouse up
+500 assert windows 1
+0 assert tabs 2
+0 assert window-tabs 0 2
 100 exit
