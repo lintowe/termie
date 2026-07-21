@@ -250,11 +250,9 @@ pub fn install(entry: &Entry, plugins_dir: &Path, temp_dir: &Path) -> Result<Man
     let manifest = Manifest::parse(&text, &entry.id)
         .ok_or_else(|| format!("manifest invalid or id != {:?}", entry.id))?;
 
-    // swap into place atomically-ish: remove any existing install, then move
     let dest = plugins_dir.join(&entry.id);
     std::fs::create_dir_all(plugins_dir).map_err(|e| format!("plugins dir: {e}"))?;
-    let _ = std::fs::remove_dir_all(&dest);
-    move_dir(&root, &dest).map_err(|e| format!("install move: {e}"))?;
+    replace_plugin_dir(&root, &dest, &entry.id).map_err(|e| format!("install move: {e}"))?;
     let _ = std::fs::remove_dir_all(&work);
     Ok(manifest)
 }
@@ -290,6 +288,43 @@ fn find_manifest_root(base: &Path) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn replace_plugin_dir(from: &Path, dest: &Path, id: &str) -> std::io::Result<()> {
+    let parent = dest.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "plugin destination has no parent")
+    })?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let suffix = format!("{id}-{}-{nonce}", std::process::id());
+    let staged = parent.join(format!(".termie-install-{suffix}"));
+    let backup = parent.join(format!(".termie-backup-{suffix}"));
+
+    move_dir(from, &staged)?;
+
+    let had_existing = std::fs::symlink_metadata(dest).is_ok();
+    if had_existing && let Err(error) = std::fs::rename(dest, &backup) {
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(error);
+    }
+
+    if let Err(error) = std::fs::rename(&staged, dest) {
+        if had_existing && let Err(rollback_error) = std::fs::rename(&backup, dest) {
+            return Err(std::io::Error::other(format!(
+                "failed to activate plugin: {error}; failed to restore previous plugin: {rollback_error}; backup remains at {}",
+                backup.display()
+            )));
+        }
+        let _ = std::fs::remove_dir_all(&staged);
+        return Err(error);
+    }
+
+    if had_existing {
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+    Ok(())
 }
 
 /// move a directory, falling back to recursive copy + delete across volumes
@@ -383,6 +418,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn plugin_replacement_preserves_the_previous_install_until_staged() {
+        let base = temp_subdir("replacement");
+        let dest = base.join("pet");
+        let incoming = base.join("incoming");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("version"), "old").unwrap();
+
+        assert!(replace_plugin_dir(&base.join("missing"), &dest, "pet").is_err());
+        assert_eq!(std::fs::read_to_string(dest.join("version")).unwrap(), "old");
+
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::write(incoming.join("version"), "new").unwrap();
+        replace_plugin_dir(&incoming, &dest, "pet").unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("version")).unwrap(), "new");
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
