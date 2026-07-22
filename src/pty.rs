@@ -1202,6 +1202,33 @@ mod live_tests_unix {
         assert!(text.contains("termie-itest-OK"), "output not seen; got: {text:?}");
     }
 
+    #[test]
+    #[ignore = "spawns a real shell; run locally with `cargo test -- --ignored`"]
+    fn killing_pty_reaps_a_background_child() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let marker = std::env::temp_dir().join(format!("termie-pty-child-{}-{nonce}", std::process::id()));
+        let command = format!("sleep 60 & printf %s \"$!\" > '{}' && wait", marker.display());
+        let argv = ["/bin/sh", "-c", &command].map(String::from);
+        let mut pty =
+            Pty::spawn(24, 80, ShellKind::Auto, false, None, Some(&argv), None, "termie", 0, 0)
+                .expect("spawn pty");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child_pid: u32 = std::fs::read_to_string(&marker).expect("child pid").parse().expect("numeric child pid");
+        pty.kill();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while std::path::Path::new(&format!("/proc/{child_pid}")).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(marker);
+        assert!(!std::path::Path::new(&format!("/proc/{child_pid}")).exists());
+    }
+
     fn assert_shell_lifecycle(shell: ShellKind, executable: &str) {
         if find_in_path(executable).is_none() {
             eprintln!("skip: no {executable} on PATH");
