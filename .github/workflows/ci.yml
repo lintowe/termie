@@ -40,11 +40,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --locked
       - name: test
-        run: cargo test
-      - name: installer check
-        run: cargo check --locked --manifest-path setup/Cargo.toml
+        run: cargo test --locked
+      - name: installer clippy
+        run: cargo clippy --locked --manifest-path setup/Cargo.toml --all-targets -- -D warnings
       - name: multi-window drag integration
         shell: powershell
         run: |
@@ -58,7 +58,7 @@ jobs:
             }
           }
       - name: clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --locked -- -D warnings
 
   # the same build + test + clippy gate for the linux target. gpu-dependent
   # tests skip themselves when the runner has no adapter, so this passes on a
@@ -106,9 +106,9 @@ jobs:
           rustup toolchain install 1.89.0 --profile minimal
           rustup run 1.89.0 cargo check --locked
       - name: build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --locked
       - name: test
-        run: cargo test
+        run: cargo test --locked
       - name: bubblewrap capability
         id: bubblewrap
         run: |
@@ -127,7 +127,7 @@ jobs:
             cargo test -- --ignored --test-threads=1 --skip plugin::sandbox::tests::sandboxed_child_cannot_see_home_or_host_environment
           fi
       - name: clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --locked -- -D warnings
 
   # security advisory scan of the dependency tree (RUSTSEC database)
   audit:
