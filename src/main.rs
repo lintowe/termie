@@ -2501,8 +2501,12 @@ fn monitor_rects(event_loop: &ActiveEventLoop) -> Vec<(i32, i32, u32, u32)> {
 
 /// overlap area of two (x, y, w, h) rects in physical pixels
 fn rect_overlap(a: (i32, i32, u32, u32), b: (i32, i32, u32, u32)) -> i64 {
-    let w = ((a.0 + a.2 as i32).min(b.0 + b.2 as i32) - a.0.max(b.0)).max(0) as i64;
-    let h = ((a.1 + a.3 as i32).min(b.1 + b.3 as i32) - a.1.max(b.1)).max(0) as i64;
+    let (ax0, ay0) = (i64::from(a.0), i64::from(a.1));
+    let (bx0, by0) = (i64::from(b.0), i64::from(b.1));
+    let w = (ax0 + i64::from(a.2)).min(bx0 + i64::from(b.2)) - ax0.max(bx0);
+    let h = (ay0 + i64::from(a.3)).min(by0 + i64::from(b.3)) - ay0.max(by0);
+    let w = w.max(0);
+    let h = h.max(0);
     w * h
 }
 
@@ -12717,6 +12721,7 @@ mod tests {
         // a window off every monitor (its display is gone) is centered on the primary
         let two = [(0, 0, 1920u32, 1080u32), (1920, 0, 1280, 1024)];
         assert_eq!(clamp_window_bounds(&two, (-4000, -4000, 1000, 700)), (460, 190, 1000, 700));
+        assert_eq!(clamp_window_bounds(&one, (0, 0, u32::MAX, u32::MAX)), (0, 0, 1920, 1080));
     }
 
     #[test]
