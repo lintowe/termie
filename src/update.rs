@@ -11,6 +11,12 @@ use crate::plugin::market::{bounded_output, quiet_command, BoundedOutputError};
 const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/latest";
 const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_RELEASE_ASSET_BYTES: usize = 128 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MAX_UPDATE_ARCHIVE_LISTING_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const MAX_UPDATE_ARCHIVE_ENTRIES: usize = 4096;
+#[cfg(target_os = "linux")]
+const MAX_UPDATE_INSTALLER_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn update_curl() -> std::process::Command {
     let mut command = quiet_command("curl");
@@ -243,6 +249,40 @@ fn archive_path_is_safe(path: &str, root: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn validate_update_archive_listing(bytes: Vec<u8>, root: &str) -> Result<usize, String> {
+    let listing = String::from_utf8(bytes).map_err(|_| "archive contains non-UTF-8 paths")?;
+    let mut entries = 0;
+    for path in listing.lines() {
+        if !archive_path_is_safe(path, root) {
+            return Err("archive contains an unsafe path".into());
+        }
+        entries += 1;
+        if entries > MAX_UPDATE_ARCHIVE_ENTRIES {
+            return Err("archive contains too many entries".into());
+        }
+    }
+    (entries > 0).then_some(entries).ok_or_else(|| "archive is empty".into())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_update_archive_types(bytes: Vec<u8>, expected: usize) -> Result<(), String> {
+    let listing = String::from_utf8(bytes).map_err(|_| "archive contains non-UTF-8 metadata")?;
+    let mut entries = 0;
+    for line in listing.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        entries += 1;
+        if !matches!(line.as_bytes().first(), Some(b'-' | b'd')) {
+            return Err("archive contains a link or special file".into());
+        }
+    }
+    (entries == expected)
+        .then_some(())
+        .ok_or_else(|| "archive metadata does not match its file list".into())
+}
+
+#[cfg(target_os = "linux")]
 fn reject_symlinks(dir: &std::path::Path) -> Result<(), String> {
     for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -264,30 +304,26 @@ fn install_linux_archive(
     prefix: &std::path::Path,
 ) -> Result<PathBuf, String> {
     let root = format!("termie-{}-linux-x86_64", u.version);
-    let listing = quiet_command("/bin/tar")
-        .args(["-tzf"])
-        .arg(archive)
-        .output()
-        .map_err(|e| format!("couldn't inspect update: {e}"))?;
+    let mut listing = quiet_command("/bin/tar");
+    listing.args(["-tzf"]).arg(archive);
+    let listing = bounded_output(&mut listing, MAX_UPDATE_ARCHIVE_LISTING_BYTES).map_err(|error| match error {
+        BoundedOutputError::Io(error) => format!("couldn't inspect update: {error}"),
+        BoundedOutputError::Limit => "update archive metadata exceeds the 16 MiB limit".to_string(),
+    })?;
     if !listing.status.success() {
         return Err("couldn't inspect update archive".into());
     }
-    let listing = String::from_utf8(listing.stdout).map_err(|_| "archive contains non-UTF-8 paths")?;
-    if listing.is_empty() || listing.lines().any(|path| !archive_path_is_safe(path, &root)) {
-        return Err("archive contains an unsafe path".into());
-    }
-    let kinds = quiet_command("/bin/tar")
-        .args(["-tvzf"])
-        .arg(archive)
-        .output()
-        .map_err(|e| format!("couldn't inspect update types: {e}"))?;
-    if !kinds.status.success()
-        || String::from_utf8_lossy(&kinds.stdout)
-            .lines()
-            .any(|line| !matches!(line.as_bytes().first(), Some(b'-' | b'd')))
-    {
+    let entries = validate_update_archive_listing(listing.stdout, &root)?;
+    let mut kinds = quiet_command("/bin/tar");
+    kinds.args(["-tvzf"]).arg(archive);
+    let kinds = bounded_output(&mut kinds, MAX_UPDATE_ARCHIVE_LISTING_BYTES).map_err(|error| match error {
+        BoundedOutputError::Io(error) => format!("couldn't inspect update types: {error}"),
+        BoundedOutputError::Limit => "update archive metadata exceeds the 16 MiB limit".to_string(),
+    })?;
+    if !kinds.status.success() {
         return Err("archive contains a link or special file".into());
     }
+    validate_update_archive_types(kinds.stdout, entries)?;
     let dir = archive.parent().ok_or("invalid update path")?;
     let status = quiet_command("/bin/tar")
         .args(["--no-same-owner", "--no-same-permissions", "-xzf"])
@@ -305,11 +341,12 @@ fn install_linux_archive(
     if !installer.is_file() {
         return Err("update archive has no installer".into());
     }
-    let out = quiet_command("/bin/sh")
-        .arg(installer)
-        .arg(prefix)
-        .output()
-        .map_err(|e| format!("couldn't run update installer: {e}"))?;
+    let mut installer_command = quiet_command("/bin/sh");
+    installer_command.arg(installer).arg(prefix);
+    let out = bounded_output(&mut installer_command, MAX_UPDATE_INSTALLER_OUTPUT_BYTES).map_err(|error| match error {
+        BoundedOutputError::Io(error) => format!("couldn't run update installer: {error}"),
+        BoundedOutputError::Limit => "update installer output exceeds the 1 MiB limit".to_string(),
+    })?;
     if !out.status.success() {
         let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if reason.is_empty() { "update installer failed".into() } else { reason });
@@ -505,6 +542,23 @@ mod tests {
         assert!(!archive_path_is_safe("termie-1.2.3-linux-x86_64/../outside", root));
         assert!(!archive_path_is_safe("other/bin/termie", root));
         assert!(!archive_path_is_safe("/termie-1.2.3-linux-x86_64/bin/termie", root));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_archive_listing_limits_entries_and_matches_types() {
+        let root = "termie-1.2.3-linux-x86_64";
+        let listing = format!("{root}/bin/termie\n{root}/install.sh\n");
+        assert_eq!(validate_update_archive_listing(listing.into_bytes(), root), Ok(2));
+        assert!(validate_update_archive_types(b"- file\n- file\n".to_vec(), 2).is_ok());
+        assert!(validate_update_archive_types(b"- file\n".to_vec(), 2).is_err());
+
+        let oversized = std::iter::repeat_n(format!("{root}/file\n"), MAX_UPDATE_ARCHIVE_ENTRIES + 1)
+            .collect::<String>();
+        assert_eq!(
+            validate_update_archive_listing(oversized.into_bytes(), root),
+            Err("archive contains too many entries".into())
+        );
     }
 
     #[cfg(target_os = "linux")]
