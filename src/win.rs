@@ -447,7 +447,7 @@ fn load_kwin_script(name: &str, script: &str) -> Option<(u32, std::path::PathBuf
 
 #[cfg(target_os = "linux")]
 fn run_kwin_script(id: u32) -> bool {
-    let mut command = std::process::Command::new("gdbus");
+    let mut command = quiet_command("gdbus");
     command
         .args([
             "call",
@@ -468,7 +468,7 @@ fn run_kwin_script(id: u32) -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn unload_kwin_script(name: &str) {
-    let mut command = std::process::Command::new("gdbus");
+    let mut command = quiet_command("gdbus");
     command
         .args([
             "call",
@@ -556,7 +556,7 @@ fn launcher_progress_properties(state: u8, pct: u8) -> String {
 
 #[cfg(target_os = "linux")]
 fn emit_launcher_update(properties: &str) {
-    let mut command = std::process::Command::new("gdbus");
+    let mut command = quiet_command("gdbus");
     command
         .args([
             "emit",
@@ -785,7 +785,7 @@ pub fn update_jumplist(tasks: &[(String, String)]) {
     if let Some(dir) = desktop.parent() {
         let dir = dir.to_path_buf();
         std::thread::spawn(move || {
-            let _ = std::process::Command::new("update-desktop-database")
+            let _ = quiet_command("update-desktop-database")
                 .arg(dir)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -945,7 +945,7 @@ pub fn open_url(url: &str) -> bool {
     if !web_url_is_safe(url) {
         return false;
     }
-    std::process::Command::new("xdg-open")
+    quiet_command("xdg-open")
         .arg(url)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1241,7 +1241,7 @@ fn kde_terminal_value(key: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn write_kde_terminal_value(key: &str, value: Option<&str>) -> bool {
-    let mut command = std::process::Command::new("kwriteconfig6");
+    let mut command = quiet_command("kwriteconfig6");
     command.args([
         "--file",
         "kdeglobals",
@@ -1672,7 +1672,7 @@ pub fn show_fatal_error(msg: &str) {
 #[cfg(unix)]
 pub fn show_fatal_error(msg: &str) {
     eprintln!("termie: GPU initialization failed: {msg}");
-    let _ = std::process::Command::new("zenity")
+    let _ = quiet_command("zenity")
         .args(["--error", "--title", "termie \u{2014} GPU initialization failed", "--text", msg])
         .spawn();
 }

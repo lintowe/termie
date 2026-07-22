@@ -130,7 +130,22 @@ pub(crate) fn quiet_command(program: &str) -> Command {
 }
 #[cfg(not(windows))]
 pub(crate) fn quiet_command(program: &str) -> Command {
-    Command::new(program)
+    let path = Path::new(program);
+    if path.is_absolute() {
+        return Command::new(path);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if !dir.is_absolute() {
+                continue;
+            }
+            let candidate = dir.join(program);
+            if candidate.is_file() {
+                return Command::new(candidate);
+            }
+        }
+    }
+    Command::new("")
 }
 
 fn archive_path_is_safe(path: &str) -> bool {
