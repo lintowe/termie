@@ -510,6 +510,7 @@ impl Pty {
                     break;
                 }
             }
+            writer_work.close();
         });
 
         Ok(Pty {
@@ -692,6 +693,7 @@ impl Pty {
                     break;
                 }
             }
+            writer_work.close();
         });
         Pty {
             master: Box::new(handoff_pty::HandoffMaster::new(signal, reference, server)),
