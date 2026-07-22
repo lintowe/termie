@@ -27,7 +27,7 @@ mod uiview;
 #[cfg(feature = "microbench")]
 mod microbench;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -107,6 +107,22 @@ fn read_text(reader: impl Read, limit: usize) -> Option<String> {
 
 fn read_text_file(path: &Path, limit: usize) -> Option<String> {
     read_text(std::fs::File::open(path).ok()?, limit)
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = path.with_extension(format!("termie-{}-{nonce}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let result = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = result.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn wheel_uses_local_scrollback(using_alt: bool, has_scrollback: bool) -> bool {
@@ -3368,7 +3384,7 @@ fn save_plugin_states(map: &std::collections::HashMap<String, PluginState>) {
         }
         s.push('\n');
     }
-    let _ = std::fs::write(&path, s);
+    let _ = write_atomic(&path, s.as_bytes());
 }
 
 /// an installed plugin discovered on disk, with its validated manifest, the
@@ -8394,7 +8410,7 @@ impl App {
             // on by default; persist only the opt-out
             let _ = writeln!(s, "update_check=false");
         }
-        let _ = std::fs::write(&path, s);
+        let _ = write_atomic(&path, s.as_bytes());
     }
 
     /// build a snapshot of the current window's tabs + split tree for persistence
@@ -8477,15 +8493,7 @@ impl App {
             let _ = std::fs::create_dir_all(dir);
         }
         let text = snap.to_json_string();
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, &text).is_ok() {
-            // rename-over-existing is atomic enough on windows; on the rare
-            // failure (target briefly open) fall back to a direct write
-            if std::fs::rename(&tmp, &path).is_err() {
-                let _ = std::fs::write(&path, &text);
-                let _ = std::fs::remove_file(&tmp);
-            }
-        }
+        let _ = write_atomic(&path, text.as_bytes());
     }
 
     /// flush the current session now (clean-exit path) so the latest layout —
@@ -12034,6 +12042,19 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("termie-atomic-{}-{nonce}", std::process::id()));
+        write_atomic(&path, b"old").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn pty_output_backpressure_releases_after_event_handling() {
