@@ -85,10 +85,20 @@ pub fn parse_index(text: &str) -> Vec<Entry> {
 /// gh.exe would win. system32 first (curl/tar ship there), then absolute PATH
 /// entries only; unresolved names become a clean spawn failure, never a hunt
 #[cfg(windows)]
+pub(crate) fn system_executable(name: &str) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buf = vec![0; 32_768];
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    (len > 0 && len < buf.len()).then(|| {
+        std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])).join(format!("{name}.exe"))
+    })
+}
+
+#[cfg(windows)]
 fn resolve_helper(name: &str) -> std::path::PathBuf {
     let exe = format!("{name}.exe");
-    let sys32 = std::env::var_os("SystemRoot")
-        .map(|r| std::path::PathBuf::from(r).join("System32").join(&exe));
+    let sys32 = system_executable(name);
     if let Some(p) = &sys32
         && p.is_file()
     {
@@ -105,7 +115,7 @@ fn resolve_helper(name: &str) -> std::path::PathBuf {
             }
         }
     }
-    sys32.unwrap_or_else(|| std::path::PathBuf::from(exe))
+    sys32.unwrap_or_default()
 }
 
 /// build a console command that won't flash a window: termie is a gui app, so a

@@ -20,7 +20,7 @@ use std::path::Path;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use crate::plugin::market::ProcessTree;
+use crate::plugin::market::{system_executable, ProcessTree};
 use windows::core::{Error as WinError, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAGS,
@@ -311,9 +311,7 @@ fn build_cmdline(program: &Path, args: &[String]) -> Vec<u16> {
 /// appcontainer can load the plugin exe. idempotent; failures are non-fatal and
 /// surface later as a launch error
 fn grant_app_packages(dir: &Path) {
-    let Some(icacls) = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .map(|root| root.join("System32").join("icacls.exe"))
+    let Some(icacls) = system_executable("icacls")
         .filter(|path| path.is_file())
     else {
         return;
