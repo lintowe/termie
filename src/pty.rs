@@ -780,14 +780,14 @@ mod handoff_pty {
     impl MasterPty for HandoffMaster {
         fn resize(&self, size: PtySize) -> anyhow::Result<()> {
             let packet = [SIGNAL_RESIZE, size.cols, size.rows];
-            let mut f = self.signal.lock().unwrap();
+            let mut f = self.signal.lock().map_err(|_| anyhow::anyhow!("handoff resize channel is unavailable"))?;
             f.write_all(bytemuck::cast_slice(&packet))?;
             f.flush()?;
-            *self.size.lock().unwrap() = size;
+            *self.size.lock().map_err(|_| anyhow::anyhow!("handoff size state is unavailable"))? = size;
             Ok(())
         }
         fn get_size(&self) -> anyhow::Result<PtySize> {
-            Ok(*self.size.lock().unwrap())
+            Ok(*self.size.lock().map_err(|_| anyhow::anyhow!("handoff size state is unavailable"))?)
         }
         // reader/writer were taken directly from the handoff pipes when the
         // Pty was built; nothing should come back for a second copy
