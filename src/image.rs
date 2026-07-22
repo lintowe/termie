@@ -3,6 +3,8 @@
 //! width/height from the kitty command are ignored for it
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// process-global, monotonic key assigned to each decoded image so the GPU atlas
@@ -411,9 +413,26 @@ pub(crate) fn decode_png(data: &[u8]) -> Option<Image> {
     Some(Image { key: 0, width: w, height: h, rgba })
 }
 
+fn read_limited(reader: impl Read, limit: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(limit as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= limit).then_some(bytes)
+}
+
+pub fn load_png(path: &Path) -> Option<Image> {
+    let file = std::fs::File::open(path).ok()?;
+    decode_png(&read_limited(file, MAX_IMAGE_BYTES)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_reader_refuses_the_first_byte_over_limit() {
+        assert_eq!(read_limited(std::io::Cursor::new(b"abc"), 3), Some(b"abc".to_vec()));
+        assert_eq!(read_limited(std::io::Cursor::new(b"abcd"), 3), None);
+    }
 
     #[test]
     fn decodes_rgb_to_rgba_in_one_shot() {

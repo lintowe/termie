@@ -4022,7 +4022,7 @@ impl App {
         renderer.set_min_contrast(settings.min_contrast);
         renderer.set_ligatures(settings.ligatures);
         if let Some(path) = settings.background_image.as_deref() {
-            match std::fs::read(path).ok().and_then(|bytes| image::decode_png(&bytes)) {
+            match image::load_png(std::path::Path::new(path)) {
                 Some(image) => {
                     let image = image::downscale_rgba(&image.rgba, image.width, image.height, 1024);
                     renderer.set_background_image(Some(image), settings.background_image_opacity);
