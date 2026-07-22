@@ -311,7 +311,14 @@ fn build_cmdline(program: &Path, args: &[String]) -> Vec<u16> {
 /// appcontainer can load the plugin exe. idempotent; failures are non-fatal and
 /// surface later as a launch error
 fn grant_app_packages(dir: &Path) {
-    let _ = Command::new("icacls")
+    let Some(icacls) = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join("System32").join("icacls.exe"))
+        .filter(|path| path.is_file())
+    else {
+        return;
+    };
+    let _ = Command::new(icacls)
         .arg(dir)
         .arg("/grant")
         .arg(format!("{ALL_APP_PACKAGES_SID}:(OI)(CI)(RX)"))
