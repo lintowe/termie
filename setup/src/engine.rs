@@ -536,7 +536,13 @@ fn remove_msi(product: &str) {
     // MSI was per-user). if the product is still registered, re-run with a
     // UAC prompt via ShellExecute "runas" so the dual-Start-menu case can't
     // survive a successful native install
-    let _ = std::process::Command::new("msiexec")
+    let msiexec = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join("System32").join("msiexec.exe"));
+    let Some(msiexec) = msiexec.filter(|path| path.is_file()) else {
+        return;
+    };
+    let _ = std::process::Command::new(msiexec)
         .args(["/x", product, "/qn", "/norestart"])
         .status();
     if find_machine_msi().as_deref() == Some(product) {
