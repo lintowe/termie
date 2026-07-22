@@ -154,6 +154,26 @@ struct Painter {
     dpi: f32,
 }
 
+#[derive(Clone, Copy)]
+struct TextStyle {
+    px_size: i32,
+    color: COLORREF,
+    bold: bool,
+    track: i32,
+}
+
+#[derive(Clone, Copy)]
+struct UiRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+fn text_style(px_size: i32, color: COLORREF, bold: bool, track: i32) -> TextStyle {
+    TextStyle { px_size, color, bold, track }
+}
+
 impl Painter {
     fn px(&self, v: i32) -> i32 {
         (v as f32 * self.dpi) as i32
@@ -220,13 +240,13 @@ impl Painter {
 
     /// draw `text` at logical (x, y); tracking adds letterspacing in device px.
     /// returns the end x in logical units
-    fn text(&self, x: i32, y: i32, text: &str, px_size: i32, c: COLORREF, bold: bool, track: i32) -> i32 {
+    fn text(&self, x: i32, y: i32, text: &str, style: TextStyle) -> i32 {
         unsafe {
-            let f = self.font(px_size, bold);
+            let f = self.font(style.px_size, style.bold);
             let old: HGDIOBJ = SelectObject(self.hdc, HGDIOBJ(f as *mut core::ffi::c_void));
             SetBkMode(self.hdc, TRANSPARENT);
-            SetTextColor(self.hdc, c);
-            SetTextCharacterExtra(self.hdc, (track as f32 * self.dpi) as i32);
+            SetTextColor(self.hdc, style.color);
+            SetTextCharacterExtra(self.hdc, (style.track as f32 * self.dpi) as i32);
             let wtext: Vec<u16> = text.encode_utf16().collect();
             let _ = TextOutW(self.hdc, self.px(x), self.px(y), &wtext);
             let mut size = windows::Win32::Foundation::SIZE::default();
@@ -251,27 +271,24 @@ impl Painter {
         }
     }
 
-    fn text_centered(&self, cx: i32, y: i32, text: &str, px_size: i32, c: COLORREF, bold: bool, track: i32) {
-        let w = self.text_w(text, px_size, bold, track);
-        self.text(cx - w / 2, y, text, px_size, c, bold, track);
+    fn text_centered(&self, cx: i32, y: i32, text: &str, style: TextStyle) {
+        let w = self.text_w(text, style.px_size, style.bold, style.track);
+        self.text(cx - w / 2, y, text, style);
     }
 
-    fn button(&self, x: i32, y: i32, w: i32, h: i32, label: &str, primary: bool, hovered: bool) {
+    fn button(&self, rect: UiRect, label: &str, primary: bool, hovered: bool) {
         if primary {
-            self.fill(x, y, w, h, if hovered { PAPER } else { PAPER_DIM });
+            self.fill(rect.x, rect.y, rect.w, rect.h, if hovered { PAPER } else { PAPER_DIM });
             let tw = self.text_w(label, 13, false, 3);
-            self.text(x + (w - tw) / 2, y + (h - 16) / 2, label, 13, INK0, false, 3);
+            self.text(rect.x + (rect.w - tw) / 2, rect.y + (rect.h - 16) / 2, label, TextStyle { px_size: 13, color: INK0, bold: false, track: 3 });
         } else {
-            self.stroke(x, y, w, h, if hovered { PAPER } else { RULE2 });
+            self.stroke(rect.x, rect.y, rect.w, rect.h, if hovered { PAPER } else { RULE2 });
             let tw = self.text_w(label, 13, false, 3);
             self.text(
-                x + (w - tw) / 2,
-                y + (h - 16) / 2,
+                rect.x + (rect.w - tw) / 2,
+                rect.y + (rect.h - 16) / 2,
                 label,
-                13,
-                if hovered { TEXT2 } else { MUTE },
-                false,
-                3,
+                TextStyle { px_size: 13, color: if hovered { TEXT2 } else { MUTE }, bold: false, track: 3 },
             );
         }
     }
@@ -287,31 +304,31 @@ pub fn paint(hdc: HDC, dpi: f32, s: &State) {
 
     // wordmark: the app's inverted ">-<" badge + name (matches the title bar)
     p.fill(24, 18, 40, 26, PAPER);
-    p.text(31, 22, ">_<", 13, INK0, true, 0);
-    p.text(76, 21, "termie", 17, TEXT2, false, 0);
+    p.text(31, 22, ">_<", text_style(13, INK0, true, 0));
+    p.text(76, 21, "termie", text_style(17, TEXT2, false, 0));
     // close ×
     let close_hover = s.hover == Some(Hit::Close);
     if close_hover {
         p.fill(WIN_W - 44, 12, 32, 32, SURFACE);
     }
-    p.text_centered(WIN_W - 28, 19, "\u{00d7}", 15, if close_hover { TEXT2 } else { MUTE }, false, 0);
+    p.text_centered(WIN_W - 28, 19, "\u{00d7}", text_style(15, if close_hover { TEXT2 } else { MUTE }, false, 0));
 
     p.rule(0, 64, WIN_W, RULE);
-    p.text(24, 80, "GPU TERMINAL MULTIPLEXER", 11, MUTE, false, 3);
+    p.text(24, 80, "GPU TERMINAL MULTIPLEXER", text_style(11, MUTE, false, 3));
     let vw = p.text_w(&payload::APP_VERSION.to_uppercase(), 11, false, 3);
-    p.text(WIN_W - 24 - vw, 80, &payload::APP_VERSION.to_uppercase(), 11, MUTE, false, 3);
+    p.text(WIN_W - 24 - vw, 80, &payload::APP_VERSION.to_uppercase(), text_style(11, MUTE, false, 3));
 
     let footer = "MIT / APACHE-2.0 \u{b7} PER-USER \u{b7} NO ADMIN";
-    p.text(24, WIN_H - 27, footer, 10, MUTE, false, 2);
+    p.text(24, WIN_H - 27, footer, text_style(10, MUTE, false, 2));
     let rot = "ROT";
     let rw = p.text_w(rot, 10, false, 2);
-    p.text(WIN_W - 24 - rw, WIN_H - 27, rot, 10, MUTE, false, 2);
+    p.text(WIN_W - 24 - rw, WIN_H - 27, rot, text_style(10, MUTE, false, 2));
 
     match s.page {
         Page::Options => {
-            p.text(24, 122, "INSTALL TO", 11, MUTE, false, 3);
+            p.text(24, 122, "INSTALL TO", text_style(11, MUTE, false, 3));
             let dir = engine::install_dir();
-            p.text(24, 142, &dir.to_string_lossy(), 12, TEXT, false, 0);
+            p.text(24, 142, &dir.to_string_lossy(), text_style(12, TEXT, false, 0));
             for (i, (hit, label, on)) in [
                 (Hit::TogglePath, "add to PATH", s.opts.add_path),
                 (Hit::ToggleStart, "start menu shortcut", s.opts.start_menu),
@@ -327,38 +344,38 @@ pub fn paint(hdc: HDC, dpi: f32, s: &State) {
                 if on {
                     p.fill(43, y + 3, 8, 8, PAPER);
                 }
-                p.text(66, y - 1, label, 13, if hov { TEXT2 } else { TEXT }, false, 0);
+                p.text(66, y - 1, label, text_style(13, if hov { TEXT2 } else { TEXT }, false, 0));
             }
             if s.old_msi {
-                p.text(40, 288, "an older MSI install will be removed first", 10, MUTE, false, 0);
+                p.text(40, 288, "an older MSI install will be removed first", text_style(10, MUTE, false, 0));
             }
-            p.button(WIN_W / 2 - 100, 310, 200, 40, "INSTALL", true, s.hover == Some(Hit::Install));
+            p.button(UiRect { x: WIN_W / 2 - 100, y: 310, w: 200, h: 40 }, "INSTALL", true, s.hover == Some(Hit::Install));
         }
         Page::Progress => {
-            p.text_centered(WIN_W / 2, 150, if s.auto_update { "UPDATING" } else { "INSTALLING" }, 13, TEXT2, false, 4);
+            p.text_centered(WIN_W / 2, 150, if s.auto_update { "UPDATING" } else { "INSTALLING" }, text_style(13, TEXT2, false, 4));
             // hairline track + paper fill
             let tx = 60;
             let tw = WIN_W - 120;
             p.fill(tx, 190, tw, 3, RULE);
             p.fill(tx, 190, (tw as f32 * s.progress.clamp(0.0, 1.0)) as i32, 3, PAPER);
-            p.text_centered(WIN_W / 2, 214, &s.detail, 11, MUTE, false, 0);
+            p.text_centered(WIN_W / 2, 214, &s.detail, text_style(11, MUTE, false, 0));
         }
         Page::Done => {
-            p.text_centered(WIN_W / 2, 140, "INSTALLED", 13, TEXT2, false, 4);
+            p.text_centered(WIN_W / 2, 140, "INSTALLED", text_style(13, TEXT2, false, 4));
             let dir = engine::install_dir();
-            p.text_centered(WIN_W / 2, 168, &dir.to_string_lossy(), 11, MUTE, false, 0);
-            p.button(WIN_W / 2 - 150, 240, 140, 40, "LAUNCH", true, s.hover == Some(Hit::Launch));
-            p.button(WIN_W / 2 + 10, 240, 140, 40, "CLOSE", false, s.hover == Some(Hit::Quit));
+            p.text_centered(WIN_W / 2, 168, &dir.to_string_lossy(), text_style(11, MUTE, false, 0));
+            p.button(UiRect { x: WIN_W / 2 - 150, y: 240, w: 140, h: 40 }, "LAUNCH", true, s.hover == Some(Hit::Launch));
+            p.button(UiRect { x: WIN_W / 2 + 10, y: 240, w: 140, h: 40 }, "CLOSE", false, s.hover == Some(Hit::Quit));
         }
         Page::Error => {
-            p.text_centered(WIN_W / 2, 140, "INSTALL FAILED", 13, TEXT2, false, 4);
+            p.text_centered(WIN_W / 2, 140, "INSTALL FAILED", text_style(13, TEXT2, false, 4));
             // naive wrap at ~64 chars keeps the message on the window
             let mut y = 172;
             let msg = s.error.clone();
             let mut line = String::new();
             for word in msg.split_whitespace() {
                 if line.len() + word.len() + 1 > 64 {
-                    p.text_centered(WIN_W / 2, y, &line, 11, MUTE, false, 0);
+                    p.text_centered(WIN_W / 2, y, &line, text_style(11, MUTE, false, 0));
                     y += 18;
                     line.clear();
                 }
@@ -368,20 +385,20 @@ pub fn paint(hdc: HDC, dpi: f32, s: &State) {
                 line.push_str(word);
             }
             if !line.is_empty() {
-                p.text_centered(WIN_W / 2, y, &line, 11, MUTE, false, 0);
+                p.text_centered(WIN_W / 2, y, &line, text_style(11, MUTE, false, 0));
             }
-            p.button(WIN_W / 2 - 70, 300, 140, 40, "CLOSE", false, s.hover == Some(Hit::Quit));
+            p.button(UiRect { x: WIN_W / 2 - 70, y: 300, w: 140, h: 40 }, "CLOSE", false, s.hover == Some(Hit::Quit));
         }
         Page::RemoveConfirm => {
-            p.text_centered(WIN_W / 2, 140, "REMOVE TERMIE?", 13, TEXT2, false, 4);
-            p.text_centered(WIN_W / 2, 168, "settings and session files are kept", 11, MUTE, false, 0);
-            p.button(WIN_W / 2 - 150, 240, 140, 40, "REMOVE", true, s.hover == Some(Hit::Remove));
-            p.button(WIN_W / 2 + 10, 240, 140, 40, "CANCEL", false, s.hover == Some(Hit::Cancel));
+            p.text_centered(WIN_W / 2, 140, "REMOVE TERMIE?", text_style(13, TEXT2, false, 4));
+            p.text_centered(WIN_W / 2, 168, "settings and session files are kept", text_style(11, MUTE, false, 0));
+            p.button(UiRect { x: WIN_W / 2 - 150, y: 240, w: 140, h: 40 }, "REMOVE", true, s.hover == Some(Hit::Remove));
+            p.button(UiRect { x: WIN_W / 2 + 10, y: 240, w: 140, h: 40 }, "CANCEL", false, s.hover == Some(Hit::Cancel));
         }
         Page::Removed => {
-            p.text_centered(WIN_W / 2, 150, "REMOVED", 13, TEXT2, false, 4);
-            p.text_centered(WIN_W / 2, 178, "thanks for flying termie", 11, MUTE, false, 0);
-            p.button(WIN_W / 2 - 70, 300, 140, 40, "CLOSE", false, s.hover == Some(Hit::Quit));
+            p.text_centered(WIN_W / 2, 150, "REMOVED", text_style(13, TEXT2, false, 4));
+            p.text_centered(WIN_W / 2, 178, "thanks for flying termie", text_style(11, MUTE, false, 0));
+            p.button(UiRect { x: WIN_W / 2 - 70, y: 300, w: 140, h: 40 }, "CLOSE", false, s.hover == Some(Hit::Quit));
         }
     }
 }

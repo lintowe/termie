@@ -97,10 +97,10 @@ pub fn install(opts: &Options, mut progress: impl FnMut(f32, &str)) -> Result<()
         let lnk = start_menu_lnk();
         let _ = write_shortcut(&lnk, &exe, &dir);
     }
-    if opts.desktop {
-        if let Some(lnk) = desktop_lnk() {
-            let _ = write_shortcut(&lnk, &exe, &dir);
-        }
+    if opts.desktop
+        && let Some(lnk) = desktop_lnk()
+    {
+        let _ = write_shortcut(&lnk, &exe, &dir);
     }
 
     progress(0.92, "registry");
