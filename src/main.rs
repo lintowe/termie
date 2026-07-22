@@ -5508,7 +5508,13 @@ impl App {
     }
 
     fn paste(&mut self) {
-        let text = win::clipboard_get();
+        let text = match win::clipboard_get() {
+            win::ClipboardRead::Text(text) => text,
+            win::ClipboardRead::TooLarge => {
+                self.show_notice("clipboard paste exceeds 4 MiB");
+                return;
+            }
+        };
         if text.is_empty() {
             return;
         }

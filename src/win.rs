@@ -1699,15 +1699,31 @@ pub fn clipboard_set(text: &str) {
     }
 }
 
+pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClipboardRead {
+    Text(String),
+    TooLarge,
+}
+
+fn bounded_clipboard_text(text: String) -> ClipboardRead {
+    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
+        ClipboardRead::TooLarge
+    } else {
+        ClipboardRead::Text(text)
+    }
+}
+
 /// read CF_UNICODETEXT from the clipboard as a String (empty if none/unavailable)
 #[cfg(windows)]
-pub fn clipboard_get() -> String {
+pub fn clipboard_get() -> ClipboardRead {
     use windows::Win32::Foundation::HGLOBAL;
     use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData};
     use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
 
-    let mut out = String::new();
+    let mut out = ClipboardRead::Text(String::new());
     if !open_clipboard_retry() {
         return out;
     }
@@ -1717,14 +1733,18 @@ pub fn clipboard_get() -> String {
                 let hglobal = HGLOBAL(h.0);
                 let ptr = GlobalLock(hglobal) as *const u16;
                 if !ptr.is_null() {
-                    // GlobalSize is bytes incl. the trailing nul; clamp to it
                     let cap = GlobalSize(hglobal) / std::mem::size_of::<u16>();
                     let mut len = 0usize;
-                    while len < cap && *ptr.add(len) != 0 {
+                    let limit = cap.min(MAX_CLIPBOARD_TEXT_BYTES / 3 + 1);
+                    while len < limit && *ptr.add(len) != 0 {
                         len += 1;
                     }
-                    let slice = std::slice::from_raw_parts(ptr, len);
-                    out = String::from_utf16_lossy(slice);
+                    if len == MAX_CLIPBOARD_TEXT_BYTES / 3 + 1 {
+                        out = ClipboardRead::TooLarge;
+                    } else {
+                        let slice = std::slice::from_raw_parts(ptr, len);
+                        out = bounded_clipboard_text(String::from_utf16_lossy(slice));
+                    }
                     let _ = GlobalUnlock(hglobal);
                 }
             }
@@ -1803,9 +1823,11 @@ pub fn clipboard_set(text: &str) {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn clipboard_get() -> String {
+pub fn clipboard_get() -> ClipboardRead {
     unix_clipboard::CLIP.with(|c| {
-        c.borrow_mut().as_mut().and_then(|p| p.get_contents().ok()).unwrap_or_default()
+        bounded_clipboard_text(
+            c.borrow_mut().as_mut().and_then(|p| p.get_contents().ok()).unwrap_or_default(),
+        )
     })
 }
 
@@ -2082,10 +2104,11 @@ pub fn explorer_dir_for(_hwnd: isize) -> Option<String> {
 #[cfg(all(test, not(windows)))]
 mod tests {
     use super::{
-        command_quote, desktop_with_profiles, kde_terminal_snapshot, kwin_hide_quake_script,
-        kwin_drag_script, kwin_keep_above_script, kwin_quake_script, launcher_progress_properties,
-        parse_kde_terminal_snapshot, parse_kwin_drag_snapshot, parse_portal_color_scheme,
-        read_limited, read_monitor_line, terminal_list_with_termie, MAX_DESKTOP_HELPER_OUTPUT_BYTES,
+        bounded_clipboard_text, command_quote, desktop_with_profiles, kde_terminal_snapshot,
+        kwin_hide_quake_script, kwin_drag_script, kwin_keep_above_script, kwin_quake_script,
+        launcher_progress_properties, parse_kde_terminal_snapshot, parse_kwin_drag_snapshot,
+        parse_portal_color_scheme, read_limited, read_monitor_line, terminal_list_with_termie,
+        ClipboardRead, MAX_CLIPBOARD_TEXT_BYTES, MAX_DESKTOP_HELPER_OUTPUT_BYTES,
     };
 
     #[test]
@@ -2099,6 +2122,14 @@ mod tests {
     fn integration_reader_rejects_the_first_byte_over_limit() {
         assert_eq!(read_limited(std::io::Cursor::new(b"abc"), 3).expect("read"), Some(b"abc".to_vec()));
         assert_eq!(read_limited(std::io::Cursor::new(b"abcd"), 3).expect("read"), None);
+    }
+
+    #[test]
+    fn clipboard_text_limit_rejects_the_first_byte_over_limit() {
+        let accepted = bounded_clipboard_text("x".repeat(MAX_CLIPBOARD_TEXT_BYTES));
+        assert!(matches!(accepted, ClipboardRead::Text(_)));
+        let rejected = bounded_clipboard_text("x".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1));
+        assert_eq!(rejected, ClipboardRead::TooLarge);
     }
 
     #[test]
