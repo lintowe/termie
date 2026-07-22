@@ -104,6 +104,10 @@ impl ApcScanner {
                         self.apc.push(b);
                         self.state = State::Apc;
                     }
+                    if self.apc.len() > MAX_APC {
+                        self.apc.clear();
+                        self.state = State::Normal;
+                    }
                 }
             }
         }
@@ -339,6 +343,20 @@ mod tests {
         let (pass, kitty) = s.feed(b"\x1b\\after");
         assert_eq!(pass, b"\x1b\\after");
         assert!(kitty.is_empty());
+    }
+
+    #[test]
+    fn repeated_escapes_cannot_bypass_the_apc_limit() {
+        let mut scanner = ApcScanner::default();
+        scanner.feed(b"\x1b_G");
+        scanner.feed(&vec![b'A'; MAX_APC - 1]);
+        assert!(matches!(scanner.state, State::Apc));
+
+        scanner.feed(b"\x1b");
+        assert!(matches!(scanner.state, State::ApcEsc));
+        scanner.feed(b"\x1b");
+        assert!(matches!(scanner.state, State::Normal));
+        assert!(scanner.apc.is_empty());
     }
 
     // KittyCmd::parse default-fill + malformed/None branches
