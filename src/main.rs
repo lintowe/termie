@@ -591,6 +591,9 @@ fn all_palette_actions() -> &'static [(&'static str, PaletteAction)] {
 /// default; a name a user profile already defines is left untouched
 fn with_wsl_profiles(mut profiles: Vec<pty::Profile>, distros: Vec<String>) -> Vec<pty::Profile> {
     for distro in distros {
+        if profiles.len() >= MAX_CUSTOM_PROFILES {
+            break;
+        }
         let name = format!("wsl: {distro}");
         if !profiles.iter().any(|p| p.name == name) {
             profiles.push(pty::Profile {
@@ -604,11 +607,18 @@ fn with_wsl_profiles(mut profiles: Vec<pty::Profile>, distros: Vec<String>) -> V
     profiles
 }
 
+const MAX_CUSTOM_PROFILES: usize = 128;
+const MAX_PROFILE_ENV: usize = 64;
+const MAX_PROFILE_RAW_LINES: usize = 8192;
+const MAX_SHELL_THEMES: usize = 256;
+
 /// the profile named `name` in `profiles`, created empty if new, so config lines
 /// (argv, .cwd, .env.<VAR>) can arrive in any order and accumulate onto it
-fn profile_mut<'a>(profiles: &'a mut Vec<pty::Profile>, name: &str) -> &'a mut pty::Profile {
+fn profile_mut<'a>(profiles: &'a mut Vec<pty::Profile>, name: &str) -> Option<&'a mut pty::Profile> {
     if let Some(i) = profiles.iter().position(|p| p.name == name) {
-        &mut profiles[i]
+        Some(&mut profiles[i])
+    } else if profiles.len() >= MAX_CUSTOM_PROFILES {
+        None
     } else {
         profiles.push(pty::Profile {
             name: name.to_string(),
@@ -616,7 +626,7 @@ fn profile_mut<'a>(profiles: &'a mut Vec<pty::Profile>, name: &str) -> &'a mut p
             cwd: None,
             env: Vec::new(),
         });
-        profiles.last_mut().unwrap()
+        profiles.last_mut()
     }
 }
 
@@ -3451,6 +3461,12 @@ fn load_persisted() -> Persisted {
     parse_persisted(&text)
 }
 
+fn record_profile_line(persisted: &mut Persisted, key: &str, value: &str) {
+    if persisted.profiles_raw.len() < MAX_PROFILE_RAW_LINES {
+        persisted.profiles_raw.push((key.to_string(), value.to_string()));
+    }
+}
+
 /// parse the key=value config text into Persisted, leaving defaults for any key
 /// absent or malformed; split out from load_persisted so the settings parser is
 /// unit-testable without touching %APPDATA%
@@ -3572,7 +3588,9 @@ fn parse_persisted(text: &str) -> Persisted {
             other => {
                 if let Some(name) = other.strip_prefix("theme.") {
                     if !name.is_empty() && !v.is_empty() {
-                        p.shell_themes.push((name.to_string(), color::ThemeId::from_name(v)));
+                        if p.shell_themes.len() < MAX_SHELL_THEMES {
+                            p.shell_themes.push((name.to_string(), color::ThemeId::from_name(v)));
+                        }
                     } else {
                         log::warn!("config: per-profile theme line `{other}` needs a name and a theme");
                     }
@@ -3582,23 +3600,31 @@ fn parse_persisted(text: &str) -> Persisted {
                     // profile of that name whatever order the lines appear in
                     if let Some(name) = rest.strip_suffix(".cwd") {
                         if !name.is_empty() && !v.is_empty() {
-                            profile_mut(&mut p.profiles, name).cwd = Some(v.to_string());
-                            p.profiles_raw.push((rest.to_string(), v.to_string()));
+                            if let Some(profile) = profile_mut(&mut p.profiles, name) {
+                                profile.cwd = Some(v.to_string());
+                                record_profile_line(&mut p, rest, v);
+                            }
                         } else {
                             log::warn!("config: profile line `{other}` needs a name and a directory");
                         }
                     } else if let Some((name, var)) = rest.split_once(".env.") {
                         if !name.is_empty() && !var.is_empty() {
-                            profile_mut(&mut p.profiles, name).env.push((var.to_string(), v.to_string()));
-                            p.profiles_raw.push((rest.to_string(), v.to_string()));
+                            if let Some(profile) = profile_mut(&mut p.profiles, name)
+                                && profile.env.len() < MAX_PROFILE_ENV
+                            {
+                                profile.env.push((var.to_string(), v.to_string()));
+                                record_profile_line(&mut p, rest, v);
+                            }
                         } else {
                             log::warn!("config: profile env line `{other}` needs a name and a variable");
                         }
                     } else {
                         let argv = split_cmdline(v);
                         if !rest.is_empty() && !argv.is_empty() {
-                            profile_mut(&mut p.profiles, rest).argv = argv;
-                            p.profiles_raw.push((rest.to_string(), v.to_string()));
+                            if let Some(profile) = profile_mut(&mut p.profiles, rest) {
+                                profile.argv = argv;
+                                record_profile_line(&mut p, rest, v);
+                            }
                         } else {
                             log::warn!("config: profile line `{other}` needs a name and a command");
                         }
@@ -12480,6 +12506,30 @@ mod tests {
     }
 
     #[test]
+    fn config_caps_profile_and_theme_collections() {
+        let profiles = (0..=MAX_CUSTOM_PROFILES)
+            .map(|i| format!("profile.p{i}=shell{i}\n"))
+            .collect::<String>();
+        let p = parse_persisted(&profiles);
+        assert_eq!(p.profiles.len(), MAX_CUSTOM_PROFILES);
+        assert_eq!(p.profiles_raw.len(), MAX_CUSTOM_PROFILES);
+
+        let env = (0..=MAX_PROFILE_ENV)
+            .map(|i| format!("profile.dev.env.V{i}=value{i}\n"))
+            .collect::<String>();
+        let p = parse_persisted(&format!("profile.dev=shell\n{env}"));
+        assert_eq!(p.profiles[0].env.len(), MAX_PROFILE_ENV);
+
+        let raw = std::iter::repeat_n("profile.dev=shell\n", MAX_PROFILE_RAW_LINES + 1).collect::<String>();
+        assert_eq!(parse_persisted(&raw).profiles_raw.len(), MAX_PROFILE_RAW_LINES);
+
+        let themes = (0..=MAX_SHELL_THEMES)
+            .map(|i| format!("theme.shell{i}=nord\n"))
+            .collect::<String>();
+        assert_eq!(parse_persisted(&themes).shell_themes.len(), MAX_SHELL_THEMES);
+    }
+
+    #[test]
     fn config_parses_profile_cwd_and_env() {
         let p = parse_persisted(
             "profile.dev=pwsh.exe\nprofile.dev.cwd=C:\\repo\nprofile.dev.env.RUST_LOG=debug\nprofile.dev.env.API=1\n",
@@ -12528,6 +12578,16 @@ mod tests {
         // the user's own definition wins; no duplicate synthetic entry is added
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].argv, ["custom.exe"]);
+    }
+
+    #[test]
+    fn wsl_profiles_respect_the_profile_cap() {
+        let base = (0..MAX_CUSTOM_PROFILES - 1)
+            .map(|i| prof(&format!("profile-{i}"), &["shell"]))
+            .collect();
+        let merged = with_wsl_profiles(base, vec!["Ubuntu".to_string(), "Arch".to_string()]);
+        assert_eq!(merged.len(), MAX_CUSTOM_PROFILES);
+        assert_eq!(merged.last().map(|profile| profile.name.as_str()), Some("wsl: Ubuntu"));
     }
 
     #[test]
