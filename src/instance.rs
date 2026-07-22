@@ -3,6 +3,8 @@ use std::io::{self, Read, Write};
 const MAGIC: &[u8; 4] = b"TRM1";
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_ARGS: usize = 256;
+#[cfg(target_os = "linux")]
+const LAUNCH_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchRequest {
@@ -179,6 +181,12 @@ fn linux_peer_is_user(stream: &std::os::unix::net::UnixStream) -> io::Result<boo
 }
 
 #[cfg(target_os = "linux")]
+fn configure_linux_stream(stream: &std::os::unix::net::UnixStream) -> io::Result<()> {
+    stream.set_read_timeout(Some(LAUNCH_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(LAUNCH_IO_TIMEOUT))
+}
+
+#[cfg(target_os = "linux")]
 fn try_forward_linux(request: &LaunchRequest) -> io::Result<()> {
     use std::os::unix::net::UnixStream;
 
@@ -186,6 +194,7 @@ fn try_forward_linux(request: &LaunchRequest) -> io::Result<()> {
     if !linux_peer_is_user(&stream)? {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "launch owner mismatch"));
     }
+    configure_linux_stream(&stream)?;
     forward(stream, request)
 }
 
@@ -220,6 +229,9 @@ fn serve_linux(listener: std::os::unix::net::UnixListener, send: &mut impl FnMut
             break;
         };
         if !matches!(linux_peer_is_user(&stream), Ok(true)) {
+            continue;
+        }
+        if configure_linux_stream(&stream).is_err() {
             continue;
         }
         let request = match read_request(&mut stream) {
@@ -374,5 +386,14 @@ mod tests {
             launch_cwd: None,
         };
         assert!(encode(&request).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_launch_streams_have_a_finite_io_budget() {
+        let (stream, _) = std::os::unix::net::UnixStream::pair().unwrap();
+        configure_linux_stream(&stream).unwrap();
+        assert_eq!(stream.read_timeout().unwrap(), Some(LAUNCH_IO_TIMEOUT));
+        assert_eq!(stream.write_timeout().unwrap(), Some(LAUNCH_IO_TIMEOUT));
     }
 }
