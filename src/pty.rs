@@ -714,10 +714,7 @@ fn system_executable(exe: &str) -> String {
             .to_string_lossy()
             .into_owned();
     }
-    PathBuf::from(r"C:\Windows\System32")
-        .join(exe)
-        .to_string_lossy()
-        .into_owned()
+    String::new()
 }
 
 /// resolve a shell kind to an executable path, falling back to whatever is

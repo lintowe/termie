@@ -37,6 +37,15 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+fn system_executable(name: &str) -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buf = vec![0; 32_768];
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    (len > 0 && len < buf.len())
+        .then(|| PathBuf::from(String::from_utf16_lossy(&buf[..len])).join(name))
+}
+
 pub fn install_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA");
     PathBuf::from(base).join("Programs").join("termie")
@@ -536,9 +545,7 @@ fn remove_msi(product: &str) {
     // MSI was per-user). if the product is still registered, re-run with a
     // UAC prompt via ShellExecute "runas" so the dual-Start-menu case can't
     // survive a successful native install
-    let msiexec = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .map(|root| root.join("System32").join("msiexec.exe"))
+    let msiexec = system_executable("msiexec.exe")
         .filter(|path| path.is_file());
     if let Some(msiexec) = msiexec.as_ref() {
         let _ = std::process::Command::new(msiexec)
