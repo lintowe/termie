@@ -105,6 +105,16 @@ struct TerminalHandoff {
     deliver: Deliver,
 }
 
+fn close_handoff_handles(signal: HANDLE, reference: HANDLE, server: HANDLE, client: HANDLE) {
+    for h in [signal, reference, server, client] {
+        if !h.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+}
+
 impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
     unsafe fn EstablishPtyHandoff(
         &self,
@@ -132,11 +142,7 @@ impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
             // the marshaler already duplicated the [in] handles into this
             // process; a refusal owns closing them or every hidden spawn
             // leaks four handles here
-            for h in [signal, reference, server, client] {
-                if !h.is_invalid() {
-                    let _ = unsafe { CloseHandle(h) };
-                }
-            }
+            close_handoff_handles(signal, reference, server, client);
             (self.deliver)(None);
             return E_FAIL;
         }
@@ -144,17 +150,20 @@ impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
         // keystrokes into a_write. pipe B: console host writes rendered VT into
         // b_write, termie reads from b_read
         if input.is_null() || output.is_null() {
+            close_handoff_handles(signal, reference, server, client);
             return E_FAIL;
         }
         let (mut a_read, mut a_write) = (HANDLE::default(), HANDLE::default());
         let (mut b_read, mut b_write) = (HANDLE::default(), HANDLE::default());
         unsafe {
             if CreatePipe(&mut a_read, &mut a_write, None, 0).is_err() {
+                close_handoff_handles(signal, reference, server, client);
                 return E_FAIL;
             }
             if CreatePipe(&mut b_read, &mut b_write, None, 0).is_err() {
                 let _ = CloseHandle(a_read);
                 let _ = CloseHandle(a_write);
+                close_handoff_handles(signal, reference, server, client);
                 return E_FAIL;
             }
             // hand the console host its pipe ends. these are [out] system_handle
