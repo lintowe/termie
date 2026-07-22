@@ -22,6 +22,15 @@ fn main() {
             .cloned()
     };
 
+    if has("--cleanup") {
+        let delay_ms = val("--cleanup-delay-ms")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3_000)
+            .clamp(1_000, 15_000);
+        engine::cleanup_install_dir(delay_ms);
+        return;
+    }
+
     // extraction-only debug mode: unpack the payload somewhere harmless so the
     // packaging pipeline can be verified without touching registry/shortcuts
     if let Some(dir) = val("--extract-to") {

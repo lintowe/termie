@@ -128,7 +128,7 @@ pub fn uninstall() -> Result<(), String> {
     unregister_defterm();
     remove_from_path(&dir);
     delete_hkcu_tree("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\termie");
-    schedule_dir_removal(&dir, app_seems_running());
+    schedule_dir_removal(app_seems_running());
     Ok(())
 }
 
@@ -690,18 +690,31 @@ fn scrub_machine_path_termie() {
 
 // ---- self-removal --------------------------------------------------------------
 
-fn schedule_dir_removal(dir: &Path, app_running: bool) {
-    // this exe runs from inside `dir`, so removal happens after we exit: a
-    // detached cmd waits a beat, then removes the tree
-    let d = dir.to_string_lossy().to_string();
+fn schedule_dir_removal(app_running: bool) {
+    // the helper runs outside the install tree, so it can delete the uninstaller
+    // after this process exits without routing the path through cmd.exe
     use std::os::windows::process::CommandExt;
+
+    let Ok(me) = std::env::current_exe() else {
+        return;
+    };
+    let helper = std::env::temp_dir().join("termie-uninstall-cleanup.exe");
+    if std::fs::copy(me, &helper).is_err() {
+        return;
+    }
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    let wait = if app_running { 8 } else { 3 };
-    let _ = std::process::Command::new("cmd")
-        .raw_arg(format!("/c ping -n {wait} 127.0.0.1 >nul & rmdir /s /q \"{d}\""))
+    let delay_ms = if app_running { 8_000 } else { 3_000 };
+    let delay_ms = delay_ms.to_string();
+    let _ = std::process::Command::new(helper)
+        .args(["--cleanup", "--cleanup-delay-ms", &delay_ms])
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .spawn();
+}
+
+pub fn cleanup_install_dir(delay_ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    let _ = std::fs::remove_dir_all(install_dir());
 }
 
 /// true when a termie.exe from this install dir currently has a window up —
