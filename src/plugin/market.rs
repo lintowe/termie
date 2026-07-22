@@ -309,6 +309,78 @@ pub(crate) enum BoundedOutputError {
     Limit,
 }
 
+#[cfg(windows)]
+struct HelperJob(Option<windows::Win32::Foundation::HANDLE>);
+
+#[cfg(windows)]
+impl HelperJob {
+    fn attach(child: &std::process::Child) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
+        };
+
+        let mut job = Self(unsafe { CreateJobObjectW(None, None).ok() });
+        let Some(handle) = job.0 else {
+            return job;
+        };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as _,
+                std::mem::size_of_val(&limits).try_into().unwrap(),
+            )
+            .and_then(|_| AssignProcessToJobObject(handle, HANDLE(child.as_raw_handle() as *mut _)))
+            .is_ok()
+        };
+        if !configured {
+            job.close();
+        }
+        job
+    }
+
+    fn terminate(&mut self) {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+
+        if let Some(handle) = self.0 {
+            let _ = unsafe { TerminateJobObject(handle, 1) };
+        }
+    }
+
+    fn close(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for HelperJob {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(not(windows))]
+struct HelperJob;
+
+#[cfg(not(windows))]
+impl HelperJob {
+    fn attach(_child: &std::process::Child) -> Self {
+        Self
+    }
+
+    fn terminate(&mut self) {}
+}
+
 fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedOutputError> {
     let mut bytes = Vec::new();
     reader
@@ -348,6 +420,7 @@ fn bounded_output_with_deadline(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(BoundedOutputError::Io)?;
+    let mut job = HelperJob::attach(&child);
     let stdout = child.stdout.take().expect("piped child stdout");
     let mut stderr = child.stderr.take().expect("piped child stderr");
     let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
@@ -371,14 +444,14 @@ fn bounded_output_with_deadline(
             match stdout_rx.try_recv() {
                 Ok(Ok(bytes)) => stdout = Some(bytes),
                 Ok(Err(error)) => {
-                    kill_helper(&mut child);
+                    kill_helper(&mut child, &mut job);
                     let _ = child.wait();
                     let _ = stdout_task.join();
                     let _ = stderr_task.join();
                     return Err(error);
                 }
                 Err(TryRecvError::Disconnected) => {
-                    kill_helper(&mut child);
+                    kill_helper(&mut child, &mut job);
                     let _ = child.wait();
                     let _ = stdout_task.join();
                     let _ = stderr_task.join();
@@ -391,7 +464,7 @@ fn bounded_output_with_deadline(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                kill_helper(&mut child);
+                kill_helper(&mut child, &mut job);
                 let _ = child.wait();
                 let _ = stdout_task.join();
                 let _ = stderr_task.join();
@@ -401,7 +474,7 @@ fn bounded_output_with_deadline(
                 )));
             }
             Err(error) => {
-                kill_helper(&mut child);
+                kill_helper(&mut child, &mut job);
                 let _ = child.wait();
                 let _ = stdout_task.join();
                 let _ = stderr_task.join();
@@ -423,11 +496,12 @@ fn bounded_output_with_deadline(
     Ok(Output { status, stdout, stderr })
 }
 
-fn kill_helper(child: &mut std::process::Child) {
+fn kill_helper(child: &mut std::process::Child, job: &mut HelperJob) {
     #[cfg(unix)]
     unsafe {
         let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
     }
+    job.terminate();
     let _ = child.kill();
 }
 
