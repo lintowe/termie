@@ -5626,10 +5626,7 @@ impl App {
                         std::thread::spawn(move || {
                             let _ = proxy.send_event(UserEvent::UpdateDownloaded(update::download(&u)));
                         });
-                    } else if win::open_url(&format!(
-                        "https://github.com/zeo/termie/releases/tag/v{}",
-                        u.version
-                    )) {
+                    } else if win::open_url(&update::release_page_url(&u.version)) {
                         self.show_notice(&format!("release page for {} opened", u.version));
                     } else {
                         self.show_notice("couldn't open the release page");

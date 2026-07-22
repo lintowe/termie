@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use crate::plugin::json::Json;
 use crate::plugin::market::{bounded_output, quiet_command, BoundedOutputError};
 
+const PROJECT_REPOSITORY: &str = "https://github.com/zeo/termie";
 const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/latest";
 const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_RELEASE_ASSET_BYTES: usize = 128 * 1024 * 1024;
@@ -119,7 +120,11 @@ fn asset_name(version: &str) -> Option<String> {
 }
 
 fn release_asset_url_is_safe(version: &str, name: &str, url: &str) -> bool {
-    url == format!("https://github.com/zeo/termie/releases/download/v{version}/{name}")
+    url == format!("{PROJECT_REPOSITORY}/releases/download/v{version}/{name}")
+}
+
+pub fn release_page_url(version: &str) -> String {
+    format!("{PROJECT_REPOSITORY}/releases/tag/v{version}")
 }
 
 fn parse_release(text: &str) -> Option<Update> {
@@ -509,11 +514,16 @@ mod tests {
     #[test]
     fn release_assets_use_the_exact_official_download_url() {
         let name = asset_name("1.2.3").unwrap();
-        let url = format!("https://github.com/zeo/termie/releases/download/v1.2.3/{name}");
+        let url = format!("{PROJECT_REPOSITORY}/releases/download/v1.2.3/{name}");
         assert!(release_asset_url_is_safe("1.2.3", &name, &url));
         assert!(!release_asset_url_is_safe("1.2.3", &name, "https://example.com/termie.zip"));
         assert!(!release_asset_url_is_safe("1.2.3", &name, &format!("{url}?download=1")));
         assert!(!release_asset_url_is_safe("1.2.3", &name, &format!("{url}#asset")));
+    }
+
+    #[test]
+    fn release_page_uses_the_project_repository() {
+        assert_eq!(release_page_url("1.2.3"), "https://github.com/zeo/termie/releases/tag/v1.2.3");
     }
 
     #[test]
