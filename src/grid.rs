@@ -684,7 +684,7 @@ impl Grid {
     pub fn scroll_view(&mut self, delta: isize) {
         let max = self.scrollback.len();
         let cur = self.view_offset as isize;
-        self.view_offset = (cur + delta).clamp(0, max as isize) as usize;
+        self.view_offset = cur.saturating_add(delta).clamp(0, max as isize) as usize;
     }
 
     /// linear text within [start, end] as (absolute line id, col), trailing
@@ -2255,6 +2255,22 @@ mod tests {
         assert_eq!(g.selected_text((0, 0), (0, 1), false), "aa");
         assert_eq!(g.selected_text((1, 0), (1, 1), false), "bb");
         assert_eq!(g.selected_text((0, 0), (1, 1), false), "aa\nbb");
+    }
+
+    #[test]
+    fn scroll_view_saturates_extreme_deltas() {
+        let mut g = Grid::new(2, 4);
+        for line in ["aa", "bb", "cc", "dd"] {
+            for c in line.chars() {
+                g.put_char(c);
+            }
+            g.linefeed();
+            g.carriage_return();
+        }
+        g.scroll_view(isize::MAX);
+        assert_eq!(g.view_offset, g.scrollback.len());
+        g.scroll_view(isize::MIN);
+        assert_eq!(g.view_offset, 0);
     }
 
     #[test]
