@@ -43,6 +43,8 @@ jobs:
         run: cargo build --all-targets
       - name: test
         run: cargo test
+      - name: installer check
+        run: cargo check --locked --manifest-path setup/Cargo.toml
       - name: multi-window drag integration
         shell: powershell
         run: |
