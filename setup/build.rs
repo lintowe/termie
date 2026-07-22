@@ -23,6 +23,7 @@ fn main() {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     if let Ok(dir) = std::env::var("TERMIE_PAYLOAD_DIR") {
         let root = PathBuf::from(&dir);
+        println!("cargo:rerun-if-changed={}", root.display());
         collect(&root, &root, &mut entries).unwrap_or_else(|err| panic!("invalid payload staging directory: {err}"));
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         assert!(
