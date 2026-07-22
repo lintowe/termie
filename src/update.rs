@@ -6,12 +6,13 @@
 use std::path::PathBuf;
 
 use crate::plugin::json::Json;
-use crate::plugin::market::{bounded_output, quiet_command, BoundedOutputError};
+use crate::plugin::market::{bounded_output, bounded_output_with_deadline, quiet_command, BoundedOutputError};
 
 const PROJECT_REPOSITORY: &str = "https://github.com/zeo/termie";
 const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/latest";
 const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_RELEASE_ASSET_BYTES: usize = 128 * 1024 * 1024;
+const UPDATE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 #[cfg(target_os = "linux")]
 const MAX_UPDATE_ARCHIVE_LISTING_BYTES: usize = 16 * 1024 * 1024;
 #[cfg(target_os = "linux")]
@@ -26,6 +27,11 @@ fn update_curl() -> std::process::Command {
     // -q must stay first so a user's curlrc cannot relax the updater's policy
     command.args(["-q", "--globoff", "--proto", "=https", "--proto-redir", "=https"]);
     command
+}
+
+fn configure_asset_download(command: &mut std::process::Command, url: &str) {
+    let max_time = UPDATE_DOWNLOAD_TIMEOUT.as_secs().to_string();
+    command.args(["-fsSL", "--max-time", &max_time, "--", url]);
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -214,8 +220,8 @@ fn download_to_prefix(u: &Update, prefix: Option<&std::path::Path>) -> Result<Pa
     let path = dir.join(name);
     let fetched = (|| {
         let mut command = update_curl();
-        command.args(["-fsSL", "--max-time", "300", "--", &u.url]);
-        let out = bounded_output(&mut command, MAX_RELEASE_ASSET_BYTES)
+        configure_asset_download(&mut command, &u.url);
+        let out = bounded_output_with_deadline(&mut command, MAX_RELEASE_ASSET_BYTES, UPDATE_DOWNLOAD_TIMEOUT)
             .map_err(|error| bounded_output_error(error, MAX_RELEASE_ASSET_BYTES))?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
@@ -514,6 +520,18 @@ mod tests {
             args,
             ["-q", "--globoff", "--proto", "=https", "--proto-redir", "=https", "-fsSL", "--", RELEASES_URL]
         );
+    }
+
+    #[test]
+    fn release_download_uses_its_full_timeout_budget() {
+        let mut command = update_curl();
+        configure_asset_download(&mut command, "https://github.com/zeo/termie/releases/download/v1.2.3/termie-1.2.3-setup.exe");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--max-time", "300"]));
+        assert_eq!(UPDATE_DOWNLOAD_TIMEOUT, std::time::Duration::from_secs(300));
     }
 
     #[test]

@@ -409,7 +409,7 @@ pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Outp
     bounded_output_with_deadline(command, limit, HELPER_TIMEOUT)
 }
 
-fn bounded_output_with_deadline(
+pub(crate) fn bounded_output_with_deadline(
     command: &mut Command,
     limit: usize,
     timeout: Duration,
