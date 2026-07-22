@@ -10,6 +10,11 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 const PTY_WRITE_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_PTY_WRITE_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PTY_WRITE_QUEUE_ITEMS: usize = 64;
+const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn capture_len(written: u64, available: usize) -> usize {
+    MAX_CAPTURE_BYTES.saturating_sub(written).min(available as u64) as usize
+}
 
 struct InputQueue {
     state: Mutex<InputQueueState>,
@@ -527,11 +532,21 @@ impl Pty {
         let Some(mut reader) = self.reader.take() else {
             return;
         };
-        // optional raw-output capture for debugging a rendering issue: set
-        // TERMIE_CAPTURE=<path> to append every byte the shell emits, then replay
-        // it through `termie --termview --file <path>` to reproduce exactly
-        let mut capture = std::env::var_os("TERMIE_CAPTURE")
-            .and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+        // optional raw-output capture for debugging a rendering issue, capped at 64 MiB
+        // replay it through `termie --termview --file <path>` to reproduce exactly
+        let mut capture = std::env::var_os("TERMIE_CAPTURE").and_then(|path| {
+            let written = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            (written < MAX_CAPTURE_BYTES)
+                .then(|| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .ok()
+                        .map(|file| (file, written))
+                })
+                .flatten()
+        });
         thread::spawn(move || {
             // a larger read means fewer, fatter UserEvent::Pty hops under heavy
             // streaming, cutting the fixed per-event handler cost (find_pane walk,
@@ -544,8 +559,16 @@ impl Pty {
                         break;
                     }
                     Ok(n) => {
-                        if let Some(f) = capture.as_mut() {
-                            let _ = f.write_all(&buf[..n]);
+                        if let Some((file, written)) = capture.as_mut() {
+                            let captured = capture_len(*written, n);
+                            if captured == 0 || file.write_all(&buf[..captured]).is_err() {
+                                capture = None;
+                            } else {
+                                *written += captured as u64;
+                                if *written == MAX_CAPTURE_BYTES {
+                                    capture = None;
+                                }
+                            }
                         }
                         on_event(PtyMsg::Output(buf[..n].to_vec()));
                     }
@@ -941,6 +964,13 @@ mod tests {
         assert_eq!(queue.pop(), Some(input));
         queue.close();
         assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn capture_stops_at_its_file_size_limit() {
+        assert_eq!(capture_len(0, 12), 12);
+        assert_eq!(capture_len(MAX_CAPTURE_BYTES - 1, 12), 1);
+        assert_eq!(capture_len(MAX_CAPTURE_BYTES, 12), 0);
     }
 
     #[cfg(target_os = "linux")]
