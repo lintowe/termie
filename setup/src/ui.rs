@@ -542,7 +542,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let old = SelectObject(mem, bmp.into());
                 {
                     let s = ctx.state.lock().unwrap();
-                    let dpi = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+                    let dpi = GetDpiForWindow(hwnd) as f32 / 96.0;
                     paint(mem, dpi, &s);
                 }
                 let _ = BitBlt(hdc, 0, 0, w, h, Some(mem), 0, 0, SRCCOPY);
@@ -713,7 +713,7 @@ pub fn preview(path: &str, state: &State, scale: f32) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let old = SelectObject(mem, bmp.into());
         paint(mem, scale, state);
-        windows::Win32::Graphics::Gdi::GdiFlush();
+        let _ = windows::Win32::Graphics::Gdi::GdiFlush();
 
         // dib rows are BGRA top-down (negative height)
         let n = (w * h) as usize;

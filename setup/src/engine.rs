@@ -128,7 +128,7 @@ pub fn uninstall() -> Result<(), String> {
     unregister_defterm();
     remove_from_path(&dir);
     delete_hkcu_tree("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\termie");
-    schedule_dir_removal(&dir);
+    schedule_dir_removal(&dir, app_seems_running());
     Ok(())
 }
 
@@ -690,15 +690,16 @@ fn scrub_machine_path_termie() {
 
 // ---- self-removal --------------------------------------------------------------
 
-fn schedule_dir_removal(dir: &Path) {
+fn schedule_dir_removal(dir: &Path, app_running: bool) {
     // this exe runs from inside `dir`, so removal happens after we exit: a
     // detached cmd waits a beat, then removes the tree
     let d = dir.to_string_lossy().to_string();
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
+    let wait = if app_running { 8 } else { 3 };
     let _ = std::process::Command::new("cmd")
-        .raw_arg(format!("/c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{d}\""))
+        .raw_arg(format!("/c ping -n {wait} 127.0.0.1 >nul & rmdir /s /q \"{d}\""))
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .spawn();
 }

@@ -76,7 +76,7 @@ jobs:
           Copy-Item LICENSE-MIT, LICENSE-APACHE, THIRDPARTY.md $stage\
           Set-Content (Join-Path $stage 'VERSION') $ver
           $env:TERMIE_PAYLOAD_DIR = $stage
-          cargo build --release --manifest-path setup/Cargo.toml
+          cargo build --release --locked --manifest-path setup/Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw "setup build failed" }
           Copy-Item setup\target\release\termie-setup.exe "dist\termie-$ver-setup.exe"
 
