@@ -141,6 +141,12 @@ fn wheel_uses_local_scrollback(using_alt: bool, has_scrollback: bool) -> bool {
     !using_alt || has_scrollback
 }
 
+const MAX_ALT_SCROLL_STEPS: usize = 120;
+
+fn alt_scroll_steps(step: f32) -> usize {
+    (step.abs() as usize).min(MAX_ALT_SCROLL_STEPS)
+}
+
 fn platform_window_attrs(attrs: WindowAttributes) -> WindowAttributes {
     #[cfg(all(unix, not(target_os = "macos")))]
     let attrs = {
@@ -9980,7 +9986,7 @@ impl App {
                             } else {
                                 b"\x1b[B"
                             };
-                            let n = step.abs() as usize;
+                            let n = alt_scroll_steps(step);
                             let mut buf = Vec::with_capacity(seq.len() * n);
                             for _ in 0..n {
                                 buf.extend_from_slice(seq);
@@ -12214,6 +12220,12 @@ mod tests {
         assert!(wheel_uses_local_scrollback(false, false));
         assert!(wheel_uses_local_scrollback(true, true));
         assert!(!wheel_uses_local_scrollback(true, false));
+    }
+
+    #[test]
+    fn alternate_scroll_limits_one_wheel_event() {
+        assert_eq!(alt_scroll_steps(2.9), 2);
+        assert_eq!(alt_scroll_steps(-f32::INFINITY), MAX_ALT_SCROLL_STEPS);
     }
 
     #[test]
