@@ -102,6 +102,8 @@ const KBD_SUPPORTED: u8 = 0b11011;
 const KBD_STACK_CAP: usize = 16;
 /// bound replies while a pty writer is temporarily unable to drain them
 const MAX_PENDING_RESPONSES: usize = 64 * 1024;
+/// bound palette queries while the app is between output events
+const COLOR_QUERY_CAP: usize = 64;
 
 pub struct Terminal {
     pub grid: Grid,
@@ -220,6 +222,12 @@ impl Terminal {
     fn queue_response(&mut self, reply: &[u8]) {
         if reply.len() <= MAX_PENDING_RESPONSES.saturating_sub(self.responses.len()) {
             self.responses.extend_from_slice(reply);
+        }
+    }
+
+    fn queue_color_query(&mut self, query: ColorReq) {
+        if self.color_queries.len() < COLOR_QUERY_CAP {
+            self.color_queries.push(query);
         }
     }
 
@@ -1244,7 +1252,7 @@ impl Perform for Terminal {
                         };
                         match set {
                             Some(c) => self.queue_response(&color_reply(code, c)),
-                            None => self.color_queries.push(req),
+                            None => self.queue_color_query(req),
                         }
                     } else if let Some(c) = parse_color_spec(p) {
                         match slot {
@@ -1265,7 +1273,7 @@ impl Perform for Terminal {
                         if sp.len() == 1 && sp[0] == b'?' {
                             match self.colors.ansi(n) {
                                 Some(c) => self.queue_response(&color_reply(&format!("4;{n}"), c)),
-                                None => self.color_queries.push(ColorReq::Ansi(n)),
+                                None => self.queue_color_query(ColorReq::Ansi(n)),
                             }
                         } else if let Some(c) = parse_color_spec(sp) {
                             self.colors.set_ansi(n, c);
@@ -2239,6 +2247,18 @@ mod tests {
             format_color_reply(ColorReq::Bg, &pal),
             b"\x1b]11;rgb:1414/1414/1414\x1b\\"
         );
+    }
+
+    #[test]
+    fn osc_palette_queries_are_bounded() {
+        let mut sequence = Vec::new();
+        for _ in 0..=COLOR_QUERY_CAP {
+            sequence.extend_from_slice(b"\x1b]4;1;?\x1b\\");
+        }
+        let mut t = Terminal::new(2, 10);
+        feed(&mut t, &sequence);
+        assert_eq!(t.color_queries.len(), COLOR_QUERY_CAP);
+        assert!(t.color_queries.iter().all(|q| *q == ColorReq::Ansi(1)));
     }
 
     #[test]
