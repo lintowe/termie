@@ -5,6 +5,11 @@ const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_ARGS: usize = 256;
 #[cfg(target_os = "linux")]
 const LAUNCH_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(windows)]
+const LAUNCH_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(windows)]
+struct WinPipe(std::fs::File);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchRequest {
@@ -23,7 +28,7 @@ pub struct Server {
     #[cfg(target_os = "linux")]
     listener: std::os::unix::net::UnixListener,
     #[cfg(windows)]
-    first: std::fs::File,
+    first: WinPipe,
 }
 
 impl Server {
@@ -114,6 +119,7 @@ fn decode(bytes: &[u8]) -> Option<LaunchRequest> {
     input.is_empty().then_some(LaunchRequest { args, process_cwd, launch_cwd })
 }
 
+#[cfg(not(windows))]
 fn read_request(stream: &mut impl Read) -> io::Result<LaunchRequest> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len)?;
@@ -270,10 +276,10 @@ fn open_pipe() -> io::Result<std::fs::File> {
 }
 
 #[cfg(windows)]
-fn create_pipe(first: bool) -> io::Result<std::fs::File> {
+fn create_pipe(first: bool) -> io::Result<WinPipe> {
     use std::os::windows::io::FromRawHandle;
     use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Pipes::{
         CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
@@ -283,9 +289,9 @@ fn create_pipe(first: bool) -> io::Result<std::fs::File> {
 
     let name: Vec<u16> = pipe_name().encode_utf16().chain(std::iter::once(0)).collect();
     let flags = if first {
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED
     } else {
-        PIPE_ACCESS_DUPLEX
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED
     };
     let handle = unsafe {
         CreateNamedPipeW(
@@ -302,21 +308,153 @@ fn create_pipe(first: bool) -> io::Result<std::fs::File> {
     if handle.is_invalid() {
         return Err(io::Error::last_os_error());
     }
-    Ok(unsafe { std::fs::File::from_raw_handle(handle.0) })
+    Ok(WinPipe(unsafe { std::fs::File::from_raw_handle(handle.0) }))
 }
 
 #[cfg(windows)]
-fn connect_pipe(pipe: &std::fs::File) -> io::Result<()> {
+fn pipe_handle(pipe: &WinPipe) -> windows::Win32::Foundation::HANDLE {
     use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
-    use windows::Win32::System::Pipes::ConnectNamedPipe;
 
-    let handle = HANDLE(pipe.as_raw_handle());
-    match unsafe { ConnectNamedPipe(handle, None) } {
+    windows::Win32::Foundation::HANDLE(pipe.0.as_raw_handle())
+}
+
+#[cfg(windows)]
+fn pipe_io(
+    pipe: &WinPipe,
+    start: impl FnOnce(
+        windows::Win32::Foundation::HANDLE,
+        &mut windows::Win32::System::IO::OVERLAPPED,
+    ) -> windows::core::Result<()>,
+) -> io::Result<u32> {
+    use windows::Win32::{
+        Foundation::{CloseHandle, ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::{
+            IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
+            Threading::{CreateEventW, WaitForSingleObject},
+        },
+    };
+
+    let handle = pipe_handle(pipe);
+    let event = unsafe { CreateEventW(None, true, false, None) }.map_err(|e| io::Error::other(e.to_string()))?;
+    let mut operation = OVERLAPPED { hEvent: event, ..Default::default() };
+    let started = start(handle, &mut operation);
+    let pending = matches!(&started, Err(error) if error.code() == ERROR_IO_PENDING.to_hresult());
+    if let Err(error) = started
+        && !pending
+    {
+        unsafe {
+            let _ = CloseHandle(event);
+        }
+        return Err(io::Error::other(error.to_string()));
+    }
+    if pending {
+        match unsafe { WaitForSingleObject(event, LAUNCH_IO_TIMEOUT.as_millis() as u32) } {
+            WAIT_OBJECT_0 => {}
+            WAIT_TIMEOUT => {
+                unsafe {
+                    let _ = CancelIoEx(handle, Some(&operation));
+                    let mut ignored = 0;
+                    let _ = GetOverlappedResult(handle, &operation, &mut ignored, true);
+                    let _ = CloseHandle(event);
+                }
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "launch pipe I/O timed out"));
+            }
+            status => {
+                unsafe {
+                    let _ = CancelIoEx(handle, Some(&operation));
+                    let mut ignored = 0;
+                    let _ = GetOverlappedResult(handle, &operation, &mut ignored, true);
+                    let _ = CloseHandle(event);
+                }
+                return Err(io::Error::other(format!("launch pipe wait failed: {status:?}")));
+            }
+        }
+    }
+    let mut transferred = 0;
+    let result = unsafe { GetOverlappedResult(handle, &operation, &mut transferred, false) }
+        .map(|_| transferred)
+        .map_err(|e| io::Error::other(e.to_string()));
+    unsafe {
+        let _ = CloseHandle(event);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn read_pipe_exact(pipe: &WinPipe, mut bytes: &mut [u8]) -> io::Result<()> {
+    use windows::Win32::Storage::FileSystem::ReadFile;
+
+    while !bytes.is_empty() {
+        let read = pipe_io(pipe, |handle, operation| unsafe {
+            ReadFile(handle, Some(bytes), None, Some(operation))
+        })? as usize;
+        if read == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "launch pipe closed"));
+        }
+        bytes = &mut bytes[read..];
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_pipe_all(pipe: &WinPipe, mut bytes: &[u8]) -> io::Result<()> {
+    use windows::Win32::Storage::FileSystem::WriteFile;
+
+    while !bytes.is_empty() {
+        let written = pipe_io(pipe, |handle, operation| unsafe {
+            WriteFile(handle, Some(bytes), None, Some(operation))
+        })? as usize;
+        if written == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "launch pipe closed"));
+        }
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn read_pipe_request(pipe: &WinPipe) -> io::Result<LaunchRequest> {
+    let mut len = [0u8; 4];
+    read_pipe_exact(pipe, &mut len)?;
+    let len = u32::from_le_bytes(len) as usize;
+    if len > MAX_REQUEST {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "launch request is too large"));
+    }
+    let mut bytes = vec![0u8; len];
+    read_pipe_exact(pipe, &mut bytes)?;
+    decode(&bytes).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid launch request"))
+}
+
+#[cfg(windows)]
+fn connect_pipe(pipe: &WinPipe) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::{CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, HANDLE},
+        System::{
+            IO::{GetOverlappedResult, OVERLAPPED},
+            Pipes::ConnectNamedPipe,
+            Threading::{CreateEventW, WaitForSingleObject},
+        },
+    };
+
+    let handle = HANDLE(pipe.0.as_raw_handle());
+    let event = unsafe { CreateEventW(None, true, false, None) }.map_err(|e| io::Error::other(e.to_string()))?;
+    let mut operation = OVERLAPPED { hEvent: event, ..Default::default() };
+    let result = match unsafe { ConnectNamedPipe(handle, Some(&mut operation)) } {
         Ok(()) => Ok(()),
         Err(error) if error.code() == ERROR_PIPE_CONNECTED.to_hresult() => Ok(()),
+        Err(error) if error.code() == ERROR_IO_PENDING.to_hresult() => {
+            let _ = unsafe { WaitForSingleObject(event, u32::MAX) };
+            let mut ignored = 0;
+            unsafe { GetOverlappedResult(handle, &operation, &mut ignored, false) }
+                .map_err(|e| io::Error::other(e.to_string()))
+        }
         Err(error) => Err(io::Error::other(error.to_string())),
+    };
+    unsafe {
+        let _ = CloseHandle(event);
     }
+    result
 }
 
 #[cfg(windows)]
@@ -343,15 +481,15 @@ fn claim_windows(request: &LaunchRequest) -> Claim {
 }
 
 #[cfg(windows)]
-fn serve_windows(mut stream: std::fs::File, send: &mut impl FnMut(LaunchRequest) -> bool) {
+fn serve_windows(mut stream: WinPipe, send: &mut impl FnMut(LaunchRequest) -> bool) {
     loop {
         if connect_pipe(&stream).is_err() {
             return;
         }
-        let accepted = match read_request(&mut stream) {
+        let accepted = match read_pipe_request(&stream) {
             Ok(request) => {
                 let accepted = send(request);
-                let _ = stream.write_all(&[accepted as u8]);
+                let _ = write_pipe_all(&stream, &[accepted as u8]);
                 accepted
             }
             Err(_) => true,
@@ -416,5 +554,11 @@ mod tests {
         let started = Instant::now();
         assert!(read_request(&mut reader).is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_launch_streams_have_a_finite_io_budget() {
+        assert_eq!(LAUNCH_IO_TIMEOUT, std::time::Duration::from_secs(2));
     }
 }
