@@ -408,6 +408,8 @@ fn load_kwin_script(name: &str, script: &str) -> Option<(u32, std::path::PathBuf
     let mut command = quiet_command("gdbus");
     command.args([
             "call",
+            "--timeout",
+            "2",
             "--session",
             "--dest",
             "org.kde.KWin",
