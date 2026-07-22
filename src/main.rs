@@ -3149,11 +3149,22 @@ fn spawn_conf_watcher(proxy: EventLoopProxy<UserEvent>) {
 
 #[cfg(not(windows))]
 fn user_dir(env_name: &str, fallback: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os(env_name)
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(fallback)))
-        .map(|p| p.join("termie"))
+    user_dir_from(
+        std::env::var_os(env_name).map(std::path::PathBuf::from),
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+        fallback,
+    )
+}
+
+#[cfg(not(windows))]
+fn user_dir_from(
+    base: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+    fallback: &str,
+) -> Option<std::path::PathBuf> {
+    base.filter(|path| path.is_absolute())
+        .or_else(|| home.filter(|path| path.is_absolute()).map(|path| path.join(fallback)))
+        .map(|path| path.join("termie"))
 }
 
 #[cfg(windows)]
@@ -12081,6 +12092,19 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn user_directories_require_absolute_bases() {
+        assert_eq!(
+            user_dir_from(Some("relative/config".into()), Some("/home/termie".into()), ".config"),
+            Some("/home/termie/.config/termie".into())
+        );
+        assert_eq!(
+            user_dir_from(None, Some("relative/home".into()), ".config"),
+            None
+        );
+    }
 
     #[test]
     fn plugin_topics_are_bounded_and_nonempty() {
