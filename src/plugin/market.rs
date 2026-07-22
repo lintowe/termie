@@ -293,7 +293,7 @@ fn reject_symlinks(dir: &Path) -> Result<(), String> {
 }
 
 #[derive(Debug)]
-enum BoundedOutputError {
+pub(crate) enum BoundedOutputError {
     Io(std::io::Error),
     Limit,
 }
@@ -310,7 +310,7 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedOutpu
     Ok(bytes)
 }
 
-fn bounded_output(command: &mut Command, limit: usize) -> Result<Output, BoundedOutputError> {
+pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Output, BoundedOutputError> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

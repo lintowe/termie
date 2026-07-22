@@ -6,9 +6,11 @@
 use std::path::PathBuf;
 
 use crate::plugin::json::Json;
-use crate::plugin::market::quiet_command;
+use crate::plugin::market::{bounded_output, quiet_command, BoundedOutputError};
 
 const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/latest";
+const MAX_RELEASE_METADATA_BYTES: usize = 1024 * 1024;
+const MAX_RELEASE_ASSET_BYTES: usize = 128 * 1024 * 1024;
 
 fn update_curl() -> std::process::Command {
     let mut command = quiet_command("curl");
@@ -85,14 +87,20 @@ pub fn check(on_done: impl FnOnce(Option<Update>) + Send + 'static) {
 }
 
 fn fetch_latest() -> Option<Update> {
-    let out = update_curl()
-        .args(["-s", "-L", "--max-time", "20", "--", RELEASES_URL])
-        .output()
-        .ok()?;
+    let mut command = update_curl();
+    command.args(["-s", "-L", "--max-time", "20", "--", RELEASES_URL]);
+    let out = bounded_output(&mut command, MAX_RELEASE_METADATA_BYTES).ok()?;
     if !out.status.success() {
         return None;
     }
     parse_release(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn bounded_output_error(error: BoundedOutputError, limit: usize) -> String {
+    match error {
+        BoundedOutputError::Io(error) => error.to_string(),
+        BoundedOutputError::Limit => format!("download exceeds the {} MiB limit", limit / 1024 / 1024),
+    }
 }
 
 fn asset_name(version: &str) -> Option<String> {
@@ -192,23 +200,15 @@ fn download_to_prefix(u: &Update, prefix: Option<&std::path::Path>) -> Result<Pa
     let dir = fresh_temp_dir()?;
     let path = dir.join(name);
     let fetched = (|| {
-        let out = update_curl()
-            .args([
-                "-fsSL",
-                "--max-time",
-                "300",
-                "-o",
-                &path.to_string_lossy(),
-                "--",
-                &u.url,
-            ])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut command = update_curl();
+        command.args(["-fsSL", "--max-time", "300", "--", &u.url]);
+        let out = bounded_output(&mut command, MAX_RELEASE_ASSET_BYTES)
+            .map_err(|error| bounded_output_error(error, MAX_RELEASE_ASSET_BYTES))?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        verify_download(&bytes, &u.digest)
+        verify_download(&out.stdout, &u.digest)?;
+        std::fs::write(&path, &out.stdout).map_err(|e| e.to_string())
     })();
     if let Err(e) = fetched {
         let _ = std::fs::remove_dir_all(&dir);
@@ -485,6 +485,14 @@ mod tests {
         let bytes = vec![0x5a; 1024 * 1024];
         assert_eq!(verify_download(&bytes, &"00".repeat(32)), Err("checksum mismatch".into()));
         assert_eq!(verify_download(&bytes, &sha256_hex(&bytes)), Ok(()));
+    }
+
+    #[test]
+    fn bounded_release_downloads_report_the_limit() {
+        assert_eq!(
+            bounded_output_error(BoundedOutputError::Limit, MAX_RELEASE_ASSET_BYTES),
+            "download exceeds the 128 MiB limit"
+        );
     }
 
     #[cfg(target_os = "linux")]
