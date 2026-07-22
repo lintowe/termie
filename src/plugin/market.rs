@@ -12,6 +12,8 @@
 use std::path::{Component, Path, PathBuf};
 use std::io::Read;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::{Duration, Instant};
 
 use super::json::Json;
 use super::manifest::{id_is_safe, Manifest};
@@ -25,6 +27,7 @@ const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_ARCHIVE_LISTING_BYTES: usize = 16 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+const HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 /// the catalog repo + ref behind the raw URLs above. files under this prefix are
 /// fetched through `gh` (authenticated) so a private catalog works; everything
 /// else falls back to anonymous curl
@@ -319,6 +322,14 @@ fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedOutpu
 }
 
 pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Output, BoundedOutputError> {
+    bounded_output_with_deadline(command, limit, HELPER_TIMEOUT)
+}
+
+fn bounded_output_with_deadline(
+    command: &mut Command,
+    limit: usize,
+    timeout: Duration,
+) -> Result<Output, BoundedOutputError> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -326,6 +337,10 @@ pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Outp
         .map_err(BoundedOutputError::Io)?;
     let stdout = child.stdout.take().expect("piped child stdout");
     let mut stderr = child.stderr.take().expect("piped child stderr");
+    let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
+    let stdout_task = std::thread::spawn(move || {
+        let _ = stdout_tx.send(read_bounded(stdout, limit));
+    });
     let stderr_task = std::thread::spawn(move || {
         let mut kept = Vec::new();
         {
@@ -336,16 +351,58 @@ pub(crate) fn bounded_output(command: &mut Command, limit: usize) -> Result<Outp
         Ok::<_, std::io::Error>(kept)
     });
 
-    let stdout = match read_bounded(stdout, limit) {
-        Ok(stdout) => stdout,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stderr_task.join();
-            return Err(error);
+    let deadline = Instant::now() + timeout;
+    let mut stdout = None;
+    let status = loop {
+        if stdout.is_none() {
+            match stdout_rx.try_recv() {
+                Ok(Ok(bytes)) => stdout = Some(bytes),
+                Ok(Err(error)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_task.join();
+                    let _ = stderr_task.join();
+                    return Err(error);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_task.join();
+                    let _ = stderr_task.join();
+                    return Err(BoundedOutputError::Io(std::io::Error::other("stdout reader panicked")));
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_task.join();
+                let _ = stderr_task.join();
+                return Err(BoundedOutputError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "helper exceeded its deadline",
+                )));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_task.join();
+                let _ = stderr_task.join();
+                return Err(BoundedOutputError::Io(error));
+            }
         }
     };
-    let status = child.wait().map_err(BoundedOutputError::Io)?;
+    let stdout = match stdout {
+        Some(stdout) => stdout,
+        None => stdout_rx
+            .recv()
+            .map_err(|_| BoundedOutputError::Io(std::io::Error::other("stdout reader panicked")))??,
+    };
+    let _ = stdout_task.join();
     let stderr = stderr_task
         .join()
         .map_err(|_| BoundedOutputError::Io(std::io::Error::other("stderr reader panicked")))?
@@ -656,6 +713,36 @@ mod tests {
             read_bounded(std::io::Cursor::new(b"abcd"), 3),
             Err(BoundedOutputError::Limit)
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_output_kills_a_silent_helper_at_its_deadline() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5");
+        let started = std::time::Instant::now();
+        let result = bounded_output_with_deadline(&mut command, 1024, std::time::Duration::from_millis(50));
+        assert!(matches!(result, Err(BoundedOutputError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_output_times_out_after_early_stdout() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf ready; sleep 5"]);
+        let result = bounded_output_with_deadline(&mut command, 1024, std::time::Duration::from_millis(50));
+        assert!(matches!(result, Err(BoundedOutputError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_output_keeps_completed_stdout() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf ready"]);
+        let output = bounded_output_with_deadline(&mut command, 1024, std::time::Duration::from_millis(50)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ready");
     }
 
     #[cfg(target_os = "linux")]
