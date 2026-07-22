@@ -59,6 +59,18 @@ const MAX_LOCAL_PLUGINS: usize = 128;
 const MAX_PENDING_PTY_OUTPUT_EVENTS: usize = 64;
 const MAX_PENDING_PLUGIN_EVENTS: usize = 16;
 const MAX_PENDING_LAUNCH_EVENTS: usize = 16;
+const MAX_PLUGIN_SUBSCRIPTIONS_PER_PLUGIN: usize = 64;
+const MAX_PLUGIN_TOPIC_BYTES: usize = 256;
+
+fn plugin_topic_is_valid(topic: &str) -> bool {
+    !topic.is_empty() && topic.len() <= MAX_PLUGIN_TOPIC_BYTES
+}
+
+fn plugin_can_add_subscription(subscriptions: &[(usize, String)], plugin: usize, topic: &str) -> bool {
+    plugin_topic_is_valid(topic)
+        && !subscriptions.iter().any(|(owner, current)| *owner == plugin && current == topic)
+        && subscriptions.iter().filter(|(owner, _)| *owner == plugin).count() < MAX_PLUGIN_SUBSCRIPTIONS_PER_PLUGIN
+}
 
 struct EventBudget {
     limit: usize,
@@ -4804,14 +4816,22 @@ impl App {
             }
             // in-process bus: record a subscription (topic "*" = all)
             C::Subscribe { topic } => {
-                if !self.plugin_subs.iter().any(|(p, t)| *p == pidx && *t == topic) {
+                if !plugin_topic_is_valid(&topic) {
+                    log::warn!("plugin {pidx} sent an invalid subscription topic");
+                } else if plugin_can_add_subscription(&self.plugin_subs, pidx, &topic) {
                     self.plugin_subs.push((pidx, topic));
+                } else if !self.plugin_subs.iter().any(|(p, t)| *p == pidx && *t == topic) {
+                    log::warn!("plugin {pidx} exceeded its subscription limit");
                 }
             }
             // in-process bus: fan a published message out to every subscriber of
             // this topic (or "*"), tagged with the publisher's manifest id. the
             // publisher doesn't receive its own message
             C::Publish { topic, body } => {
+                if !plugin_topic_is_valid(&topic) {
+                    log::warn!("plugin {pidx} sent an invalid publish topic");
+                    return;
+                }
                 let from = self.plugin_ids.get(pidx).cloned().unwrap_or_default();
                 let targets: Vec<usize> = self
                     .plugin_subs
@@ -12042,6 +12062,26 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_topics_are_bounded_and_nonempty() {
+        assert!(plugin_topic_is_valid("build.events"));
+        assert!(plugin_topic_is_valid("*"));
+        assert!(!plugin_topic_is_valid(""));
+        assert!(!plugin_topic_is_valid(&"x".repeat(MAX_PLUGIN_TOPIC_BYTES + 1)));
+    }
+
+    #[test]
+    fn plugin_subscriptions_are_unique_and_capped_per_plugin() {
+        let mut subscriptions: Vec<_> = (0..MAX_PLUGIN_SUBSCRIPTIONS_PER_PLUGIN)
+            .map(|n| (7, format!("topic.{n}")))
+            .collect();
+        assert!(!plugin_can_add_subscription(&subscriptions, 7, "topic.new"));
+        assert!(plugin_can_add_subscription(&subscriptions, 8, "topic.new"));
+        subscriptions.pop();
+        assert!(plugin_can_add_subscription(&subscriptions, 7, "topic.new"));
+        assert!(!plugin_can_add_subscription(&subscriptions, 7, "topic.0"));
+    }
 
     #[test]
     fn atomic_write_replaces_existing_file() {
