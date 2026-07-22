@@ -28,6 +28,9 @@ jobs:
   # it's cheap after the build. formatting is intentionally not enforced (the
   # project keeps its own non-rustfmt style); clippy is the quality gate.
   build:
+    # self-hosted runners execute PR code in the host environment, so only branches
+    # from this repository may schedule them
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows-vm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,6 +62,9 @@ jobs:
   # tests skip themselves when the runner has no adapter, so this passes on a
   # headless vm while still covering the platform layer, pty, and parser
   build-linux:
+    # self-hosted runners execute PR code in the host environment, so only branches
+    # from this repository may schedule them
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux-vm]
     env:
       # runner images may retain a global cargo wrapper after sccache is removed
@@ -123,6 +129,9 @@ jobs:
 
   # security advisory scan of the dependency tree (RUSTSEC database)
   audit:
+    # self-hosted runners execute PR code in the host environment, so only branches
+    # from this repository may schedule them
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux-vm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
