@@ -57,28 +57,38 @@ const MAX_STARTUP_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_PLUGIN_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_LOCAL_PLUGINS: usize = 128;
 const MAX_PENDING_PTY_OUTPUT_EVENTS: usize = 64;
+const MAX_PENDING_PLUGIN_EVENTS: usize = 16;
 
-struct PtyOutputBudget {
+struct EventBudget {
+    limit: usize,
     pending: Mutex<usize>,
     drained: Condvar,
 }
 
-struct PtyOutputPermit {
-    budget: Arc<PtyOutputBudget>,
+struct EventPermit {
+    budget: Arc<EventBudget>,
 }
 
-impl PtyOutputBudget {
-    fn acquire(self: &Arc<Self>) -> PtyOutputPermit {
+impl EventBudget {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            pending: Mutex::new(0),
+            drained: Condvar::new(),
+        })
+    }
+
+    fn acquire(self: &Arc<Self>) -> EventPermit {
         let mut pending = self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        while *pending >= MAX_PENDING_PTY_OUTPUT_EVENTS {
+        while *pending >= self.limit {
             pending = self.drained.wait(pending).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         *pending += 1;
-        PtyOutputPermit { budget: Arc::clone(self) }
+        EventPermit { budget: Arc::clone(self) }
     }
 }
 
-impl Drop for PtyOutputPermit {
+impl Drop for EventPermit {
     fn drop(&mut self) {
         let mut pending = self.budget.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *pending = pending.saturating_sub(1);
@@ -129,12 +139,12 @@ fn satellite_window_attrs(icon: Option<winit::window::Icon>) -> WindowAttributes
 }
 
 enum UserEvent {
-    Pty { id: usize, bytes: Vec<u8>, _permit: PtyOutputPermit },
+    Pty { id: usize, bytes: Vec<u8>, _permit: EventPermit },
     Exited { id: usize },
     /// a pool shell finished spawning on a worker thread (None = spawn failed)
     PaneReady(Option<Box<Pane>>),
     /// a plugin process emitted a protocol message (id = plugin index)
-    Plugin { id: usize, msg: plugin::PluginMsg },
+    Plugin { id: usize, msg: plugin::PluginMsg, _permit: EventPermit },
     /// the marketplace catalog finished fetching on a worker thread (Ok with
     /// entries, or Err with a reason the fetch failed)
     Market(Result<Vec<plugin::market::Entry>, String>),
@@ -4409,10 +4419,7 @@ impl App {
     fn start_reader(&self, pane: &mut Pane) {
         let proxy = self.proxy.clone();
         let id = pane.id;
-        let budget = Arc::new(PtyOutputBudget {
-            pending: Mutex::new(0),
-            drained: Condvar::new(),
-        });
+        let budget = EventBudget::new(MAX_PENDING_PTY_OUTPUT_EVENTS);
         pane.pty.start_reader(move |msg| match msg {
             PtyMsg::Output(b) => {
                 let permit = budget.acquire();
@@ -4678,8 +4685,10 @@ impl App {
             // the index this plugin will occupy once pushed
             let idx = self.plugins.len();
             let proxy = self.proxy.clone();
+            let budget = EventBudget::new(MAX_PENDING_PLUGIN_EVENTS);
             let on_msg = move |msg| {
-                let _ = proxy.send_event(UserEvent::Plugin { id: idx, msg });
+                let permit = budget.acquire();
+                let _ = proxy.send_event(UserEvent::Plugin { id: idx, msg, _permit: permit });
             };
             // sandboxed launch is opt-in; on failure we fail closed (skip the
             // plugin) rather than run it unconfined
@@ -11264,7 +11273,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            UserEvent::Plugin { id, msg } => match msg {
+            UserEvent::Plugin { id, msg, _permit } => match msg {
                 plugin::PluginMsg::Cmd(cmd) => self.handle_plugin_cmd(id, cmd),
                 plugin::PluginMsg::Exited => {
                     // drop this plugin's widgets + bus subscriptions so a dead
@@ -12017,10 +12026,7 @@ mod tests {
 
     #[test]
     fn pty_output_backpressure_releases_after_event_handling() {
-        let budget = Arc::new(PtyOutputBudget {
-            pending: Mutex::new(0),
-            drained: Condvar::new(),
-        });
+        let budget = EventBudget::new(MAX_PENDING_PTY_OUTPUT_EVENTS);
         let mut permits: Vec<_> = (0..MAX_PENDING_PTY_OUTPUT_EVENTS).map(|_| budget.acquire()).collect();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let waiting_budget = Arc::clone(&budget);
