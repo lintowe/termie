@@ -55,7 +55,8 @@ pub fn parse_index(text: &str) -> Vec<Entry> {
     arr.iter()
         .filter_map(|e| {
             let id = e.get_str("id")?.to_string();
-            if !id_is_safe(&id) {
+            let url = e.get_str("url").unwrap_or("").to_string();
+            if !id_is_safe(&id) || !marketplace_url_is_safe(&url) {
                 return None;
             }
             Some(Entry {
@@ -63,7 +64,7 @@ pub fn parse_index(text: &str) -> Vec<Entry> {
                 name: e.get_str("name").unwrap_or("").to_string(),
                 version: e.get_str("version").unwrap_or("0.0.0").to_string(),
                 description: e.get_str("description").unwrap_or("").to_string(),
-                url: e.get_str("url").unwrap_or("").to_string(),
+                url,
                 permissions: e
                     .get("permissions")
                     .and_then(Json::as_array)
@@ -124,6 +125,19 @@ fn archive_path_is_safe(path: &str) -> bool {
     !path.as_os_str().is_empty()
         && !path.is_absolute()
         && path.components().all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+}
+
+fn marketplace_url_is_safe(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    if rest.bytes().any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+        || rest.contains(['\\', '#'])
+    {
+        return false;
+    }
+    let authority = rest.split(['/', '?']).next().unwrap_or_default();
+    !authority.is_empty() && !authority.contains('@')
 }
 
 fn validate_archive_listing(bytes: Vec<u8>) -> Result<usize, String> {
@@ -336,6 +350,9 @@ fn bounded_output(command: &mut Command, limit: usize) -> Result<Output, Bounded
 /// user's login; anything else — or a missing/unauthenticated gh — falls back
 /// to anonymous curl
 fn fetch_bytes(url: &str, limit: usize) -> Result<Vec<u8>, String> {
+    if !marketplace_url_is_safe(url) {
+        return Err("marketplace URL must be an absolute HTTPS URL".to_string());
+    }
     let repo_path = url.strip_prefix(CATALOG_RAW_PREFIX);
     if let Some(path) = repo_path {
         let api = format!("repos/{CATALOG_REPO}/contents/{path}?ref={CATALOG_REF}");
@@ -349,7 +366,7 @@ fn fetch_bytes(url: &str, limit: usize) -> Result<Vec<u8>, String> {
         }
     }
     let mut command = quiet_command("curl");
-    command.args(["-fsSL", "--max-time", "60", url]);
+    command.args(["-q", "--globoff", "-fsSL", "--max-time", "60", "--", url]);
     match bounded_output(&mut command, limit) {
         Ok(o) if o.status.success() => Ok(o.stdout),
         Ok(_) if repo_path.is_some() => {
@@ -527,11 +544,36 @@ mod tests {
         let text = r#"{"plugins":[
             {"id":"../evil","url":"https://x/e.zip"},
             {"id":"ok","url":""},
+            {"id":"file","url":"file:///etc/passwd"},
+            {"id":"options","url":"--output=/tmp/termie"},
+            {"id":"credentials","url":"https://user:pass@x/g.zip"},
             {"id":"good","url":"https://x/g.zip"}
         ]}"#;
         let e = parse_index(text);
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].id, "good");
+    }
+
+    #[test]
+    fn marketplace_urls_require_https_without_userinfo_or_ambiguous_bytes() {
+        for url in [
+            "https://plugins.example/pet.zip",
+            "https://plugins.example:8443/pet.zip?channel=stable",
+            "https://[2001:db8::1]/pet.zip",
+        ] {
+            assert!(marketplace_url_is_safe(url), "{url:?} should be accepted");
+        }
+        for url in [
+            "http://plugins.example/pet.zip",
+            "file:///etc/passwd",
+            "https://user:pass@plugins.example/pet.zip",
+            "https://plugins.example\\pet.zip",
+            "https://plugins.example/pet.zip#fragment",
+            "https://plugins.example/pet zip",
+            "-o/tmp/termie",
+        ] {
+            assert!(!marketplace_url_is_safe(url), "{url:?} should be rejected");
+        }
     }
 
     #[test]
