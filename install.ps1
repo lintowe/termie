@@ -32,7 +32,7 @@ try {
 }
 # modern ConPTY host beside the exe: the inbox conhost strips sixel, the
 # current OpenConsole passes it through (termie prefers a sideloaded pair)
-& pwsh -NoProfile -File (Join-Path $repo 'setup\fetch-conpty.ps1') -Dest $InstallDir
+& (Join-Path $repo 'setup\fetch-conpty.ps1') -Dest $InstallDir
 
 $assets = Join-Path $repo 'assets'
 if (Test-Path $assets) {
