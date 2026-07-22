@@ -44,6 +44,8 @@ pub enum PluginMsg {
 enum Proc {
     Std(Child),
     Sandbox(sandbox::Sandboxed),
+    #[cfg(test)]
+    Tracking(std::sync::Arc<std::sync::atomic::AtomicBool>),
 }
 
 impl Proc {
@@ -53,6 +55,10 @@ impl Proc {
                 let _ = c.kill();
             }
             Proc::Sandbox(s) => s.kill(),
+            #[cfg(test)]
+            Proc::Tracking(killed) => {
+                killed.store(true, std::sync::atomic::Ordering::Release);
+            }
         }
     }
 }
@@ -79,6 +85,12 @@ fn discard_line(reader: &mut impl BufRead) -> std::io::Result<()> {
 pub struct Plugin {
     proc: Proc,
     writer_tx: Option<SyncSender<Vec<u8>>>,
+}
+
+impl Drop for Plugin {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 impl Plugin {
@@ -216,6 +228,17 @@ impl Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_plugin_terminates_its_process() {
+        let killed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let plugin = Plugin {
+            proc: Proc::Tracking(killed.clone()),
+            writer_tx: None,
+        };
+        drop(plugin);
+        assert!(killed.load(std::sync::atomic::Ordering::Acquire));
+    }
 
     #[test]
     fn host_event_queue_is_bounded() {
