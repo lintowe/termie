@@ -402,7 +402,7 @@ fn apply_kwin_window_script(
 #[cfg(target_os = "linux")]
 fn load_kwin_script(name: &str, script: &str) -> Option<(u32, std::path::PathBuf)> {
     let dir = crate::cache_dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
+    crate::ensure_user_dir(&dir).ok()?;
     let path = dir.join(format!("{name}.js"));
     std::fs::write(&path, script).ok()?;
     let mut command = quiet_command("gdbus");
@@ -1193,7 +1193,7 @@ fn set_xdg_default_terminal(enabled: bool) -> bool {
     let Some(dir) = path.parent() else {
         return false;
     };
-    if std::fs::create_dir_all(dir).is_err() {
+    if crate::ensure_user_dir(dir).is_err() {
         return false;
     }
     let temporary = path.with_extension("list.termie-tmp");
@@ -1326,7 +1326,7 @@ fn save_kde_terminal_snapshot(application: Option<&str>, service: Option<&str>) 
     let Some(dir) = path.parent() else {
         return false;
     };
-    if std::fs::create_dir_all(dir).is_err() {
+    if crate::ensure_user_dir(dir).is_err() {
         return false;
     }
     let temporary = path.with_extension("termie-tmp");

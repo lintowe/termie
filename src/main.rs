@@ -1584,7 +1584,7 @@ fn write_keybindings_template_if_absent() {
     if path.exists() {
         return;
     }
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = ensure_user_dir(&dir);
     let _ = std::fs::write(&path, keybindings_template());
 }
 
@@ -3167,6 +3167,20 @@ fn user_dir_from(
         .map(|path| path.join("termie"))
 }
 
+pub(crate) fn ensure_user_dir(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
 #[cfg(windows)]
 fn known_folder(id: &windows::core::GUID) -> Option<std::path::PathBuf> {
     use windows::Win32::System::Com::CoTaskMemFree;
@@ -3224,7 +3238,7 @@ fn migrated_path(dir: std::path::PathBuf, name: &str) -> std::path::PathBuf {
         && let Some(legacy) = app_dir().map(|d| d.join(name))
         && legacy.exists()
     {
-        if std::fs::create_dir_all(&dir).is_ok() && std::fs::rename(&legacy, &path).is_ok() {
+        if ensure_user_dir(&dir).is_ok() && std::fs::rename(&legacy, &path).is_ok() {
             return path;
         }
         return legacy;
@@ -3324,7 +3338,7 @@ fn install_file_log() {
     let Some(dir) = state_dir() else {
         return;
     };
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = ensure_user_dir(&dir);
     let path = dir.join("termie.log");
     // bound the file: start over once it passes ~512 KB
     let oversized = std::fs::metadata(&path).map(|m| m.len() > 512 * 1024).unwrap_or(false);
@@ -3409,7 +3423,7 @@ fn save_plugin_states(map: &std::collections::HashMap<String, PluginState>) {
         return;
     };
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = ensure_user_dir(dir);
     }
     let mut s = String::new();
     // stable order so the file doesn't churn between writes
@@ -8373,7 +8387,7 @@ impl App {
             return;
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = ensure_user_dir(dir);
         }
         let mut s = String::new();
         let _ = writeln!(s, "scrollback={}", self.config.scrollback);
@@ -8535,7 +8549,7 @@ impl App {
             return;
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = ensure_user_dir(dir);
         }
         let text = snap.to_json_string();
         let _ = write_atomic(&path, text.as_bytes());
@@ -12104,6 +12118,21 @@ mod tests {
             user_dir_from(None, Some("relative/home".into()), ".config"),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_directories_are_private_when_created() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("termie-private-dir-{}-{nonce}", std::process::id()));
+        ensure_user_dir(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::remove_dir(path).unwrap();
     }
 
     #[test]

@@ -87,7 +87,7 @@ pub fn due() -> bool {
 pub fn mark_checked() {
     if let Some(p) = stamp_path() {
         if let Some(dir) = p.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = crate::ensure_user_dir(dir);
         }
         let _ = std::fs::write(p, b"checked");
     }

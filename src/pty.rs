@@ -226,7 +226,7 @@ fn integration_dir() -> Option<std::path::PathBuf> {
     static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let dir = crate::cache_dir()?.join("shell");
-        std::fs::create_dir_all(&dir).ok()?;
+        crate::ensure_user_dir(&dir).ok()?;
         std::fs::write(dir.join("bashrc"), BASH_RC).ok()?;
         std::fs::write(dir.join(".zshenv"), ZSH_ENV).ok()?;
         Some(dir)
