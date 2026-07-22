@@ -12,6 +12,7 @@
 //! permission (`--share-net`, plus resolv.conf and the CA store so tls works).
 
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -19,6 +20,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 /// stdio pipes. dropping or `kill`ing it stops the process
 pub struct Sandboxed {
     child: Child,
+    terminated: bool,
 }
 
 impl Sandboxed {
@@ -31,8 +33,21 @@ impl Sandboxed {
     }
 
     pub fn kill(&mut self) {
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
+        unsafe {
+            let _ = libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for Sandboxed {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -78,6 +93,15 @@ pub fn spawn(
     }
     cmd.arg("--chdir").arg(PLUGIN_DIR);
     cmd.arg("--").arg(sandbox_program).args(args);
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
     // discard the plugin's stderr in the sandbox so its logs can't corrupt
     // the protocol stream
     let child = cmd
@@ -85,7 +109,7 @@ pub fn spawn(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    Ok(Sandboxed { child })
+    Ok(Sandboxed { child, terminated: false })
 }
 
 /// a conservative moniker derived from a plugin id, mirroring the windows
@@ -106,6 +130,42 @@ mod tests {
     fn moniker_is_bounded_and_prefixed() {
         assert_eq!(moniker_for("pet"), "termie.plugin.pet");
         assert!(moniker_for(&"x".repeat(100)).len() <= 64);
+    }
+
+    #[test]
+    fn killing_sandboxed_process_reaps_its_group() {
+        use std::time::{Duration, Instant};
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let marker = std::env::temp_dir().join(format!("termie-sandbox-child-{}-{nonce}", std::process::id()));
+        let command = format!("sleep 60 & printf %s \"$!\" > '{}' && wait", marker.display());
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(command);
+        unsafe {
+            child.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            });
+        }
+        let mut sandbox = Sandboxed { child: child.spawn().expect("spawn sandboxed child"), terminated: false };
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child_pid: u32 = std::fs::read_to_string(&marker).expect("child pid").parse().expect("numeric child pid");
+        sandbox.kill();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while std::path::Path::new(&format!("/proc/{child_pid}")).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(marker);
+        assert!(!std::path::Path::new(&format!("/proc/{child_pid}")).exists());
     }
 
     // a real end-to-end launch: the jailed child must not see the host environment or home

@@ -20,6 +20,7 @@ use std::path::Path;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
+use crate::plugin::market::ProcessTree;
 use windows::core::{Error as WinError, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAGS,
@@ -59,6 +60,7 @@ fn to_io(e: WinError) -> io::Error {
 /// stdio pipes. dropping or `kill`ing it stops the process
 pub struct Sandboxed {
     process: HANDLE,
+    tree: ProcessTree,
     stdin: Option<File>,
     stdout: Option<File>,
 }
@@ -79,6 +81,7 @@ impl Sandboxed {
     pub fn kill(&mut self) {
         if !self.process.is_invalid() {
             unsafe {
+                self.tree.terminate();
                 let _ = TerminateProcess(self.process, 1);
                 let _ = CloseHandle(self.process);
             }
@@ -89,11 +92,7 @@ impl Sandboxed {
 
 impl Drop for Sandboxed {
     fn drop(&mut self) {
-        if !self.process.is_invalid() {
-            unsafe {
-                let _ = CloseHandle(self.process);
-            }
-        }
+        self.kill();
     }
 }
 
@@ -246,6 +245,7 @@ fn spawn_inner(
         let stdout = File::from_raw_handle(host_stdout_r.0 as *mut _);
         Ok(Sandboxed {
             process: pi.hProcess,
+            tree: ProcessTree::attach_handle(pi.hProcess),
             stdin: Some(stdin),
             stdout: Some(stdout),
         })

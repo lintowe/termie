@@ -328,8 +328,13 @@ pub(crate) struct ProcessTree(Option<windows::Win32::Foundation::HANDLE>);
 impl ProcessTree {
     pub(crate) fn attach(child: &std::process::Child) -> Self {
         use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+
+        Self::attach_handle(HANDLE(child.as_raw_handle() as *mut _))
+    }
+
+    pub(crate) fn attach_handle(process: windows::Win32::Foundation::HANDLE) -> Self {
         use windows::Win32::{
-            Foundation::HANDLE,
             System::JobObjects::{
                 AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -350,7 +355,7 @@ impl ProcessTree {
                 &limits as *const _ as _,
                 std::mem::size_of_val(&limits).try_into().unwrap(),
             )
-            .and_then(|_| AssignProcessToJobObject(handle, HANDLE(child.as_raw_handle() as *mut _)))
+            .and_then(|_| AssignProcessToJobObject(handle, process))
             .is_ok()
         };
         if !configured {
