@@ -3620,12 +3620,16 @@ fn parse_persisted(text: &str) -> Persisted {
             "backend" => p.backend = render::BackendChoice::from_label(v),
             "restore_on_launch" => p.restore_on_launch = v != "false",
             "font_size" => {
-                if let Ok(n) = v.parse() {
+                if let Ok(n) = v.parse::<f32>()
+                    && n.is_finite()
+                {
                     p.font_size = n;
                 }
             }
             "padding" => {
-                if let Ok(n) = v.parse() {
+                if let Ok(n) = v.parse::<f32>()
+                    && n.is_finite()
+                {
                     p.padding = n;
                 }
             }
@@ -3638,7 +3642,9 @@ fn parse_persisted(text: &str) -> Persisted {
             "cursor_blink" => p.cursor_blink = v != "false",
             "bold_as_bright" => p.bold_as_bright = v != "false",
             "line_height" => {
-                if let Ok(x) = v.parse::<f32>() {
+                if let Ok(x) = v.parse::<f32>()
+                    && x.is_finite()
+                {
                     p.line_height = x;
                 }
             }
@@ -3663,14 +3669,18 @@ fn parse_persisted(text: &str) -> Persisted {
                 }
             }
             "min_contrast" => {
-                if let Ok(x) = v.parse::<f32>() {
+                if let Ok(x) = v.parse::<f32>()
+                    && x.is_finite()
+                {
                     p.min_contrast = x.clamp(1.0, 21.0);
                 }
             }
             "ligatures" => p.ligatures = v != "false" && v != "off",
             "background_image" => p.background_image = (!v.is_empty()).then(|| v.to_string()),
             "background_image_opacity" => {
-                if let Ok(x) = v.parse::<f32>() {
+                if let Ok(x) = v.parse::<f32>()
+                    && x.is_finite()
+                {
                     p.background_image_opacity = x.clamp(0.0, 1.0);
                 }
             }
@@ -12898,6 +12908,19 @@ mod tests {
         assert!(!p.plugin_sandbox);
         // unknown keys leave everything else at its default
         assert_eq!(p.scrollback, Persisted::default().scrollback);
+    }
+
+    #[test]
+    fn config_ignores_non_finite_renderer_values() {
+        let p = parse_persisted(
+            "font_size=NaN\npadding=inf\nline_height=-inf\nmin_contrast=NaN\nbackground_image_opacity=NaN\n",
+        );
+        let defaults = Persisted::default();
+        assert_eq!(p.font_size, defaults.font_size);
+        assert_eq!(p.padding, defaults.padding);
+        assert_eq!(p.line_height, defaults.line_height);
+        assert_eq!(p.min_contrast, defaults.min_contrast);
+        assert_eq!(p.background_image_opacity, defaults.background_image_opacity);
     }
 
     #[test]
