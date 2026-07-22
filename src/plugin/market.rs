@@ -322,11 +322,11 @@ pub(crate) enum BoundedOutputError {
 }
 
 #[cfg(windows)]
-struct HelperJob(Option<windows::Win32::Foundation::HANDLE>);
+pub(crate) struct ProcessTree(Option<windows::Win32::Foundation::HANDLE>);
 
 #[cfg(windows)]
-impl HelperJob {
-    fn attach(child: &std::process::Child) -> Self {
+impl ProcessTree {
+    pub(crate) fn attach(child: &std::process::Child) -> Self {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::{
             Foundation::HANDLE,
@@ -359,7 +359,7 @@ impl HelperJob {
         job
     }
 
-    fn terminate(&mut self) {
+    pub(crate) fn terminate(&mut self) {
         use windows::Win32::System::JobObjects::TerminateJobObject;
 
         if let Some(handle) = self.0 {
@@ -375,22 +375,22 @@ impl HelperJob {
 }
 
 #[cfg(windows)]
-impl Drop for HelperJob {
+impl Drop for ProcessTree {
     fn drop(&mut self) {
         self.close();
     }
 }
 
 #[cfg(not(windows))]
-struct HelperJob;
+pub(crate) struct ProcessTree;
 
 #[cfg(not(windows))]
-impl HelperJob {
-    fn attach(_child: &std::process::Child) -> Self {
+impl ProcessTree {
+    pub(crate) fn attach(_child: &std::process::Child) -> Self {
         Self
     }
 
-    fn terminate(&mut self) {}
+    pub(crate) fn terminate(&mut self) {}
 }
 
 fn read_bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>, BoundedOutputError> {
@@ -432,7 +432,7 @@ pub(crate) fn bounded_output_with_deadline(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(BoundedOutputError::Io)?;
-    let mut job = HelperJob::attach(&child);
+    let mut job = ProcessTree::attach(&child);
     let stdout = child.stdout.take().expect("piped child stdout");
     let mut stderr = child.stderr.take().expect("piped child stderr");
     let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
@@ -508,7 +508,7 @@ pub(crate) fn bounded_output_with_deadline(
     Ok(Output { status, stdout, stderr })
 }
 
-fn kill_helper(child: &mut std::process::Child, job: &mut HelperJob) {
+fn kill_helper(child: &mut std::process::Child, job: &mut ProcessTree) {
     #[cfg(unix)]
     unsafe {
         let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);

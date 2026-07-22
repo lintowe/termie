@@ -25,6 +25,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread;
 
+use market::ProcessTree;
+
 const PLUGIN_WRITE_QUEUE_CAP: usize = 64;
 const MAX_HOST_EVENT_BYTES: usize = 64 * 1024;
 
@@ -42,7 +44,7 @@ pub enum PluginMsg {
 /// the OS process behind a plugin: either a normal child or, when sandboxing is
 /// enabled, an appcontainer-confined process spawned through `sandbox`
 enum Proc {
-    Std(Child),
+    Std { child: Child, tree: ProcessTree },
     Sandbox(sandbox::Sandboxed),
     #[cfg(test)]
     Tracking(std::sync::Arc<std::sync::atomic::AtomicBool>),
@@ -51,9 +53,14 @@ enum Proc {
 impl Proc {
     fn kill(&mut self) {
         match self {
-            Proc::Std(c) => {
-                let _ = c.kill();
-                let _ = c.wait();
+            Proc::Std { child, tree } => {
+                #[cfg(unix)]
+                unsafe {
+                    let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                }
+                tree.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
             }
             Proc::Sandbox(s) => s.kill(),
             #[cfg(test)]
@@ -118,12 +125,26 @@ impl Plugin {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+        }
         let mut child = cmd.spawn()?;
 
         let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().expect("piped stdout"));
         let writer_tx = child.stdin.take().map(|w| Self::start_writer(Box::new(w)));
         Self::start_reader(id, stdout, on_msg);
-        Ok(Plugin { proc: Proc::Std(child), writer_tx })
+        let tree = ProcessTree::attach(&child);
+        Ok(Plugin { proc: Proc::Std { child, tree }, writer_tx })
     }
 
     /// spawn `program args...` as a plugin confined to the OS sandbox (a
@@ -243,15 +264,28 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn killing_standard_plugin_reaps_its_child() {
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exec sleep 60"])
-            .spawn()
-            .expect("spawn child");
-        let pid = child.id();
-        let mut proc = Proc::Std(child);
-        proc.kill();
-        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    fn killing_standard_plugin_reaps_its_process_group() {
+        use std::time::{Duration, Instant};
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let marker = std::env::temp_dir().join(format!("termie-plugin-child-{}-{nonce}", std::process::id()));
+        let command = format!("sleep 60 & printf %s \"$!\" > '{}' && wait", marker.display());
+        let mut plugin = Plugin::spawn("test", "/bin/sh", &["-c".into(), command], |_| {}).expect("spawn plugin");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let child_pid: u32 = std::fs::read_to_string(&marker).expect("child pid").parse().expect("numeric child pid");
+        plugin.kill();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while std::path::Path::new(&format!("/proc/{child_pid}")).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(marker);
+        assert!(!std::path::Path::new(&format!("/proc/{child_pid}")).exists());
     }
 
     #[test]
