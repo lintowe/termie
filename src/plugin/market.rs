@@ -750,6 +750,13 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_helper_resolution_requires_an_absolute_path() {
+        assert_eq!(quiet_command("/bin/sh").get_program(), std::ffi::OsStr::new("/bin/sh"));
+        assert_eq!(quiet_command("termie-helper-that-does-not-exist").get_program(), std::ffi::OsStr::new(""));
+    }
+
     #[test]
     fn parse_index_extracts_entries() {
         let text = r#"{"plugins":[
