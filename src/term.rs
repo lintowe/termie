@@ -100,6 +100,8 @@ fn parse_color_spec(s: &[u8]) -> Option<crate::color::Rgb> {
 const KBD_SUPPORTED: u8 = 0b11011;
 /// bound the flag stack so a misbehaving app can't grow it without limit
 const KBD_STACK_CAP: usize = 16;
+/// bound replies while a pty writer is temporarily unable to drain them
+const MAX_PENDING_RESPONSES: usize = 64 * 1024;
 
 pub struct Terminal {
     pub grid: Grid,
@@ -212,6 +214,12 @@ impl Terminal {
             cell_px: (0, 0),
             dcs: None,
             sixel_display_mode: false,
+        }
+    }
+
+    fn queue_response(&mut self, reply: &[u8]) {
+        if reply.len() <= MAX_PENDING_RESPONSES.saturating_sub(self.responses.len()) {
+            self.responses.extend_from_slice(reply);
         }
     }
 
@@ -934,12 +942,11 @@ impl Perform for Terminal {
             // here, so every action reads back the same values
             'S' if private => {
                 match param_at(params, 0, 0) {
-                    1 => self.responses.extend_from_slice(b"\x1b[?1;0;256S"),
+                    1 => self.queue_response(b"\x1b[?1;0;256S"),
                     2 => self
-                        .responses
-                        .extend_from_slice(format!("\x1b[?2;0;{};{}S", crate::sixel::MAX_W, crate::sixel::MAX_H).as_bytes()),
+                        .queue_response(format!("\x1b[?2;0;{};{}S", crate::sixel::MAX_W, crate::sixel::MAX_H).as_bytes()),
                     // ReGIS and anything else: status 1 = error in item
-                    i => self.responses.extend_from_slice(format!("\x1b[?{};1S", i).as_bytes()),
+                    i => self.queue_response(format!("\x1b[?{};1S", i).as_bytes()),
                 }
             }
             'S' => self.grid.scroll_up(param_at(params, 0, 1) as usize),
@@ -992,25 +999,24 @@ impl Perform for Terminal {
                 if what == 6 {
                     let r = self.grid.cursor.row + 1;
                     let c = self.grid.cursor.col + 1;
-                    self.responses
-                        .extend_from_slice(format!("\x1b[{};{}R", r, c).as_bytes());
+                    self.queue_response(format!("\x1b[{};{}R", r, c).as_bytes());
                 } else if what == 5 {
-                    self.responses.extend_from_slice(b"\x1b[0n");
+                    self.queue_response(b"\x1b[0n");
                 }
             }
             'c' => {
                 if intermediates.first() == Some(&b'>') {
                     // DA2 secondary device attributes: a VT220-class id, version 0
-                    self.responses.extend_from_slice(b"\x1b[>41;0;0c");
+                    self.queue_response(b"\x1b[>41;0;0c");
                 } else if !private {
                     // DA1: VT220-class (62) with sixel (4) and ANSI color (22) —
                     // lsix/chafa/img2sixel detect sixel from the ";4"
-                    self.responses.extend_from_slice(b"\x1b[?62;4;22c");
+                    self.queue_response(b"\x1b[?62;4;22c");
                 }
             }
             // XTVERSION (CSI > q): report name + version as DCS > | text ST
             'q' if intermediates.first() == Some(&b'>') => {
-                self.responses.extend_from_slice(
+                self.queue_response(
                     concat!("\x1bP>|termie ", env!("CARGO_PKG_VERSION"), "\x1b\\").as_bytes(),
                 );
             }
@@ -1038,8 +1044,7 @@ impl Perform for Terminal {
                 // kitty keyboard: report the active flags (CSI ? u)
                 Some(&b'?') => {
                     let f = self.kbd_flags();
-                    self.responses
-                        .extend_from_slice(format!("\x1b[?{}u", f).as_bytes());
+                    self.queue_response(format!("\x1b[?{}u", f).as_bytes());
                 }
                 // kitty keyboard: set flags on the active entry (CSI = flags ; mode u)
                 Some(&b'=') => {
@@ -1060,8 +1065,7 @@ impl Perform for Terminal {
             'p' if private && intermediates.get(1) == Some(&b'$') => {
                 let m = param_at(params, 0, 0);
                 let state = self.dec_mode_state(m);
-                self.responses
-                    .extend_from_slice(format!("\x1b[?{};{}$y", m, state).as_bytes());
+                self.queue_response(format!("\x1b[?{};{}$y", m, state).as_bytes());
             }
             // DECRQM for ANSI modes (CSI Ps $ p): only IRM is tracked
             'p' if !private && intermediates.first() == Some(&b'$') => {
@@ -1076,8 +1080,7 @@ impl Perform for Terminal {
                     }
                     _ => 0,
                 };
-                self.responses
-                    .extend_from_slice(format!("\x1b[{};{}$y", m, state).as_bytes());
+                self.queue_response(format!("\x1b[{};{}$y", m, state).as_bytes());
             }
             // XTWINOPS size reports; the resize/iconify/title-stack ops are
             // deliberately ignored
@@ -1088,19 +1091,19 @@ impl Perform for Terminal {
                     if cw > 0 && ch > 0 {
                         let w = self.grid.cols * cw as usize;
                         let h = self.grid.rows * ch as usize;
-                        self.responses.extend_from_slice(format!("\x1b[4;{};{}t", h, w).as_bytes());
+                        self.queue_response(format!("\x1b[4;{};{}t", h, w).as_bytes());
                     }
                 }
                 // cell size in pixels: reply CSI 6 ; height ; width t
                 16 => {
                     let (cw, ch) = self.cell_px;
                     if cw > 0 && ch > 0 {
-                        self.responses.extend_from_slice(format!("\x1b[6;{};{}t", ch, cw).as_bytes());
+                        self.queue_response(format!("\x1b[6;{};{}t", ch, cw).as_bytes());
                     }
                 }
                 // text area in cells: reply CSI 8 ; rows ; cols t
                 18 => {
-                    self.responses.extend_from_slice(
+                    self.queue_response(
                         format!("\x1b[8;{};{}t", self.grid.rows, self.grid.cols).as_bytes(),
                     );
                 }
@@ -1240,7 +1243,7 @@ impl Perform for Terminal {
                             _ => (self.colors.cursor, ColorReq::Cursor, "12"),
                         };
                         match set {
-                            Some(c) => self.responses.extend_from_slice(&color_reply(code, c)),
+                            Some(c) => self.queue_response(&color_reply(code, c)),
                             None => self.color_queries.push(req),
                         }
                     } else if let Some(c) = parse_color_spec(p) {
@@ -1261,9 +1264,7 @@ impl Perform for Terminal {
                     {
                         if sp.len() == 1 && sp[0] == b'?' {
                             match self.colors.ansi(n) {
-                                Some(c) => self
-                                    .responses
-                                    .extend_from_slice(&color_reply(&format!("4;{n}"), c)),
+                                Some(c) => self.queue_response(&color_reply(&format!("4;{n}"), c)),
                                 None => self.color_queries.push(ColorReq::Ansi(n)),
                             }
                         } else if let Some(c) = parse_color_spec(sp) {
@@ -1432,7 +1433,7 @@ impl Perform for Terminal {
                     Some(b) => format!("\x1bP1$r{b}\x1b\\"),
                     None => "\x1bP0$r\x1b\\".to_string(),
                 };
-                self.responses.extend_from_slice(reply.as_bytes());
+                self.queue_response(reply.as_bytes());
             }
             Some(Dcs::Tcap(req)) => {
                 // hex names in, hex name=value pairs out; booleans echo the
@@ -1452,7 +1453,7 @@ impl Perform for Terminal {
                 } else {
                     format!("\x1bP1+r{}\x1b\\", parts.join(";"))
                 };
-                self.responses.extend_from_slice(reply.as_bytes());
+                self.queue_response(reply.as_bytes());
             }
             None => {}
         }
@@ -2352,6 +2353,17 @@ mod tests {
         let mut t = Terminal::new(4, 10);
         feed(&mut t, b"\x1b[c");
         assert_eq!(t.responses, b"\x1b[?62;4;22c");
+    }
+
+    #[test]
+    fn device_replies_are_bounded() {
+        let mut queries = Vec::new();
+        for _ in 0..=MAX_PENDING_RESPONSES / 4 {
+            queries.extend_from_slice(b"\x1b[5n");
+        }
+        let mut t = Terminal::new(4, 10);
+        feed(&mut t, &queries);
+        assert_eq!(t.responses.len(), MAX_PENDING_RESPONSES);
     }
 
     #[test]
