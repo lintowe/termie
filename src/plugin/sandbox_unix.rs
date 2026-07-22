@@ -13,7 +13,7 @@
 
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 /// a plugin process running inside a bwrap jail plus the host ends of its
@@ -51,6 +51,22 @@ impl Drop for Sandboxed {
     }
 }
 
+fn bubblewrap() -> io::Result<PathBuf> {
+    let Some(path) = std::env::var_os("PATH") else {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "bubblewrap is not installed"));
+    };
+    for dir in std::env::split_paths(&path) {
+        if !dir.is_absolute() {
+            continue;
+        }
+        let candidate = dir.join("bwrap");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, "bubblewrap is not installed"))
+}
+
 /// spawn `program args...` inside a bwrap jail, with `dir` as the working
 /// directory and the only writable-free mount the plugin can read, allowing
 /// outbound network when `net` is set. `_moniker` names the container on
@@ -67,7 +83,7 @@ pub fn spawn(
         .strip_prefix(dir)
         .map(|relative| Path::new(PLUGIN_DIR).join(relative))
         .unwrap_or_else(|_| program.to_path_buf());
-    let mut cmd = Command::new("bwrap");
+    let mut cmd = Command::new(bubblewrap()?);
     cmd.args(["--die-with-parent", "--unshare-all", "--new-session", "--clearenv"])
         .args(["--setenv", "PATH", "/usr/bin:/bin"])
         .args(["--setenv", "LANG", "C.UTF-8"])
