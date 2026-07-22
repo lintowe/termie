@@ -10,6 +10,13 @@ use crate::plugin::market::quiet_command;
 
 const RELEASES_URL: &str = "https://api.github.com/repos/zeo/termie/releases/latest";
 
+fn update_curl() -> std::process::Command {
+    let mut command = quiet_command("curl");
+    // -q must stay first so a user's curlrc cannot relax the updater's policy
+    command.args(["-q", "--globoff", "--proto", "=https", "--proto-redir", "=https"]);
+    command
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Update {
     pub version: String,
@@ -78,8 +85,8 @@ pub fn check(on_done: impl FnOnce(Option<Update>) + Send + 'static) {
 }
 
 fn fetch_latest() -> Option<Update> {
-    let out = quiet_command("curl")
-        .args(["-s", "-L", "--max-time", "20", RELEASES_URL])
+    let out = update_curl()
+        .args(["-s", "-L", "--max-time", "20", "--", RELEASES_URL])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -97,21 +104,25 @@ fn asset_name(version: &str) -> Option<String> {
     None
 }
 
+fn release_asset_url_is_safe(version: &str, name: &str, url: &str) -> bool {
+    url == format!("https://github.com/zeo/termie/releases/download/v{version}/{name}")
+}
+
 fn parse_release(text: &str) -> Option<Update> {
     let json = Json::parse(text)?;
     let tag = json.get_str("tag_name")?;
     let version = tag.trim_start_matches('v').to_string();
     parse_triple(&version)?;
     let name = asset_name(&version)?;
-    let release_url = format!("https://github.com/zeo/termie/releases/download/v{version}/");
     let assets = json.get("assets")?.as_array()?;
     let (url, digest) = assets.iter().find_map(|a| {
         if a.get_str("name")? != name {
             return None;
         }
-        let url = a
-            .get_str("browser_download_url")
-            .filter(|url| url.starts_with(&release_url) && url.ends_with(&name))?;
+        let url = a.get_str("browser_download_url")?;
+        if !release_asset_url_is_safe(&version, &name, url) {
+            return None;
+        }
         let digest = a.get_str("digest")?.strip_prefix("sha256:")?;
         if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
@@ -175,16 +186,20 @@ fn download_to_prefix(u: &Update, prefix: Option<&std::path::Path>) -> Result<Pa
     #[cfg(not(target_os = "linux"))]
     let _ = prefix;
     let name = asset_name(&u.version).ok_or("updates aren't available for this platform")?;
+    if !release_asset_url_is_safe(&u.version, &name, &u.url) {
+        return Err("update URL does not match the release asset".into());
+    }
     let dir = fresh_temp_dir()?;
     let path = dir.join(name);
     let fetched = (|| {
-        let out = quiet_command("curl")
+        let out = update_curl()
             .args([
                 "-fsSL",
                 "--max-time",
                 "300",
                 "-o",
                 &path.to_string_lossy(),
+                "--",
                 &u.url,
             ])
             .output()
@@ -442,6 +457,29 @@ mod tests {
     }
 
     #[test]
+    fn updater_curl_ignores_user_config_and_accepts_https_only() {
+        let args: Vec<_> = update_curl()
+            .args(["-fsSL", "--", RELEASES_URL])
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            ["-q", "--globoff", "--proto", "=https", "--proto-redir", "=https", "-fsSL", "--", RELEASES_URL]
+        );
+    }
+
+    #[test]
+    fn release_assets_use_the_exact_official_download_url() {
+        let name = asset_name("1.2.3").unwrap();
+        let url = format!("https://github.com/zeo/termie/releases/download/v1.2.3/{name}");
+        assert!(release_asset_url_is_safe("1.2.3", &name, &url));
+        assert!(!release_asset_url_is_safe("1.2.3", &name, "https://example.com/termie.zip"));
+        assert!(!release_asset_url_is_safe("1.2.3", &name, &format!("{url}?download=1")));
+        assert!(!release_asset_url_is_safe("1.2.3", &name, &format!("{url}#asset")));
+    }
+
+    #[test]
     fn download_verification_rejects_short_and_wrong_payloads() {
         assert_eq!(verify_download(b"error page", &sha256_hex(b"error page")), Err("download incomplete".into()));
         let bytes = vec![0x5a; 1024 * 1024];
@@ -490,7 +528,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_archive_download_verifies_and_installs() {
+    fn linux_archive_install_verifies_and_installs() {
         let work = fresh_temp_dir().unwrap();
         let root = "termie-9.9.9-linux-x86_64";
         let package = work.join("build").join(root);
@@ -517,14 +555,12 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let prefix = work.join("prefix");
-        let archive_bytes = std::fs::read(&archive).unwrap();
-        assert!(archive_bytes.len() >= 1024 * 1024);
         let update = Update {
             version: "9.9.9".into(),
-            url: format!("file://{}", archive.display()),
-            digest: sha256_hex(&archive_bytes),
+            url: String::new(),
+            digest: String::new(),
         };
-        let exe = download_to_prefix(&update, Some(&prefix)).unwrap();
+        let exe = install_linux_archive(&archive, &update, &prefix).unwrap();
         assert_eq!(std::fs::read(exe).unwrap(), payload);
         assert!(prefix.join("share/termie/archive-install").is_file());
         let _ = std::fs::remove_dir_all(work);
