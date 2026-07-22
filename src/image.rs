@@ -333,20 +333,23 @@ fn decode(format: u32, w: u32, h: u32, data: &[u8]) -> Option<Image> {
         return None;
     }
     let px = (w as usize).checked_mul(h as usize)?;
+    let n4 = px.checked_mul(4)?;
+    if n4 > MAX_IMAGE_BYTES {
+        return None;
+    }
     let rgba = match format {
         32 => {
-            let n = px.checked_mul(4)?;
-            if data.len() < n {
+            if data.len() < n4 {
                 return None;
             }
-            data[..n].to_vec()
+            data[..n4].to_vec()
         }
         24 => {
             let n = px.checked_mul(3)?;
             if data.len() < n {
                 return None;
             }
-            let mut v = Vec::with_capacity(px * 4);
+            let mut v = Vec::with_capacity(n4);
             for c in data[..n].chunks_exact(3) {
                 v.extend_from_slice(c);
                 v.push(255);
@@ -445,6 +448,12 @@ mod tests {
         let img = s.get(7).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(img.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn raw_images_cannot_expand_past_the_decoded_budget() {
+        assert!(decode(24, 4097, 4096, &[]).is_none());
+        assert!(decode(32, 4097, 4096, &[]).is_none());
     }
 
     #[test]
