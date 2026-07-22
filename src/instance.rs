@@ -119,17 +119,51 @@ fn decode(bytes: &[u8]) -> Option<LaunchRequest> {
     input.is_empty().then_some(LaunchRequest { args, process_cwd, launch_cwd })
 }
 
-#[cfg(not(windows))]
-fn read_request(stream: &mut impl Read) -> io::Result<LaunchRequest> {
+#[cfg(target_os = "linux")]
+fn read_exact_before_deadline(
+    stream: &mut std::os::unix::net::UnixStream,
+    mut bytes: &mut [u8],
+    deadline: std::time::Instant,
+) -> io::Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "launch request timed out"))?;
+        stream.set_read_timeout(Some(remaining))?;
+        let read = match stream.read(bytes) {
+            Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "launch request timed out"));
+            }
+            result => result?,
+        };
+        if read == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "launch request closed"));
+        }
+        bytes = &mut bytes[read..];
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_request_with_timeout(
+    stream: &mut std::os::unix::net::UnixStream,
+    timeout: std::time::Duration,
+) -> io::Result<LaunchRequest> {
+    let deadline = std::time::Instant::now() + timeout;
     let mut len = [0u8; 4];
-    stream.read_exact(&mut len)?;
+    read_exact_before_deadline(stream, &mut len, deadline)?;
     let len = u32::from_le_bytes(len) as usize;
     if len > MAX_REQUEST {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "launch request is too large"));
     }
     let mut bytes = vec![0u8; len];
-    stream.read_exact(&mut bytes)?;
+    read_exact_before_deadline(stream, &mut bytes, deadline)?;
     decode(&bytes).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid launch request"))
+}
+
+#[cfg(target_os = "linux")]
+fn read_request(stream: &mut std::os::unix::net::UnixStream) -> io::Result<LaunchRequest> {
+    read_request_with_timeout(stream, LAUNCH_IO_TIMEOUT)
 }
 
 fn forward(mut stream: impl Read + Write, request: &LaunchRequest) -> io::Result<()> {
@@ -362,6 +396,7 @@ fn pipe_handle(pipe: &WinPipe) -> windows::Win32::Foundation::HANDLE {
 #[cfg(windows)]
 fn pipe_io(
     pipe: &WinPipe,
+    timeout: std::time::Duration,
     start: impl FnOnce(
         windows::Win32::Foundation::HANDLE,
         &mut windows::Win32::System::IO::OVERLAPPED,
@@ -389,7 +424,7 @@ fn pipe_io(
         return Err(io::Error::other(error.to_string()));
     }
     if pending {
-        match unsafe { WaitForSingleObject(event, LAUNCH_IO_TIMEOUT.as_millis() as u32) } {
+        match unsafe { WaitForSingleObject(event, timeout.as_millis().min(u32::MAX as u128) as u32) } {
             WAIT_OBJECT_0 => {}
             WAIT_TIMEOUT => {
                 unsafe {
@@ -422,11 +457,18 @@ fn pipe_io(
 }
 
 #[cfg(windows)]
-fn read_pipe_exact(pipe: &WinPipe, mut bytes: &mut [u8]) -> io::Result<()> {
+fn read_pipe_exact_before_deadline(
+    pipe: &WinPipe,
+    mut bytes: &mut [u8],
+    deadline: std::time::Instant,
+) -> io::Result<()> {
     use windows::Win32::Storage::FileSystem::ReadFile;
 
     while !bytes.is_empty() {
-        let read = pipe_io(pipe, |handle, operation| unsafe {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "launch request timed out"))?;
+        let read = pipe_io(pipe, remaining, |handle, operation| unsafe {
             ReadFile(handle, Some(bytes), None, Some(operation))
         })? as usize;
         if read == 0 {
@@ -442,7 +484,7 @@ fn write_pipe_all(pipe: &WinPipe, mut bytes: &[u8]) -> io::Result<()> {
     use windows::Win32::Storage::FileSystem::WriteFile;
 
     while !bytes.is_empty() {
-        let written = pipe_io(pipe, |handle, operation| unsafe {
+        let written = pipe_io(pipe, LAUNCH_IO_TIMEOUT, |handle, operation| unsafe {
             WriteFile(handle, Some(bytes), None, Some(operation))
         })? as usize;
         if written == 0 {
@@ -455,14 +497,15 @@ fn write_pipe_all(pipe: &WinPipe, mut bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(windows)]
 fn read_pipe_request(pipe: &WinPipe) -> io::Result<LaunchRequest> {
+    let deadline = std::time::Instant::now() + LAUNCH_IO_TIMEOUT;
     let mut len = [0u8; 4];
-    read_pipe_exact(pipe, &mut len)?;
+    read_pipe_exact_before_deadline(pipe, &mut len, deadline)?;
     let len = u32::from_le_bytes(len) as usize;
     if len > MAX_REQUEST {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "launch request is too large"));
     }
     let mut bytes = vec![0u8; len];
-    read_pipe_exact(pipe, &mut bytes)?;
+    read_pipe_exact_before_deadline(pipe, &mut bytes, deadline)?;
     decode(&bytes).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid launch request"))
 }
 
@@ -590,10 +633,23 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
-        configure_linux_stream_with_timeout(&reader, Duration::from_millis(25)).unwrap();
         writer.write_all(&8u32.to_le_bytes()).unwrap();
         let started = Instant::now();
-        assert!(read_request(&mut reader).is_err());
+        assert!(read_request_with_timeout(&mut reader, Duration::from_millis(25)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn slow_linux_launch_request_uses_one_deadline() {
+        use std::time::{Duration, Instant};
+
+        let (mut reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(&8u32.to_le_bytes()).unwrap();
+        writer.write_all(b"x").unwrap();
+        let started = Instant::now();
+        let error = read_request_with_timeout(&mut reader, Duration::from_millis(25)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
