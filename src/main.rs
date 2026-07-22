@@ -55,6 +55,7 @@ const POOL_TARGET: usize = 3;
 const MAX_WARM_FAILS: usize = 10;
 const MAX_STARTUP_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_LOCAL_PLUGIN_MANIFEST_BYTES: usize = 64 * 1024;
+const MAX_LOCAL_PLUGINS: usize = 128;
 
 type Rect = (f32, f32, f32, f32);
 
@@ -1863,6 +1864,9 @@ fn discover_plugins() -> Vec<Discovered> {
     let states = load_plugin_states();
     let mut out = Vec::new();
     for entry in entries.flatten() {
+        if out.len() == MAX_LOCAL_PLUGINS {
+            break;
+        }
         let dir = entry.path();
         if !dir.is_dir() {
             continue;
@@ -1899,7 +1903,12 @@ fn discover_plugins() -> Vec<Discovered> {
             granted: st.granted,
         });
     }
+    order_discovered_plugins(&mut out);
     out
+}
+
+fn order_discovered_plugins(plugins: &mut [Discovered]) {
+    plugins.sort_unstable_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
 }
 
 /// spawn one plugin, confined to the OS sandbox (windows appcontainer / linux
@@ -11971,6 +11980,26 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovered_plugins_have_a_stable_order() {
+        let plugin = |id: &str| Discovered {
+            manifest: plugin::Manifest::parse(
+                &format!(r#"{{"id":"{id}","entry":{{"cmd":"run"}}}}"#),
+                id,
+            )
+            .unwrap(),
+            program: "run".to_string(),
+            enabled: true,
+            granted: Vec::new(),
+        };
+        let mut plugins = vec![plugin("zebra"), plugin("alpha"), plugin("middle")];
+        order_discovered_plugins(&mut plugins);
+        assert_eq!(
+            plugins.iter().map(|p| p.manifest.id.as_str()).collect::<Vec<_>>(),
+            ["alpha", "middle", "zebra"]
+        );
+    }
 
     #[test]
     fn text_reader_refuses_the_first_byte_over_limit() {
