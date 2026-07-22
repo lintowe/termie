@@ -22,7 +22,15 @@ pub use proto::{DrawCmd, HostEvent, PluginCmd, API_VERSION};
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, SyncSender};
 use std::thread;
+
+const PLUGIN_WRITE_QUEUE_CAP: usize = 64;
+const MAX_HOST_EVENT_BYTES: usize = 64 * 1024;
+
+fn queue_host_event(tx: &SyncSender<Vec<u8>>, line: Vec<u8>) -> bool {
+    line.len() <= MAX_HOST_EVENT_BYTES && tx.try_send(line).is_ok()
+}
 
 /// a message surfaced from a plugin to the event loop (mirrors PtyMsg)
 #[derive(Debug)]
@@ -70,7 +78,7 @@ fn discard_line(reader: &mut impl BufRead) -> std::io::Result<()> {
 /// used to label this plugin's log lines from the reader thread
 pub struct Plugin {
     proc: Proc,
-    writer: Option<Box<dyn Write + Send>>,
+    writer_tx: Option<SyncSender<Vec<u8>>>,
 }
 
 impl Plugin {
@@ -100,9 +108,9 @@ impl Plugin {
         let mut child = cmd.spawn()?;
 
         let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().expect("piped stdout"));
-        let writer = child.stdin.take().map(|w| Box::new(w) as Box<dyn Write + Send>);
+        let writer_tx = child.stdin.take().map(|w| Self::start_writer(Box::new(w)));
         Self::start_reader(id, stdout, on_msg);
-        Ok(Plugin { proc: Proc::Std(child), writer })
+        Ok(Plugin { proc: Proc::Std(child), writer_tx })
     }
 
     /// spawn `program args...` as a plugin confined to the OS sandbox (a
@@ -124,11 +132,11 @@ impl Plugin {
             sb.take_stdout()
                 .ok_or_else(|| std::io::Error::other("sandbox stdout missing"))?,
         );
-        let writer = sb
+        let writer_tx = sb
             .take_stdin()
-            .map(|w| Box::new(w) as Box<dyn Write + Send>);
+            .map(|w| Self::start_writer(Box::new(w)));
         Self::start_reader(id, stdout, on_msg);
-        Ok(Plugin { proc: Proc::Sandbox(sb), writer })
+        Ok(Plugin { proc: Proc::Sandbox(sb), writer_tx })
     }
 
     /// reader thread: parse each line, forward to the event loop. a line that
@@ -177,20 +185,30 @@ impl Plugin {
         });
     }
 
-    /// send a host event to the plugin (newline-delimited). best-effort: a write
-    /// error just means the plugin went away and the reader will report Exited
+    fn start_writer(mut writer: Box<dyn Write + Send>) -> SyncSender<Vec<u8>> {
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PLUGIN_WRITE_QUEUE_CAP);
+        thread::spawn(move || {
+            while let Ok(line) = rx.recv() {
+                if writer.write_all(&line).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+        tx
+    }
+
+    /// queue a host event for the plugin without blocking the ui thread
     pub fn send(&mut self, ev: &HostEvent) {
-        if let Some(w) = self.writer.as_mut() {
+        if let Some(tx) = self.writer_tx.as_ref() {
             let mut line = ev.to_line();
             line.push('\n');
-            let _ = w.write_all(line.as_bytes());
-            let _ = w.flush();
+            let _ = queue_host_event(tx, line.into_bytes());
         }
     }
 
     pub fn kill(&mut self) {
         // closing stdin lets a well-behaved plugin exit cleanly; then ensure it
-        let _ = self.writer.take();
+        let _ = self.writer_tx.take();
         self.proc.kill();
     }
 }
@@ -198,6 +216,15 @@ impl Plugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_event_queue_is_bounded() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        assert!(queue_host_event(&tx, vec![b'x'; MAX_HOST_EVENT_BYTES]));
+        assert!(!queue_host_event(&tx, b"next".to_vec()));
+        let (tx, _rx) = mpsc::sync_channel(1);
+        assert!(!queue_host_event(&tx, vec![b'x'; MAX_HOST_EVENT_BYTES + 1]));
+    }
 
     #[test]
     fn host_event_lines_end_clean() {
