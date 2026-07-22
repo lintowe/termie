@@ -99,8 +99,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: system deps
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq pkg-config libwayland-dev libxkbcommon-dev libx11-dev bubblewrap unzip zip
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 10m apt-get "${apt_options[@]}" update -qq
+          sudo timeout 10m apt-get "${apt_options[@]}" install -y -qq pkg-config libwayland-dev libxkbcommon-dev libx11-dev bubblewrap unzip zip
       - name: minimum rust version
         run: |
           rustup toolchain install 1.89.0 --profile minimal
