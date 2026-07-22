@@ -324,6 +324,10 @@ pub(crate) enum BoundedOutputError {
 #[cfg(windows)]
 pub(crate) struct ProcessTree(Option<windows::Win32::Foundation::HANDLE>);
 
+// job handles have no thread affinity and are closed by their owner
+#[cfg(windows)]
+unsafe impl Send for ProcessTree {}
+
 #[cfg(windows)]
 impl ProcessTree {
     pub(crate) fn attach(child: &std::process::Child) -> Self {

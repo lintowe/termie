@@ -105,14 +105,14 @@ fn queue_write(queue: &InputQueue, bytes: &[u8]) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn systemd_scope_tools() -> Option<&'static (PathBuf, PathBuf)> {
-    static TOOLS: std::sync::OnceLock<Option<(PathBuf, PathBuf)>> = std::sync::OnceLock::new();
+fn systemd_scope_tools() -> Option<&'static (PathBuf, PathBuf, PathBuf)> {
+    static TOOLS: std::sync::OnceLock<Option<(PathBuf, PathBuf, PathBuf)>> = std::sync::OnceLock::new();
     TOOLS
         .get_or_init(|| {
             if !std::path::Path::new("/run/systemd/system").is_dir() {
                 return None;
             }
-            Some((find_in_path("systemd-run")?, find_in_path("timeout")?))
+            Some((find_in_path("systemd-run")?, find_in_path("timeout")?, find_in_path("systemctl")?))
         })
         .as_ref()
 }
@@ -125,13 +125,30 @@ fi
 exec "$@""#;
 
 #[cfg(target_os = "linux")]
-fn isolate_in_user_scope(cmd: &mut CommandBuilder) {
+struct UserScope {
+    systemctl: PathBuf,
+    unit: String,
+}
+
+#[cfg(target_os = "linux")]
+impl UserScope {
+    fn stop(self) {
+        let _ = std::process::Command::new(self.systemctl)
+            .args(["--user", "--no-block", "stop"])
+            .arg(self.unit)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn isolate_in_user_scope(cmd: &mut CommandBuilder) -> Option<UserScope> {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
-    let Some((systemd_run, timeout)) = systemd_scope_tools() else {
-        return;
-    };
+    let (systemd_run, timeout, systemctl) = systemd_scope_tools()?;
     let id = NEXT_SCOPE.fetch_add(1, Ordering::Relaxed);
     let unit = format!("termie-pane-{}-{id}", std::process::id());
     let probe = format!("termie-pane-probe-{}-{id}", std::process::id());
@@ -144,9 +161,10 @@ fn isolate_in_user_scope(cmd: &mut CommandBuilder) {
         timeout.as_os_str().to_owned(),
         systemd_run.as_os_str().to_owned(),
         probe.into(),
-        unit.into(),
+        unit.clone().into(),
     ]);
     cmd.get_argv_mut().extend(command);
+    Some(UserScope { systemctl: systemctl.clone(), unit })
 }
 
 // a prompt hook that emits OSC-133 command lifecycle marks and OSC-7 cwd
@@ -349,6 +367,12 @@ pub struct Pty {
     // write_all from the ui thread would freeze the whole window on a big paste
     writer_queue: Arc<InputQueue>,
     child: Box<dyn Child + Send + Sync>,
+    #[cfg(unix)]
+    process_group: Option<libc::pid_t>,
+    #[cfg(target_os = "linux")]
+    scope: Option<UserScope>,
+    #[cfg(windows)]
+    tree: Option<crate::plugin::market::ProcessTree>,
     // reader is parked until start_reader() spawns the output thread; this lets
     // a pane be built off the main thread and only start emitting once registered
     reader: Option<Box<dyn std::io::Read + Send>>,
@@ -357,7 +381,7 @@ pub struct Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         self.writer_queue.close();
-        let _ = self.child.kill();
+        self.kill();
     }
 }
 
@@ -521,9 +545,15 @@ impl Pty {
 
         // separate panes so pressure kills one workload instead of the whole terminal
         #[cfg(target_os = "linux")]
-        isolate_in_user_scope(&mut cmd);
+        let scope = isolate_in_user_scope(&mut cmd);
 
         let child = pair.slave.spawn_command(cmd)?;
+        #[cfg(unix)]
+        let process_group = child.process_id().and_then(|id| libc::pid_t::try_from(id).ok());
+        #[cfg(windows)]
+        let tree = child.as_raw_handle().map(|handle| {
+            crate::plugin::market::ProcessTree::attach_handle(windows::Win32::Foundation::HANDLE(handle))
+        });
         // close the slave side in the parent so EOF propagates on child exit
         drop(pair.slave);
 
@@ -546,6 +576,12 @@ impl Pty {
             master: pair.master,
             writer_queue,
             child,
+            #[cfg(unix)]
+            process_group,
+            #[cfg(target_os = "linux")]
+            scope,
+            #[cfg(windows)]
+            tree,
             reader: Some(reader),
         })
     }
@@ -614,6 +650,20 @@ impl Pty {
     }
 
     pub fn kill(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(scope) = self.scope.take() {
+            scope.stop();
+        }
+        #[cfg(unix)]
+        if let Some(process_group) = self.process_group.take() {
+            unsafe {
+                let _ = libc::kill(-process_group, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        if let Some(tree) = self.tree.as_mut() {
+            tree.terminate();
+        }
         let _ = self.child.kill();
     }
 }
@@ -737,6 +787,7 @@ impl Pty {
             master: Box::new(handoff_pty::HandoffMaster::new(signal, reference, server)),
             writer_queue,
             child: Box::new(handoff_pty::HandoffChild::new(client)),
+            tree: None,
             reader: Some(Box::new(File::from(reader))),
         }
     }
@@ -883,6 +934,12 @@ impl Pty {
             master: Box::new(null_pty::NullMaster),
             writer_queue,
             child: Box::new(null_pty::NullChild),
+            #[cfg(unix)]
+            process_group: None,
+            #[cfg(target_os = "linux")]
+            scope: None,
+            #[cfg(windows)]
+            tree: None,
             reader: None,
         }
     }
@@ -1014,6 +1071,12 @@ mod tests {
             master: Box::new(null_pty::NullMaster),
             writer_queue: queue.clone(),
             child: Box::new(TrackingChild(killed.clone())),
+            #[cfg(unix)]
+            process_group: None,
+            #[cfg(target_os = "linux")]
+            scope: None,
+            #[cfg(windows)]
+            tree: None,
             reader: None,
         };
         drop(pty);
