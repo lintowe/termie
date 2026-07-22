@@ -129,23 +129,34 @@ pub(crate) fn quiet_command(program: &str) -> Command {
     cmd
 }
 #[cfg(not(windows))]
-pub(crate) fn quiet_command(program: &str) -> Command {
-    let path = Path::new(program);
-    if path.is_absolute() {
-        return Command::new(path);
+fn unix_helper_path(program: &str, path: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let program_path = Path::new(program);
+    if program_path.is_absolute() {
+        return Some(program_path.to_path_buf());
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = path {
         for dir in std::env::split_paths(&path) {
             if !dir.is_absolute() {
                 continue;
             }
             let candidate = dir.join(program);
             if candidate.is_file() {
-                return Command::new(candidate);
+                return Some(candidate);
             }
         }
     }
-    Command::new("")
+    for dir in ["/usr/bin", "/bin"] {
+        let candidate = Path::new(dir).join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub(crate) fn quiet_command(program: &str) -> Command {
+    Command::new(unix_helper_path(program, std::env::var_os("PATH")).unwrap_or_default())
 }
 
 fn archive_path_is_safe(path: &str) -> bool {
@@ -754,6 +765,8 @@ mod tests {
     #[test]
     fn unix_helper_resolution_requires_an_absolute_path() {
         assert_eq!(quiet_command("/bin/sh").get_program(), std::ffi::OsStr::new("/bin/sh"));
+        assert!(unix_helper_path("sh", None).is_some());
+        assert_eq!(unix_helper_path("termie-helper-that-does-not-exist", None), None);
         assert_eq!(quiet_command("termie-helper-that-does-not-exist").get_program(), std::ffi::OsStr::new(""));
     }
 
