@@ -143,14 +143,18 @@ impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
         // pipe A: console host reads its VT input from a_read, termie writes
         // keystrokes into a_write. pipe B: console host writes rendered VT into
         // b_write, termie reads from b_read
+        if input.is_null() || output.is_null() {
+            return E_FAIL;
+        }
         let (mut a_read, mut a_write) = (HANDLE::default(), HANDLE::default());
         let (mut b_read, mut b_write) = (HANDLE::default(), HANDLE::default());
         unsafe {
-            if CreatePipe(&mut a_read, &mut a_write, None, 0).is_err()
-                || CreatePipe(&mut b_read, &mut b_write, None, 0).is_err()
-                || input.is_null()
-                || output.is_null()
-            {
+            if CreatePipe(&mut a_read, &mut a_write, None, 0).is_err() {
+                return E_FAIL;
+            }
+            if CreatePipe(&mut b_read, &mut b_write, None, 0).is_err() {
+                let _ = CloseHandle(a_read);
+                let _ = CloseHandle(a_write);
                 return E_FAIL;
             }
             // hand the console host its pipe ends. these are [out] system_handle
