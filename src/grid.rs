@@ -3,6 +3,9 @@ use std::collections::VecDeque;
 
 use crate::color::Color;
 
+const MAX_LINKS: usize = 4096;
+const MAX_LINK_BYTES: usize = 4096;
+
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum UnderlineStyle {
     #[default]
@@ -1542,10 +1545,13 @@ impl Grid {
     }
 
     fn intern_link(&mut self, uri: &str) -> u16 {
+        if uri.len() > MAX_LINK_BYTES {
+            return 0;
+        }
         if let Some(i) = self.links.iter().position(|l| l == uri) {
             return i as u16;
         }
-        if self.links.len() >= u16::MAX as usize {
+        if self.links.len() >= MAX_LINKS {
             return 0;
         }
         self.links.push(uri.to_string());
@@ -2163,6 +2169,19 @@ mod tests {
         assert_eq!(e, 4 + "http://a.com/x".len());
         // cursor over the leading "see" is not a link
         assert!(g.url_at(0, 1).is_none());
+    }
+
+    #[test]
+    fn hyperlink_table_and_targets_are_bounded() {
+        let mut g = Grid::new(2, 8);
+        g.set_link(Some(&"x".repeat(MAX_LINK_BYTES + 1)));
+        assert_eq!(g.cursor.link, 0);
+        for i in 0..MAX_LINKS - 1 {
+            g.set_link(Some(&format!("https://example.test/{i}")));
+        }
+        assert_eq!(g.links.len(), MAX_LINKS);
+        g.set_link(Some("https://example.test/overflow"));
+        assert_eq!(g.cursor.link, 0);
     }
 
     #[test]

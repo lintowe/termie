@@ -727,6 +727,24 @@ fn notification_text(parts: &[&[u8]]) -> String {
     out
 }
 
+fn osc8_uri(parts: &[&[u8]]) -> Option<String> {
+    const MAX_URI_BYTES: usize = 4096;
+    let len = parts.iter().enumerate().try_fold(0usize, |len, (i, part)| {
+        len.checked_add(part.len())?.checked_add(usize::from(i > 0))
+    })?;
+    if len > MAX_URI_BYTES {
+        return None;
+    }
+    let mut uri = Vec::with_capacity(len);
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            uri.push(b';');
+        }
+        uri.extend_from_slice(part);
+    }
+    Some(String::from_utf8_lossy(&uri).into_owned())
+}
+
 fn param_at(params: &Params, idx: usize, default: u16) -> u16 {
     params
         .iter()
@@ -1184,12 +1202,7 @@ impl Perform for Terminal {
             b"8" => {
                 // OSC 8 ; params ; URI  — an empty URI ends the current link;
                 // rejoin fields past the id in case the URI itself contains ';'
-                let uri = params.get(2..).map(|rest| {
-                    rest.iter()
-                        .map(|p| String::from_utf8_lossy(p))
-                        .collect::<Vec<_>>()
-                        .join(";")
-                });
+                let uri = params.get(2..).and_then(osc8_uri);
                 self.grid.set_link(uri.as_deref());
             }
             b"52" => {
@@ -1877,6 +1890,17 @@ mod tests {
         assert_eq!(t.grid.lines[0][3].link, id); // 'k' of Link
         assert_eq!(t.grid.link_uri(id), Some("https://example.com"));
         assert_eq!(t.grid.lines[0][4].link, 0); // 'X' after the link ended
+    }
+
+    #[test]
+    fn osc8_rejects_an_oversized_uri() {
+        let mut sequence = b"\x1b]8;;".to_vec();
+        sequence.extend(std::iter::repeat_n(b'x', 4097));
+        sequence.extend_from_slice(b"\x1b\\Link");
+        let mut t = Terminal::new(2, 20);
+        feed(&mut t, &sequence);
+        assert_eq!(t.grid.lines[0][0].link, 0);
+        assert_eq!(t.grid.links.len(), 1);
     }
 
     #[test]
