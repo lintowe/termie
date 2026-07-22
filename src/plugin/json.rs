@@ -333,13 +333,46 @@ impl Parser<'_> {
 
     fn number(&mut self) -> Option<Json> {
         let start = self.i;
-        while self.i < self.b.len()
-            && matches!(self.b[self.i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
-        {
+        if self.b.get(self.i) == Some(&b'-') {
             self.i += 1;
         }
+
+        match self.b.get(self.i)? {
+            b'0' => self.i += 1,
+            b'1'..=b'9' => {
+                self.i += 1;
+                self.consume_digits();
+            }
+            _ => return None,
+        }
+
+        if self.b.get(self.i) == Some(&b'.') {
+            self.i += 1;
+            if !matches!(self.b.get(self.i), Some(b'0'..=b'9')) {
+                return None;
+            }
+            self.consume_digits();
+        }
+
+        if matches!(self.b.get(self.i), Some(b'e' | b'E')) {
+            self.i += 1;
+            if matches!(self.b.get(self.i), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
+            if !matches!(self.b.get(self.i), Some(b'0'..=b'9')) {
+                return None;
+            }
+            self.consume_digits();
+        }
+
         let s = std::str::from_utf8(&self.b[start..self.i]).ok()?;
         s.parse::<f64>().ok().map(Json::Num)
+    }
+
+    fn consume_digits(&mut self) {
+        while matches!(self.b.get(self.i), Some(b'0'..=b'9')) {
+            self.i += 1;
+        }
     }
 }
 
@@ -401,6 +434,17 @@ mod tests {
         assert!(Json::parse("\"unterminated").is_none());
         assert!(Json::parse("[1,2,").is_none());
         assert!(Json::parse("").is_none());
+    }
+
+    #[test]
+    fn enforces_json_number_grammar() {
+        for src in ["0", "-0", "10", "-12", "3.5", "1e9", "-2.5E-3"] {
+            assert!(Json::parse(src).is_some(), "{src}");
+        }
+
+        for src in ["+1", "01", "-01", "1.", "1e", "1e+", "-.1", ".1"] {
+            assert!(Json::parse(src).is_none(), "{src}");
+        }
     }
 
     #[test]
