@@ -53,6 +53,7 @@ impl Proc {
         match self {
             Proc::Std(c) => {
                 let _ = c.kill();
+                let _ = c.wait();
             }
             Proc::Sandbox(s) => s.kill(),
             #[cfg(test)]
@@ -238,6 +239,19 @@ mod tests {
         };
         drop(plugin);
         assert!(killed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn killing_standard_plugin_reaps_its_child() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+        let mut proc = Proc::Std(child);
+        proc.kill();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
     }
 
     #[test]
