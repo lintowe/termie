@@ -1,7 +1,7 @@
 use std::env;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 
 use anyhow::Result;
@@ -14,6 +14,29 @@ const MAX_CAPTURE_BYTES: u64 = 64 * 1024 * 1024;
 
 fn capture_len(written: u64, available: usize) -> usize {
     MAX_CAPTURE_BYTES.saturating_sub(written).min(available as u64) as usize
+}
+
+struct Capture {
+    file: Option<std::fs::File>,
+    written: u64,
+}
+
+fn output_capture() -> Option<Arc<Mutex<Capture>>> {
+    static CAPTURE: OnceLock<Option<Arc<Mutex<Capture>>>> = OnceLock::new();
+    CAPTURE
+        .get_or_init(|| {
+            let path = std::env::var_os("TERMIE_CAPTURE")?;
+            let written = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            (written < MAX_CAPTURE_BYTES).then(|| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .ok()
+                    .map(|file| Arc::new(Mutex::new(Capture { file: Some(file), written })))
+            })?
+        })
+        .clone()
 }
 
 struct InputQueue {
@@ -534,19 +557,7 @@ impl Pty {
         };
         // optional raw-output capture for debugging a rendering issue, capped at 64 MiB
         // replay it through `termie --termview --file <path>` to reproduce exactly
-        let mut capture = std::env::var_os("TERMIE_CAPTURE").and_then(|path| {
-            let written = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
-            (written < MAX_CAPTURE_BYTES)
-                .then(|| {
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                        .ok()
-                        .map(|file| (file, written))
-                })
-                .flatten()
-        });
+        let capture = output_capture();
         thread::spawn(move || {
             // a larger read means fewer, fatter UserEvent::Pty hops under heavy
             // streaming, cutting the fixed per-event handler cost (find_pane walk,
@@ -559,14 +570,17 @@ impl Pty {
                         break;
                     }
                     Ok(n) => {
-                        if let Some((file, written)) = capture.as_mut() {
-                            let captured = capture_len(*written, n);
-                            if captured == 0 || file.write_all(&buf[..captured]).is_err() {
-                                capture = None;
-                            } else {
-                                *written += captured as u64;
-                                if *written == MAX_CAPTURE_BYTES {
-                                    capture = None;
+                        if let Some(capture) = &capture {
+                            let mut capture = capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            let captured = capture_len(capture.written, n);
+                            if let Some(file) = capture.file.as_mut() {
+                                if captured == 0 || file.write_all(&buf[..captured]).is_err() {
+                                    capture.file = None;
+                                } else {
+                                    capture.written += captured as u64;
+                                    if capture.written == MAX_CAPTURE_BYTES {
+                                        capture.file = None;
+                                    }
                                 }
                             }
                         }
@@ -969,7 +983,8 @@ mod tests {
     #[test]
     fn capture_stops_at_its_file_size_limit() {
         assert_eq!(capture_len(0, 12), 12);
-        assert_eq!(capture_len(MAX_CAPTURE_BYTES - 1, 12), 1);
+        let first = capture_len(0, MAX_CAPTURE_BYTES as usize - 1);
+        assert_eq!(capture_len(first as u64, 12), 1);
         assert_eq!(capture_len(MAX_CAPTURE_BYTES, 12), 0);
     }
 
