@@ -631,33 +631,50 @@ pub fn install(entry: &Entry, plugins_dir: &Path, temp_dir: &Path) -> Result<Man
     if !id_is_safe(&entry.id) {
         return Err(format!("unsafe plugin id {:?}", entry.id));
     }
-    let work = temp_dir.join(format!("termie-install-{}", entry.id));
+    let work = fresh_work_dir(temp_dir, &entry.id)?;
+    let result = (|| {
+        let archive = work.join("plugin.zip");
+        let unpack = work.join("unpack");
+        std::fs::create_dir(&unpack).map_err(|e| format!("unpack dir: {e}"))?;
+
+        // download (authenticated via gh for the private catalog repo, else curl)
+        let bytes = fetch_bytes(&entry.url, MAX_ARCHIVE_BYTES)
+            .map_err(|e| format!("download failed: {e}"))?;
+        std::fs::write(&archive, &bytes).map_err(|e| format!("write archive: {e}"))?;
+
+        unpack_archive(&archive, &unpack)?;
+        reject_symlinks(&unpack)?;
+
+        // the archive may wrap its files in a top dir; find the dir containing
+        // plugin.json (the archive root or exactly one nested dir)
+        let root = find_manifest_root(&unpack).ok_or("archive has no plugin.json")?;
+        let text = read_manifest(&root.join("plugin.json"))?;
+        let manifest = Manifest::parse(&text, &entry.id)
+            .ok_or_else(|| format!("manifest invalid or id != {:?}", entry.id))?;
+
+        let dest = plugins_dir.join(&entry.id);
+        crate::ensure_user_dir(plugins_dir).map_err(|e| format!("plugins dir: {e}"))?;
+        replace_plugin_dir(&root, &dest, &entry.id).map_err(|e| format!("install move: {e}"))?;
+        Ok(manifest)
+    })();
     let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|e| format!("temp dir: {e}"))?;
-    let archive = work.join("plugin.zip");
-    let unpack = work.join("unpack");
-    std::fs::create_dir_all(&unpack).map_err(|e| format!("unpack dir: {e}"))?;
+    result
+}
 
-    // download (authenticated via gh for the private catalog repo, else curl)
-    let bytes = fetch_bytes(&entry.url, MAX_ARCHIVE_BYTES)
-        .map_err(|e| format!("download failed: {e}"))?;
-    std::fs::write(&archive, &bytes).map_err(|e| format!("write archive: {e}"))?;
-
-    unpack_archive(&archive, &unpack)?;
-    reject_symlinks(&unpack)?;
-
-    // the archive may wrap its files in a top dir; find the dir containing
-    // plugin.json (the archive root or exactly one nested dir)
-    let root = find_manifest_root(&unpack).ok_or("archive has no plugin.json")?;
-    let text = read_manifest(&root.join("plugin.json"))?;
-    let manifest = Manifest::parse(&text, &entry.id)
-        .ok_or_else(|| format!("manifest invalid or id != {:?}", entry.id))?;
-
-    let dest = plugins_dir.join(&entry.id);
-    crate::ensure_user_dir(plugins_dir).map_err(|e| format!("plugins dir: {e}"))?;
-    replace_plugin_dir(&root, &dest, &entry.id).map_err(|e| format!("install move: {e}"))?;
-    let _ = std::fs::remove_dir_all(&work);
-    Ok(manifest)
+fn fresh_work_dir(temp_dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..32 {
+        let path = temp_dir.join(format!("termie-install-{id}-{}-{nonce}-{attempt}", std::process::id()));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("temp dir: {error}")),
+        }
+    }
+    Err("couldn't create a unique plugin install directory".into())
 }
 
 /// remove an installed plugin's directory. id is validated so a bad id can't
@@ -990,6 +1007,17 @@ mod tests {
         let dir = std::env::temp_dir();
         assert!(remove("../etc", &dir).is_err());
         assert!(remove("", &dir).is_err());
+    }
+
+    #[test]
+    fn plugin_installs_get_distinct_work_directories() {
+        let base = temp_subdir("work-dir");
+        let first = fresh_work_dir(&base, "pet").expect("first work directory");
+        let second = fresh_work_dir(&base, "pet").expect("second work directory");
+        assert_ne!(first, second);
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     fn temp_subdir(tag: &str) -> std::path::PathBuf {
