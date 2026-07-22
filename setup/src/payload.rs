@@ -11,8 +11,13 @@ pub struct Entry {
 
 impl Entry {
     pub fn decompress(&self) -> Result<Vec<u8>, String> {
-        miniz_oxide::inflate::decompress_to_vec(self.comp)
-            .map_err(|e| format!("decompress {}: {e:?}", self.name))
+        let limit = usize::try_from(self.raw_len)
+            .map_err(|_| format!("payload {} is too large for this platform", self.name))?;
+        let bytes = miniz_oxide::inflate::decompress_to_vec_with_limit(self.comp, limit)
+            .map_err(|e| format!("decompress {}: {e:?}", self.name))?;
+        (bytes.len() as u64 == self.raw_len)
+            .then_some(bytes)
+            .ok_or_else(|| format!("payload {} has an unexpected size", self.name))
     }
 }
 
@@ -59,4 +64,20 @@ fn parse(bytes: &'static [u8]) -> Vec<Entry> {
 /// total bytes on disk once installed, for the ARP EstimatedSize entry
 pub fn installed_bytes(entries: &[Entry]) -> u64 {
     entries.iter().map(|e| e.raw_len).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decompression_respects_the_recorded_size() {
+        let compressed = miniz_oxide::deflate::compress_to_vec(b"termie", 8);
+        let compressed = Box::leak(compressed.into_boxed_slice());
+        let entry = Entry { name: "termie.exe".into(), raw_len: 6, comp: compressed };
+        assert_eq!(entry.decompress().unwrap(), b"termie");
+
+        let oversized = Entry { name: "termie.exe".into(), raw_len: 5, comp: compressed };
+        assert!(oversized.decompress().is_err());
+    }
 }
