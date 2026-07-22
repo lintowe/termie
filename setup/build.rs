@@ -23,7 +23,8 @@ fn main() {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     if let Ok(dir) = std::env::var("TERMIE_PAYLOAD_DIR") {
         let root = PathBuf::from(&dir);
-        collect(&root, &root, &mut entries);
+        collect(&root, &root, &mut entries).unwrap_or_else(|err| panic!("invalid payload staging directory: {err}"));
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         assert!(
             entries.iter().any(|(n, _)| n == "termie.exe"),
             "TERMIE_PAYLOAD_DIR must contain termie.exe at its root"
@@ -53,22 +54,28 @@ fn main() {
     println!("cargo:rustc-env=TERMIE_APP_VERSION={ver}");
 }
 
-fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
+fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|err| format!("read {}: {err}", dir.display()))?;
+    for e in rd {
+        let e = e.map_err(|err| format!("read entry in {}: {err}", dir.display()))?;
         let p = e.path();
-        if p.is_dir() {
-            collect(root, &p, out);
-        } else if p.file_name().is_some_and(|n| n != "VERSION") {
+        let ty = e.file_type().map_err(|err| format!("inspect {}: {err}", p.display()))?;
+        if ty.is_symlink() {
+            return Err(format!("payload staging must not contain symlinks: {}", p.display()));
+        }
+        if ty.is_dir() {
+            collect(root, &p, out)?;
+        } else if ty.is_file() && p.file_name().is_some_and(|n| n != "VERSION") {
             let rel = p
                 .strip_prefix(root)
-                .unwrap()
+                .map_err(|_| format!("payload entry escaped staging directory: {}", p.display()))?
                 .to_string_lossy()
                 .replace('\\', "/");
-            let bytes = std::fs::read(&p).expect("read payload file");
+            let bytes = std::fs::read(&p).map_err(|err| format!("read {}: {err}", p.display()))?;
             out.push((rel, bytes));
+        } else if !ty.is_file() {
+            return Err(format!("payload staging contains unsupported entry: {}", p.display()));
         }
     }
+    Ok(())
 }
