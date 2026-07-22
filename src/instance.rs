@@ -238,9 +238,11 @@ fn claim_linux(request: &LaunchRequest) -> Claim {
 
 #[cfg(target_os = "linux")]
 fn serve_linux(listener: std::os::unix::net::UnixListener, send: &mut impl FnMut(LaunchRequest) -> bool) {
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else {
-            break;
+    loop {
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
         };
         if !matches!(linux_peer_is_user(&stream), Ok(true)) {
             continue;
