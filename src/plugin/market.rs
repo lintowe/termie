@@ -330,6 +330,19 @@ fn bounded_output_with_deadline(
     limit: usize,
     timeout: Duration,
 ) -> Result<Output, BoundedOutputError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -358,14 +371,14 @@ fn bounded_output_with_deadline(
             match stdout_rx.try_recv() {
                 Ok(Ok(bytes)) => stdout = Some(bytes),
                 Ok(Err(error)) => {
-                    let _ = child.kill();
+                    kill_helper(&mut child);
                     let _ = child.wait();
                     let _ = stdout_task.join();
                     let _ = stderr_task.join();
                     return Err(error);
                 }
                 Err(TryRecvError::Disconnected) => {
-                    let _ = child.kill();
+                    kill_helper(&mut child);
                     let _ = child.wait();
                     let _ = stdout_task.join();
                     let _ = stderr_task.join();
@@ -378,7 +391,7 @@ fn bounded_output_with_deadline(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                let _ = child.kill();
+                kill_helper(&mut child);
                 let _ = child.wait();
                 let _ = stdout_task.join();
                 let _ = stderr_task.join();
@@ -388,7 +401,7 @@ fn bounded_output_with_deadline(
                 )));
             }
             Err(error) => {
-                let _ = child.kill();
+                kill_helper(&mut child);
                 let _ = child.wait();
                 let _ = stdout_task.join();
                 let _ = stderr_task.join();
@@ -408,6 +421,14 @@ fn bounded_output_with_deadline(
         .map_err(|_| BoundedOutputError::Io(std::io::Error::other("stderr reader panicked")))?
         .map_err(BoundedOutputError::Io)?;
     Ok(Output { status, stdout, stderr })
+}
+
+fn kill_helper(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
 }
 
 fn bounded_archive_metadata(command: &mut Command) -> Result<Output, String> {
@@ -733,6 +754,17 @@ mod tests {
         command.args(["-c", "printf ready; sleep 5"]);
         let result = bounded_output_with_deadline(&mut command, 1024, std::time::Duration::from_millis(50));
         assert!(matches!(result, Err(BoundedOutputError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_output_kills_children_that_hold_its_pipes_open() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 5 & wait"]);
+        let started = std::time::Instant::now();
+        let result = bounded_output_with_deadline(&mut command, 1024, std::time::Duration::from_millis(50));
+        assert!(matches!(result, Err(BoundedOutputError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[cfg(target_os = "linux")]
