@@ -11314,6 +11314,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Plugin { id, msg, _permit } => match msg {
                 plugin::PluginMsg::Cmd(cmd) => self.handle_plugin_cmd(id, cmd),
                 plugin::PluginMsg::Exited => {
+                    if let Some(plugin) = self.plugins.get_mut(id) {
+                        plugin.kill();
+                    }
                     // drop this plugin's widgets + bus subscriptions so a dead
                     // plugin doesn't linger. the slot in `plugins`/`plugin_ids`
                     // stays (indices must stay stable as bus/widget keys)
