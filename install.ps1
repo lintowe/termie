@@ -4,7 +4,7 @@
 #         (flags: -NoBuild  -NoPath  -InstallDir <path>)
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\termie'),
+    [string]$InstallDir = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\termie'),
     [switch]$NoBuild,
     [switch]$NoPath
 )
@@ -90,14 +90,14 @@ $ws = New-Object -ComObject WScript.Shell
 function New-TermieShortcut([string]$lnk) {
     $sc = $ws.CreateShortcut($lnk)
     $sc.TargetPath = $destExe
-    $sc.WorkingDirectory = $env:USERPROFILE
+    $sc.WorkingDirectory = [Environment]::GetFolderPath('UserProfile')
     $sc.Description = 'termie - terminal'
     if ($icoPath) { $sc.IconLocation = $icoPath }
     $sc.Save()
 }
-$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\termie.lnk'
+$startMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'termie.lnk'
 New-TermieShortcut $startMenu
-$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'termie.lnk'
+$desktop = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'termie.lnk'
 New-TermieShortcut $desktop
 
 # 5. add install dir to the user PATH (so `termie` works from any shell)

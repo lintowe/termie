@@ -2,7 +2,7 @@
 # usage:  powershell -ExecutionPolicy Bypass -File uninstall.ps1
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\termie')
+    [string]$InstallDir = (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\termie')
 )
 $ErrorActionPreference = 'Continue'
 Write-Host "==> uninstalling termie" -ForegroundColor Cyan
@@ -14,8 +14,8 @@ Get-Process termie -ErrorAction SilentlyContinue |
 Start-Sleep -Milliseconds 200
 
 # shortcuts
-$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\termie.lnk'
-$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'termie.lnk'
+$startMenu = Join-Path ([Environment]::GetFolderPath('Programs')) 'termie.lnk'
+$desktop = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'termie.lnk'
 foreach ($lnk in @($startMenu, $desktop)) {
     if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "    removed $lnk" }
 }
