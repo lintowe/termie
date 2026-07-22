@@ -886,6 +886,21 @@ pub fn local_hm() -> String {
     format!("{h:02}:{m:02}")
 }
 
+fn web_url_is_safe(url: &str) -> bool {
+    let rest = if url.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://")) {
+        &url[7..]
+    } else if url.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://")) {
+        &url[8..]
+    } else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    !host.is_empty()
+        && !host.starts_with(':')
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+}
+
 /// open an http(s) URL in the default browser via the shell. the scheme is
 /// re-checked here so only web links can ever be launched, never a file path
 /// or a custom protocol handler that could start an arbitrary app
@@ -894,7 +909,7 @@ pub fn open_url(url: &str) {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::PCWSTR;
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    if !web_url_is_safe(url) {
         return;
     }
     let verb: Vec<u16> = "open\0".encode_utf16().collect();
@@ -915,7 +930,7 @@ pub fn open_url(url: &str) {
 /// re-checked here so only web links can ever be launched
 #[cfg(unix)]
 pub fn open_url(url: &str) {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    if !web_url_is_safe(url) {
         return;
     }
     let _ = std::process::Command::new("xdg-open")
@@ -2108,7 +2123,7 @@ mod tests {
         kwin_hide_quake_script, kwin_drag_script, kwin_keep_above_script, kwin_quake_script,
         launcher_progress_properties, parse_kde_terminal_snapshot, parse_kwin_drag_snapshot,
         parse_portal_color_scheme, read_limited, read_monitor_line, terminal_list_with_termie,
-        ClipboardRead, MAX_CLIPBOARD_TEXT_BYTES, MAX_DESKTOP_HELPER_OUTPUT_BYTES,
+        web_url_is_safe, ClipboardRead, MAX_CLIPBOARD_TEXT_BYTES, MAX_DESKTOP_HELPER_OUTPUT_BYTES,
     };
 
     #[test]
@@ -2122,6 +2137,19 @@ mod tests {
     fn integration_reader_rejects_the_first_byte_over_limit() {
         assert_eq!(read_limited(std::io::Cursor::new(b"abc"), 3).expect("read"), Some(b"abc".to_vec()));
         assert_eq!(read_limited(std::io::Cursor::new(b"abcd"), 3).expect("read"), None);
+    }
+
+    #[test]
+    fn web_url_gate_allows_normal_web_urls_only() {
+        assert!(web_url_is_safe("https://example.com/path?q=one#part"));
+        assert!(web_url_is_safe("HTTP://EXAMPLE.COM"));
+        assert!(!web_url_is_safe("file:///tmp/nope"));
+        assert!(!web_url_is_safe("https:///missing-host"));
+        assert!(!web_url_is_safe("https://user@"));
+        assert!(!web_url_is_safe("https://:443"));
+        assert!(!web_url_is_safe("https://example.com\nfile:///tmp/nope"));
+        assert!(!web_url_is_safe("https://example.com/a b"));
+        assert!(!web_url_is_safe("https:\\\\example.com"));
     }
 
     #[test]
