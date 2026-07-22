@@ -112,7 +112,7 @@ jobs:
       - name: bubblewrap capability
         id: bubblewrap
         run: |
-          if bwrap --unshare-all --ro-bind /usr /usr --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp -- /bin/true; then
+          if bwrap --unshare-all --ro-bind /usr /usr --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp -- /usr/bin/true; then
             echo "supported=true" >> "$GITHUB_OUTPUT"
           else
             echo "supported=false" >> "$GITHUB_OUTPUT"
