@@ -3853,6 +3853,7 @@ fn pane_window(window: Option<Arc<Window>>, renderer: Option<Renderer>, tabs: Ve
 
 struct App {
     proxy: EventLoopProxy<UserEvent>,
+    pty_output_budget: Arc<EventBudget>,
     /// this process's parsed command line (always-new-window: one per process)
     cli: CliArgs,
     /// an inbound default-terminal session waiting to become tab one
@@ -4066,6 +4067,7 @@ impl App {
         let kwin_drag_bridge = win::KwinDragBridge::new(proxy.clone());
         App {
             proxy,
+            pty_output_budget: EventBudget::new(MAX_PENDING_PTY_OUTPUT_EVENTS),
             kitty_demo_pending: cli.kitty_demo,
             cli,
             #[cfg(windows)]
@@ -4509,7 +4511,7 @@ impl App {
     fn start_reader(&self, pane: &mut Pane) {
         let proxy = self.proxy.clone();
         let id = pane.id;
-        let budget = EventBudget::new(MAX_PENDING_PTY_OUTPUT_EVENTS);
+        let budget = Arc::clone(&self.pty_output_budget);
         pane.pty.start_reader(move |msg| match msg {
             PtyMsg::Output(b) => {
                 let permit = budget.acquire();
