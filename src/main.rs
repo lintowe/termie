@@ -1,5 +1,5 @@
 // no extra console window in release; keep one in debug for logs
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(not(debug_assertions), not(feature = "microbench")), windows_subsystem = "windows")]
 
 mod a11y;
 mod apc;
@@ -2550,6 +2550,9 @@ fn monitor_inner_limit(
 
 /// update the live resize ceiling after a window crosses onto another screen
 fn constrain_window_to_monitor(window: &Window) {
+    if window.is_maximized() || window.fullscreen().is_some() {
+        return;
+    }
     let Some(monitor) = window.current_monitor().or_else(|| window.primary_monitor()) else {
         return;
     };
@@ -4382,6 +4385,7 @@ impl App {
         ));
         self.pw.window = Some(window.clone());
         self.pw.renderer = Some(renderer);
+        self.pw.maximized = restore_max;
 
         self.pw.active_tab = 0;
         // register the global quake hotkey once (opt-in via the quake_key setting)
@@ -8154,12 +8158,7 @@ impl App {
                     w.set_minimized(true);
                 }
             }
-            Hot::Maximize => {
-                self.pw.maximized = !self.pw.maximized;
-                if let Some(w) = &self.pw.window {
-                    w.set_maximized(self.pw.maximized);
-                }
-            }
+            Hot::Maximize => self.toggle_maximized(),
             Hot::Close => {
                 if self.config.close_action == CloseAction::Minimize {
                     if let Some(w) = &self.pw.window {
@@ -8344,6 +8343,15 @@ impl App {
         // persist whenever a setting changed
         if is_settings_hot(hot) {
             self.save_config();
+        }
+    }
+
+    fn toggle_maximized(&mut self) {
+        if let Some(window) = self.pw.window.as_ref() {
+            self.pw.maximized = !window.is_maximized();
+            window.set_maximized(self.pw.maximized);
+            self.mark_session_dirty();
+            self.redraw();
         }
     }
 
@@ -8547,10 +8555,11 @@ impl App {
         if self.session_ephemeral {
             return;
         }
-        // remember the bounds while they're real, so a save that fires while
-        // minimized still has something good to persist
-        if let Some(b) = self.live_window_bounds() {
-            self.last_window_bounds = Some(b);
+        // live resize can deliver hundreds of events; capture once when it settles
+        if self.resize_settle.is_none()
+            && let Some(bounds) = self.live_window_bounds()
+        {
+            self.last_window_bounds = Some(bounds);
         }
         self.session_dirty = true;
         self.session_flush_at = Some(Instant::now() + Duration::from_millis(750));
@@ -10472,7 +10481,6 @@ impl App {
                             self.redraw();
                         }
                         Some(Hit::TitleBar) => {
-                            // double-click the empty title bar opens a new tab
                             let now = Instant::now();
                             let dbl = self
                                 .last_click
@@ -10484,7 +10492,7 @@ impl App {
                                 .unwrap_or(false);
                             if dbl {
                                 self.last_click = None;
-                                self.new_tab();
+                                self.toggle_maximized();
                             } else {
                                 self.last_click = Some((now, cx as f64, cy as f64));
                                 if let Some(w) = &self.pw.window {
@@ -11577,9 +11585,7 @@ impl ApplicationHandler<UserEvent> for App {
                 state, button, ..
             } => self.on_mouse_input(state, button, event_loop),
             WindowEvent::Resized(size) => {
-                if let Some(window) = self.pw.window.as_ref() {
-                    constrain_window_to_monitor(window);
-                }
+                self.pw.maximized = self.pw.window.as_ref().is_some_and(|window| window.is_maximized());
                 // reflow on a width change moves cell coordinates, so a stale
                 // selection would highlight the wrong cells
                 self.selection = None;
@@ -11804,6 +11810,7 @@ impl ApplicationHandler<UserEvent> for App {
             if t.elapsed() >= Duration::from_millis(90) {
                 self.resize_settle = None;
                 self.relayout_all();
+                self.mark_session_dirty();
                 self.redraw();
             } else {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(t + Duration::from_millis(90)));
