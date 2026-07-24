@@ -33,7 +33,7 @@ windows = { version = "0.62.2", features = [
 [build-dependencies]
 miniz_oxide = "0.8"
 embed-manifest = "1.5.0"
-embed-resource = "2.5"
+embed-resource = "3.0"
 
 [profile.release]
 opt-level = "s"
